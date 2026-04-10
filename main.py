@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DisableScreen — Multi-display management menu bar app."""
+"""DisableScreen — Multi-display management menu bar app (window-based popup)."""
 
 import AppKit
 import objc
@@ -8,22 +8,22 @@ import logging
 import subprocess
 from pathlib import Path
 from Quartz import (
-    CGDisplayIsBuiltin, CGGetOnlineDisplayList, CGDisplayBounds,
+    CGDisplayIsBuiltin, CGGetOnlineDisplayList,
     CGDisplayCopyAllDisplayModes, CGDisplaySetDisplayMode,
     CGDisplayCopyDisplayMode, CGDisplayModeGetWidth,
     CGDisplayModeGetHeight, CGDisplayModeGetRefreshRate,
 )
 from AppKit import (
-    NSApp, NSApplication, NSStatusBar, NSMenu, NSMenuItem,
-    NSScreen, NSColor, NSImage, NSFont, NSTextField, NSImageView,
-    NSView, NSTimer, NSSlider, NSButton, NSPopUpButton,
-    NSControlStateValueOn, NSControlStateValueOff,
+    NSApp, NSApplication, NSStatusBar, NSScreen, NSColor, NSImage, NSFont,
+    NSTextField, NSImageView, NSView, NSTimer, NSSlider, NSButton, NSPopUpButton,
+    NSPanel, NSControlStateValueOn, NSControlStateValueOff,
     NSApplicationActivationPolicyAccessory, NSSquareStatusItemLength,
-    NSImageScaleProportionallyDown,
-    NSApplicationDidChangeScreenParametersNotification,
-    NSTextAlignmentRight,
+    NSImageScaleProportionallyDown, NSApplicationDidChangeScreenParametersNotification,
+    NSTextAlignmentRight, NSBackingStoreBuffered, NSWindowStyleMaskBorderless,
+    NSEvent, NSVisualEffectView, NSVisualEffectBlendingModeBehindWindow,
+    NSVisualEffectStateActive,
 )
-from Foundation import NSMakeRect, NSNotificationCenter
+from Foundation import NSMakeRect, NSNotificationCenter, NSMakePoint
 
 LOG_PATH = Path.home() / "DisableScreen" / "disablescreen.log"
 logging.basicConfig(
@@ -33,91 +33,153 @@ logging.basicConfig(
 )
 log = logging.getLogger("DisableScreen")
 
-MENU_W = 280
+PANEL_W  = 280
+CORNER_R = 12.0
 
-# State: display_id -> bool (True = disabled by us)
 disabled_displays = {}
-status_item = None
+status_item   = None
+popup_panel   = None
+event_monitor = None
 
-# ── CoreGraphics ──────────────────────────────────────────────────────────────
+# CoreGraphics
 _cg = ctypes.CDLL('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
-_cg.CGBeginDisplayConfiguration.restype = ctypes.c_int32
+_cg.CGBeginDisplayConfiguration.restype  = ctypes.c_int32
 _cg.CGBeginDisplayConfiguration.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
-_cg.CGCompleteDisplayConfiguration.restype = ctypes.c_int32
+_cg.CGCompleteDisplayConfiguration.restype  = ctypes.c_int32
 _cg.CGCompleteDisplayConfiguration.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-_cg.CGCancelDisplayConfiguration.restype = ctypes.c_int32
+_cg.CGCancelDisplayConfiguration.restype  = ctypes.c_int32
 _cg.CGCancelDisplayConfiguration.argtypes = [ctypes.c_void_p]
 
-# ── SkyLight ──────────────────────────────────────────────────────────────────
+# SkyLight
 try:
     _sls = ctypes.CDLL('/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight')
-    _sls.SLSConfigureDisplayEnabled.restype = ctypes.c_int32
+    _sls.SLSConfigureDisplayEnabled.restype  = ctypes.c_int32
     _sls.SLSConfigureDisplayEnabled.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_bool]
-    log.info("SkyLight loaded OK")
+    log.info("SkyLight OK")
 except Exception as e:
     _sls = None
-    log.error("SkyLight load FAILED: %s", e)
+    log.error("SkyLight FAILED: %s", e)
 
-# ── CoreDisplay (brightness) ──────────────────────────────────────────────────
-_cd = None
-_ds_get_brightness = None
-_ds_set_brightness = None
+# CoreDisplay — load in two separate try/except so partial success is OK
+_cd = _ds_get = _ds_set = None
 try:
     _cd = ctypes.CDLL('/System/Library/Frameworks/CoreDisplay.framework/CoreDisplay')
-    _cd.CoreDisplay_Display_GetUserBrightness.restype = ctypes.c_double
+    _cd.CoreDisplay_Display_GetUserBrightness.restype  = ctypes.c_double
     _cd.CoreDisplay_Display_GetUserBrightness.argtypes = [ctypes.c_uint32]
-    _cd.CoreDisplay_Display_SetUserBrightness.restype = None
+    _cd.CoreDisplay_Display_SetUserBrightness.restype  = None
     _cd.CoreDisplay_Display_SetUserBrightness.argtypes = [ctypes.c_uint32, ctypes.c_double]
-    # DisplayServices — works on more display types
-    _ds_get = _cd.DisplayServicesGetBrightness
-    _ds_get.restype = ctypes.c_int32
-    _ds_get.argtypes = [ctypes.c_uint32, ctypes.POINTER(ctypes.c_float)]
-    _ds_set = _cd.DisplayServicesSetBrightness
-    _ds_set.restype = ctypes.c_int32
-    _ds_set.argtypes = [ctypes.c_uint32, ctypes.c_float]
-    _ds_get_brightness = _ds_get
-    _ds_set_brightness = _ds_set
-    log.info("CoreDisplay + DisplayServices loaded OK")
+    log.info("CoreDisplay OK")
 except Exception as e:
-    log.error("CoreDisplay load FAILED: %s", e)
+    log.error("CoreDisplay FAILED: %s", e)
+
+try:
+    if _cd:
+        _g = _cd.DisplayServicesGetBrightness
+        _g.restype  = ctypes.c_int32
+        _g.argtypes = [ctypes.c_uint32, ctypes.POINTER(ctypes.c_float)]
+        _s = _cd.DisplayServicesSetBrightness
+        _s.restype  = ctypes.c_int32
+        _s.argtypes = [ctypes.c_uint32, ctypes.c_float]
+        _ds_get, _ds_set = _g, _s
+        log.info("DisplayServices OK")
+except Exception as e:
+    log.info("DisplayServices not available (OK): %s", e)
+
+# IOKit (DDC fallback for external monitors)
+_iokit = _cf = None
+try:
+    _iokit = ctypes.CDLL('/System/Library/Frameworks/IOKit.framework/IOKit')
+    _cf    = ctypes.CDLL('/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation')
+    _iokit.IOServiceMatching.restype  = ctypes.c_void_p
+    _iokit.IOServiceMatching.argtypes = [ctypes.c_char_p]
+    _iokit.IOServiceGetMatchingServices.restype  = ctypes.c_uint32
+    _iokit.IOServiceGetMatchingServices.argtypes = [ctypes.c_uint32, ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+    _iokit.IOIteratorNext.restype  = ctypes.c_uint32
+    _iokit.IOIteratorNext.argtypes = [ctypes.c_uint32]
+    _iokit.IOObjectRelease.restype  = ctypes.c_uint32
+    _iokit.IOObjectRelease.argtypes = [ctypes.c_uint32]
+    _iokit.IODisplaySetFloatParameter.restype  = ctypes.c_uint32
+    _iokit.IODisplaySetFloatParameter.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_float]
+    _iokit.IODisplayGetFloatParameter.restype  = ctypes.c_uint32
+    _iokit.IODisplayGetFloatParameter.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.POINTER(ctypes.c_float)]
+    _cf.CFStringCreateWithCString.restype  = ctypes.c_void_p
+    _cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+    _cf.CFRelease.restype  = None
+    _cf.CFRelease.argtypes = [ctypes.c_void_p]
+    log.info("IOKit OK")
+except Exception as e:
+    log.warning("IOKit FAILED (no DDC): %s", e)
+
+
+def _iokit_brightness(value=None):
+    if not _iokit or not _cf:
+        return -1.0 if value is None else False
+    try:
+        key = _cf.CFStringCreateWithCString(None, b"brightness", 0)
+        it  = ctypes.c_uint32(0)
+        if _iokit.IOServiceGetMatchingServices(0, _iokit.IOServiceMatching(b"IODisplayConnect"), ctypes.byref(it)) != 0:
+            _cf.CFRelease(key)
+            return -1.0 if value is None else False
+        ok = False; rv = -1.0
+        svc = _iokit.IOIteratorNext(it)
+        while svc:
+            if value is None:
+                v = ctypes.c_float(0.0)
+                if _iokit.IODisplayGetFloatParameter(svc, 0, key, ctypes.byref(v)) == 0:
+                    rv = float(v.value)
+            else:
+                if _iokit.IODisplaySetFloatParameter(svc, 0, key, ctypes.c_float(value)) == 0:
+                    ok = True
+            _iokit.IOObjectRelease(svc)
+            svc = _iokit.IOIteratorNext(it)
+        _iokit.IOObjectRelease(it)
+        _cf.CFRelease(key)
+        return rv if value is None else ok
+    except Exception as e:
+        log.error("IOKit brightness: %s", e)
+        return -1.0 if value is None else False
 
 
 def get_display_brightness(display_id: int) -> float:
-    """Return brightness 0.0–1.0, or -1.0 if unsupported."""
-    if _ds_get_brightness:
+    if _ds_get:
         try:
-            val = ctypes.c_float(0.0)
-            err = _ds_get_brightness(ctypes.c_uint32(display_id), ctypes.byref(val))
-            if err == 0 and 0.0 <= val.value <= 1.0:
-                return float(val.value)
+            v = ctypes.c_float(0.0)
+            if _ds_get(ctypes.c_uint32(display_id), ctypes.byref(v)) == 0 and 0.0 <= v.value <= 1.0:
+                return float(v.value)
         except Exception:
             pass
     if _cd:
         try:
-            val = _cd.CoreDisplay_Display_GetUserBrightness(ctypes.c_uint32(display_id))
-            if 0.0 <= val <= 1.0:
-                return float(val)
+            v = _cd.CoreDisplay_Display_GetUserBrightness(ctypes.c_uint32(display_id))
+            if 0.0 <= v <= 1.0:
+                return float(v)
         except Exception:
             pass
+    if not CGDisplayIsBuiltin(display_id):
+        v = _iokit_brightness(None)
+        if v >= 0.0:
+            return v
     return -1.0
 
 
 def set_display_brightness(display_id: int, value: float):
     value = max(0.0, min(1.0, value))
-    if _ds_set_brightness:
+    if _ds_set:
         try:
-            if _ds_set_brightness(ctypes.c_uint32(display_id), ctypes.c_float(value)) == 0:
+            if _ds_set(ctypes.c_uint32(display_id), ctypes.c_float(value)) == 0:
                 return
         except Exception:
             pass
     if _cd:
         try:
             _cd.CoreDisplay_Display_SetUserBrightness(ctypes.c_uint32(display_id), ctypes.c_double(value))
+            return
         except Exception:
             pass
+    if not CGDisplayIsBuiltin(display_id):
+        _iokit_brightness(value)
 
 
-# ── Display enable / disable ──────────────────────────────────────────────────
 def _sls_set_display_enabled(display_id: int, enabled: bool) -> bool:
     if not _sls:
         return False
@@ -127,7 +189,7 @@ def _sls_set_display_enabled(display_id: int, enabled: bool) -> bool:
     err = _sls.SLSConfigureDisplayEnabled(config, ctypes.c_uint32(display_id), ctypes.c_bool(enabled))
     if err != 0:
         _cg.CGCancelDisplayConfiguration(config)
-        log.error("[SLS] SLSConfigureDisplayEnabled failed: %d", err)
+        log.error("[SLS] failed: %d", err)
         return False
     if _cg.CGCompleteDisplayConfiguration(config, ctypes.c_uint32(0)) != 0:
         return False
@@ -135,63 +197,51 @@ def _sls_set_display_enabled(display_id: int, enabled: bool) -> bool:
     return True
 
 
-# ── Resolution helpers ────────────────────────────────────────────────────────
 def get_current_resolution(display_id: int) -> str:
     try:
-        mode = CGDisplayCopyDisplayMode(display_id)
-        if mode:
-            return f"{int(CGDisplayModeGetWidth(mode))}×{int(CGDisplayModeGetHeight(mode))}"
+        m = CGDisplayCopyDisplayMode(display_id)
+        if m:
+            return f"{int(CGDisplayModeGetWidth(m))}x{int(CGDisplayModeGetHeight(m))}"
     except Exception:
         pass
-    return "—"
+    return "-"
 
 
 def get_display_modes(display_id: int):
-    """Return unique (width, height, best_refresh) tuples, largest first, max 20."""
     try:
         modes = CGDisplayCopyAllDisplayModes(display_id, None)
         if not modes:
             return []
-        best = {}  # (w, h) -> max refresh
+        best = {}
         for m in modes:
-            w = int(CGDisplayModeGetWidth(m))
-            h = int(CGDisplayModeGetHeight(m))
-            r = CGDisplayModeGetRefreshRate(m)
-            if w > 0 and h > 0:
-                if (w, h) not in best or r > best[(w, h)]:
-                    best[(w, h)] = r
-        result = sorted([(w, h, r) for (w, h), r in best.items()], key=lambda x: (-x[0], -x[1]))
-        return result[:20]
+            w, h, r = int(CGDisplayModeGetWidth(m)), int(CGDisplayModeGetHeight(m)), CGDisplayModeGetRefreshRate(m)
+            if w > 0 and h > 0 and ((w, h) not in best or r > best[(w, h)]):
+                best[(w, h)] = r
+        return sorted([(w, h, r) for (w, h), r in best.items()], key=lambda x: (-x[0], -x[1]))[:20]
     except Exception as e:
         log.error("get_display_modes: %s", e)
         return []
 
 
-def set_display_resolution(display_id: int, width: int, height: int, refresh: float) -> bool:
+def set_display_resolution(display_id: int, width: int, height: int) -> bool:
     try:
         modes = CGDisplayCopyAllDisplayModes(display_id, None)
-        best_mode = None
-        best_r = -1.0
+        best_mode, best_r = None, -1.0
         for m in modes:
-            w = int(CGDisplayModeGetWidth(m))
-            h = int(CGDisplayModeGetHeight(m))
-            r = CGDisplayModeGetRefreshRate(m)
+            w, h, r = int(CGDisplayModeGetWidth(m)), int(CGDisplayModeGetHeight(m)), CGDisplayModeGetRefreshRate(m)
             if w == width and h == height and r >= best_r:
-                best_mode = m
-                best_r = r
+                best_mode, best_r = m, r
         if best_mode is not None:
             config = ctypes.c_void_p()
             _cg.CGBeginDisplayConfiguration(ctypes.byref(config))
             CGDisplaySetDisplayMode(display_id, best_mode, None)
             _cg.CGCompleteDisplayConfiguration(config, ctypes.c_uint32(0))
-            log.info("[RES] Set %dx%d on display %d", width, height, display_id)
             return True
     except Exception as e:
         log.error("set_display_resolution: %s", e)
     return False
 
 
-# ── Display info ──────────────────────────────────────────────────────────────
 def list_all_online_displays():
     _, displays, _ = CGGetOnlineDisplayList(16, None, None)
     return list(displays)
@@ -200,9 +250,7 @@ def list_all_online_displays():
 def get_display_name(display_id: int) -> str:
     for screen in NSScreen.screens():
         if screen.deviceDescription().get("NSScreenNumber", 0) == display_id:
-            name = screen.localizedName()
-            if name:
-                return name
+            return screen.localizedName() or f"Display {display_id}"
     return f"Display {display_id}"
 
 
@@ -210,214 +258,274 @@ def _sf(name):
     return NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, None)
 
 
-# ── Card builder ──────────────────────────────────────────────────────────────
-H_HEADER     = 44
-H_DDC        = 36
-H_BRIGHTNESS = 34
-H_RESOLUTION = 34
-H_PAD        = 6
+def _make_sep(w):
+    v = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, w, 1))
+    v.setWantsLayer_(True)
+    v.layer().setBackgroundColor_(NSColor.separatorColor().CGColor())
+    return v
 
 
-def make_display_card(display_id: int, delegate) -> NSView:
+def _make_display_card(display_id, delegate, w):
     builtin = bool(CGDisplayIsBuiltin(display_id))
     is_dis  = disabled_displays.get(display_id, False)
     name    = "Écran intégré" if builtin else get_display_name(display_id)
-
-    brightness = -1.0
-    resolution = "—"
-    modes = []
-
+    bri, res, modes = -1.0, "-", []
     if not is_dis:
-        brightness = get_display_brightness(display_id)
-        resolution = get_current_resolution(display_id)
-        modes      = get_display_modes(display_id)
+        bri   = get_display_brightness(display_id)
+        res   = get_current_resolution(display_id)
+        modes = get_display_modes(display_id)
+    has_bri = bri >= 0.0
 
-    has_brightness = brightness >= 0.0
-
-    # Card height
-    card_h = H_HEADER
+    H_HDR = 46; H_DDC = 36; H_BRI = 34; H_RES = 34
+    h = H_HDR
     if not is_dis:
-        if not builtin:
-            card_h += H_DDC
-        if has_brightness:
-            card_h += H_BRIGHTNESS
-        card_h += H_RESOLUTION
-    card_h += H_PAD
+        if not builtin: h += H_DDC
+        if has_bri: h += H_BRI
+        h += H_RES
 
-    card = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, MENU_W, card_h))
-    y = card_h - H_HEADER  # top row y (macOS coords: bottom=0)
+    card = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, w, h))
+    y = h - H_HDR
 
-    # ── Header ────────────────────────────────────────────────────────────────
-    icon = NSImageView.alloc().initWithFrame_(NSMakeRect(14, y + 13, 18, 18))
-    icon.setImage_(_sf("laptopcomputer" if builtin else "display"))
-    icon.setImageScaling_(NSImageScaleProportionallyDown)
-    if is_dis:
-        icon.setAlphaValue_(0.35)
-    card.addSubview_(icon)
+    ico = NSImageView.alloc().initWithFrame_(NSMakeRect(14, y + 14, 18, 18))
+    ico.setImage_(_sf("laptopcomputer" if builtin else "display"))
+    ico.setImageScaling_(NSImageScaleProportionallyDown)
+    if is_dis: ico.setAlphaValue_(0.35)
+    card.addSubview_(ico)
 
-    name_f = NSTextField.labelWithString_(name)
-    name_f.setFrame_(NSMakeRect(40, y + 15, MENU_W - 105, 16))
-    name_f.setFont_(NSFont.boldSystemFontOfSize_(13.0))
-    if is_dis:
-        name_f.setTextColor_(NSColor.tertiaryLabelColor())
-    card.addSubview_(name_f)
+    nf = NSTextField.labelWithString_(name)
+    nf.setFrame_(NSMakeRect(40, y + 17, w - 100, 15))
+    nf.setFont_(NSFont.boldSystemFontOfSize_(13.0))
+    if is_dis: nf.setTextColor_(NSColor.tertiaryLabelColor())
+    card.addSubview_(nf)
 
-    if not is_dis and resolution != "—":
-        sub = NSTextField.labelWithString_(resolution)
-        sub.setFrame_(NSMakeRect(40, y + 3, 120, 11))
-        sub.setFont_(NSFont.systemFontOfSize_(10.0))
-        sub.setTextColor_(NSColor.secondaryLabelColor())
-        card.addSubview_(sub)
+    if not is_dis and res != "-":
+        sf = NSTextField.labelWithString_(res)
+        sf.setFrame_(NSMakeRect(40, y + 4, 120, 11))
+        sf.setFont_(NSFont.systemFontOfSize_(10.0))
+        sf.setTextColor_(NSColor.secondaryLabelColor())
+        card.addSubview_(sf)
 
-    # Toggle switch
-    active_count = sum(
-        1 for d in list_all_online_displays()
-        if not disabled_displays.get(d, False)
-    )
+    active_count = sum(1 for d in list_all_online_displays() if not disabled_displays.get(d, False))
     sw = AppKit.NSSwitch.alloc().init()
     sw.setState_(NSControlStateValueOff if is_dis else NSControlStateValueOn)
     sw.setTag_(display_id)
     sw.setTarget_(delegate)
     sw.setAction_("toggleDisplay:")
-    if not is_dis and active_count <= 1:
-        sw.setEnabled_(False)
-    sw.setFrame_(NSMakeRect(MENU_W - 54, y + 11, 44, 22))
+    if not is_dis and active_count <= 1: sw.setEnabled_(False)
+    sw.setFrame_(NSMakeRect(w - 54, y + 12, 44, 22))
     card.addSubview_(sw)
 
     if is_dis:
-        return card
+        return card, h
 
-    # ── DDC button (external displays only) ───────────────────────────────────
     if not builtin:
         y -= H_DDC
-        btn = NSButton.alloc().initWithFrame_(NSMakeRect(14, y + 6, MENU_W - 28, 24))
+        btn = NSButton.alloc().initWithFrame_(NSMakeRect(14, y + 6, w - 28, 24))
         btn.setTitle_("Cliquez ici pour configurer DDC...")
-        btn.setBezelStyle_(1)  # NSBezelStyleRounded
+        btn.setBezelStyle_(1)
         btn.setFont_(NSFont.systemFontOfSize_(11.0))
         btn.setTag_(display_id)
         btn.setTarget_(delegate)
         btn.setAction_("openDDCConfig:")
-        try:
-            btn.setContentTintColor_(NSColor.systemBlueColor())
-        except Exception:
-            pass
+        try: btn.setContentTintColor_(NSColor.systemBlueColor())
+        except Exception: pass
         card.addSubview_(btn)
 
-    # ── Brightness slider ─────────────────────────────────────────────────────
-    if has_brightness:
-        y -= H_BRIGHTNESS
+    if has_bri:
+        y -= H_BRI
         sun = NSImageView.alloc().initWithFrame_(NSMakeRect(14, y + 10, 14, 14))
         sun.setImage_(_sf("sun.min"))
         sun.setImageScaling_(NSImageScaleProportionallyDown)
         card.addSubview_(sun)
 
-        pct_lbl = NSTextField.labelWithString_(f"{int(brightness * 100)}%")
-        pct_lbl.setFrame_(NSMakeRect(MENU_W - 42, y + 11, 28, 13))
-        pct_lbl.setFont_(NSFont.systemFontOfSize_(11.0))
-        pct_lbl.setAlignment_(NSTextAlignmentRight)
-        card.addSubview_(pct_lbl)
+        pct = NSTextField.labelWithString_(f"{int(bri * 100)}%")
+        pct.setFrame_(NSMakeRect(w - 44, y + 11, 30, 13))
+        pct.setFont_(NSFont.systemFontOfSize_(11.0))
+        pct.setAlignment_(NSTextAlignmentRight)
+        pct.setTag_(display_id + 100000)
+        card.addSubview_(pct)
 
-        slider = NSSlider.alloc().initWithFrame_(NSMakeRect(34, y + 10, MENU_W - 82, 14))
-        slider.setMinValue_(0.0)
-        slider.setMaxValue_(1.0)
-        slider.setDoubleValue_(brightness)
-        slider.setTag_(display_id)
-        slider.setTarget_(delegate)
-        slider.setAction_("adjustBrightness:")
-        slider.setContinuous_(True)
-        card.addSubview_(slider)
+        sl = NSSlider.alloc().initWithFrame_(NSMakeRect(34, y + 10, w - 84, 14))
+        sl.setMinValue_(0.0)
+        sl.setMaxValue_(1.0)
+        sl.setDoubleValue_(bri)
+        sl.setTag_(display_id)
+        sl.setTarget_(delegate)
+        sl.setAction_("adjustBrightness:")
+        sl.setContinuous_(True)
+        card.addSubview_(sl)
 
-    # ── Resolution row ────────────────────────────────────────────────────────
-    y -= H_RESOLUTION
-    res_icon = NSImageView.alloc().initWithFrame_(NSMakeRect(14, y + 10, 14, 14))
-    res_icon.setImage_(_sf("aspectratio"))
-    res_icon.setImageScaling_(NSImageScaleProportionallyDown)
-    card.addSubview_(res_icon)
+    y -= H_RES
+    ri = NSImageView.alloc().initWithFrame_(NSMakeRect(14, y + 10, 14, 14))
+    ri.setImage_(_sf("aspectratio"))
+    ri.setImageScaling_(NSImageScaleProportionallyDown)
+    card.addSubview_(ri)
 
     if modes:
-        popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-            NSMakeRect(34, y + 6, MENU_W - 48, 22), False
-        )
-        popup.setFont_(NSFont.systemFontOfSize_(11.5))
-        # Parse current resolution for selection
-        cur_parts = resolution.split("×") if "×" in resolution else []
-        cur_w = int(cur_parts[0]) if len(cur_parts) >= 2 else 0
-        cur_h = int(cur_parts[1]) if len(cur_parts) >= 2 else 0
+        pu = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(34, y + 6, w - 48, 22), False)
+        pu.setFont_(NSFont.systemFontOfSize_(11.5))
+        cp = res.split("x") if "x" in res else ["0", "0"]
+        cw, ch = int(cp[0]) if len(cp) >= 2 else 0, int(cp[1]) if len(cp) >= 2 else 0
         sel = 0
-        for i, (w, h, r) in enumerate(modes):
-            label = f"{w}×{h}" + (f"  @{int(r)}Hz" if r > 0 else "")
-            popup.addItemWithTitle_(label)
-            if w == cur_w and h == cur_h:
-                sel = i
-        popup.selectItemAtIndex_(sel)
-        popup.setTag_(display_id)
-        popup.setTarget_(delegate)
-        popup.setAction_("changeResolution:")
-        card.addSubview_(popup)
+        for i, (mw, mh, mr) in enumerate(modes):
+            pu.addItemWithTitle_(f"{mw}x{mh}" + (f"  @{int(mr)}Hz" if mr > 0 else ""))
+            if mw == cw and mh == ch: sel = i
+        pu.selectItemAtIndex_(sel)
+        pu.setTag_(display_id)
+        pu.setTarget_(delegate)
+        pu.setAction_("changeResolution:")
+        card.addSubview_(pu)
     else:
-        res_lbl = NSTextField.labelWithString_(resolution)
-        res_lbl.setFrame_(NSMakeRect(34, y + 11, MENU_W - 48, 14))
-        res_lbl.setFont_(NSFont.systemFontOfSize_(12.0))
-        card.addSubview_(res_lbl)
+        rl = NSTextField.labelWithString_(res)
+        rl.setFrame_(NSMakeRect(34, y + 11, w - 48, 14))
+        rl.setFont_(NSFont.systemFontOfSize_(12.0))
+        card.addSubview_(rl)
 
-    return card
+    return card, h
 
 
-# ── Status item & menu ────────────────────────────────────────────────────────
-def ensure_status_item():
+def _build_content(delegate):
+    all_disp = sorted(list_all_online_displays(), key=lambda d: (1 if CGDisplayIsBuiltin(d) else 0, d))
+    sections = [_make_display_card(d, delegate, PANEL_W) for d in all_disp]
+
+    H_PAD = 8; H_SEP = 1; H_QUIT = 36
+    total_h = H_PAD
+    for _, h in sections:
+        total_h += h
+    total_h += (len(sections) - 1) * (H_SEP + 4)
+    total_h += H_SEP + H_QUIT + H_PAD
+
+    root = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, PANEL_W, total_h))
+    y = H_PAD
+
+    q = NSButton.alloc().initWithFrame_(NSMakeRect(14, y + 6, PANEL_W - 28, 24))
+    q.setTitle_("Quitter")
+    q.setBezelStyle_(1)
+    q.setFont_(NSFont.systemFontOfSize_(13.0))
+    q.setTarget_(NSApp)
+    q.setAction_("terminate:")
+    root.addSubview_(q)
+    y += H_QUIT
+
+    sv = _make_sep(PANEL_W)
+    sv.setFrame_(NSMakeRect(0, y, PANEL_W, H_SEP))
+    root.addSubview_(sv)
+    y += H_SEP + 4
+
+    for i, (card, h) in enumerate(reversed(sections)):
+        card.setFrame_(NSMakeRect(0, y, PANEL_W, h))
+        root.addSubview_(card)
+        y += h
+        if i < len(sections) - 1:
+            sv2 = _make_sep(PANEL_W)
+            sv2.setFrame_(NSMakeRect(0, y, PANEL_W, H_SEP))
+            root.addSubview_(sv2)
+            y += H_SEP + 4
+
+    fx = NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, PANEL_W, total_h))
+    try:
+        fx.setMaterial_(AppKit.NSVisualEffectMaterialPopover)
+    except Exception:
+        fx.setMaterial_(3)
+    fx.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
+    fx.setState_(NSVisualEffectStateActive)
+    fx.setWantsLayer_(True)
+    fx.layer().setCornerRadius_(CORNER_R)
+    fx.layer().setMasksToBounds_(True)
+    fx.addSubview_(root)
+    return fx, total_h
+
+
+class DisplayPanel(NSPanel):
+    @classmethod
+    def create(cls):
+        p = cls.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(0, 0, PANEL_W, 100),
+            NSWindowStyleMaskBorderless | (1 << 7),
+            NSBackingStoreBuffered, False,
+        )
+        p.setLevel_(AppKit.NSPopUpMenuWindowLevel)
+        p.setCollectionBehavior_(
+            AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces |
+            AppKit.NSWindowCollectionBehaviorTransient
+        )
+        p.setHasShadow_(True)
+        p.setOpaque_(False)
+        p.setBackgroundColor_(NSColor.clearColor())
+        return p
+
+    def canBecomeKeyWindow(self):
+        return True
+
+    def resignKeyWindow(self):
+        super().resignKeyWindow()
+        AppDelegate.shared.hidePanel()
+
+    def keyDown_(self, event):
+        if event.keyCode() == 53:
+            AppDelegate.shared.hidePanel()
+        else:
+            super().keyDown_(event)
+
+
+def _show_popup(delegate):
+    global popup_panel, event_monitor
+    if popup_panel is None:
+        popup_panel = DisplayPanel.create()
+
+    content, panel_h = _build_content(delegate)
+    popup_panel.setContentView_(content)
+    popup_panel.setFrame_display_(NSMakeRect(0, 0, PANEL_W, panel_h), False)
+
+    btn = status_item.button()
+    btn_win = btn.window()
+    if btn_win:
+        br = btn_win.convertRectToScreen_(btn.frame())
+        px = br.origin.x + br.size.width / 2 - PANEL_W / 2
+        sf = NSScreen.mainScreen().frame()
+        px = max(sf.origin.x + 8, min(px, sf.origin.x + sf.size.width - PANEL_W - 8))
+        popup_panel.setFrameTopLeftPoint_(NSMakePoint(px, br.origin.y))
+
+    popup_panel.makeKeyAndOrderFront_(None)
+
+    def _dismiss(evt):
+        if evt.window() != popup_panel:
+            AppDelegate.shared.hidePanel()
+
+    if event_monitor:
+        NSEvent.removeMonitor_(event_monitor)
+    event_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(1 | 2, _dismiss)
+
+
+def _hide_popup():
+    global event_monitor
+    if popup_panel:
+        popup_panel.orderOut_(None)
+    if event_monitor:
+        NSEvent.removeMonitor_(event_monitor)
+        event_monitor = None
+
+
+def ensure_status_item(delegate):
     global status_item
     if status_item is None or status_item.button() is None:
-        log.info("[UI] Re-creating status item")
         status_item = NSStatusBar.systemStatusBar().statusItemWithLength_(NSSquareStatusItemLength)
+        status_item.button().setTarget_(delegate)
+        status_item.button().setAction_("togglePanel:")
+    any_dis = any(disabled_displays.values())
+    status_item.button().setImage_(_sf("display.slash" if any_dis else "display"))
 
 
-def refresh_ui():
-    ensure_status_item()
-    if not status_item:
-        return
-
-    any_disabled = any(disabled_displays.values())
-    status_item.button().setImage_(_sf("display.slash" if any_disabled else "display"))
-
-    all_displays = list_all_online_displays()
-    log.debug("[UI] refresh: %d online displays", len(all_displays))
-
-    # Sort: external first, built-in last
-    all_displays.sort(key=lambda d: (1 if CGDisplayIsBuiltin(d) else 0, d))
-
-    menu = NSMenu.alloc().init()
-    menu.setMinimumWidth_(MENU_W)
-    menu.setAutoenablesItems_(False)
-
-    for i, did in enumerate(all_displays):
-        card = make_display_card(did, AppDelegate.shared)
-        item = NSMenuItem.alloc().init()
-        item.setView_(card)
-        item.setEnabled_(True)
-        menu.addItem_(item)
-        if i < len(all_displays) - 1:
-            menu.addItem_(NSMenuItem.separatorItem())
-
-    menu.addItem_(NSMenuItem.separatorItem())
-    q = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Quitter", "terminate:", "q")
-    q.setTarget_(NSApp)
-    menu.addItem_(q)
-
-    status_item.setMenu_(menu)
-
-
-# ── AppDelegate ───────────────────────────────────────────────────────────────
 class AppDelegate(AppKit.NSObject):
     shared = None
+    _panel_visible = False
 
     def applicationDidFinishLaunching_(self, notification):
         AppDelegate.shared = self
         NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
-        global status_item
-        status_item = NSStatusBar.systemStatusBar().statusItemWithLength_(NSSquareStatusItemLength)
-        log.info("App started. Online displays: %s", list_all_online_displays())
-        log.info("SkyLight=%s CoreDisplay=%s", _sls is not None, _cd is not None)
-        refresh_ui()
+        ensure_status_item(self)
+        log.info("Started. Displays: %s | SkyLight=%s CoreDisplay=%s",
+                 list_all_online_displays(), _sls is not None, _cd is not None)
         NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
             self, "screensDidChange:", NSApplicationDidChangeScreenParametersNotification, None
         )
@@ -428,58 +536,52 @@ class AppDelegate(AppKit.NSObject):
     def applicationWillTerminate_(self, notification):
         for did, is_dis in list(disabled_displays.items()):
             if is_dis:
-                log.info("[QUIT] Re-enabling display %d before exit", did)
+                log.info("[QUIT] Re-enabling display %d", did)
                 _sls_set_display_enabled(did, True)
 
     def screensDidChange_(self, notification):
-        log.info("[SCREENS] Display config changed — refreshing UI")
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            0.5, self, "delayedRefresh:", None, False
+            0.3, self, "delayedRefresh:", None, False
         )
 
     def delayedRefresh_(self, timer):
-        refresh_ui()
+        ensure_status_item(self)
+        if self._panel_visible:
+            _show_popup(self)
 
     def pollScreens_(self, timer):
-        refresh_ui()
+        ensure_status_item(self)
+
+    def togglePanel_(self, sender):
+        if self._panel_visible:
+            self.hidePanel()
+        else:
+            self.showPanel()
+
+    @objc.python_method
+    def showPanel(self):
+        self._panel_visible = True
+        _show_popup(self)
+
+    @objc.python_method
+    def hidePanel(self):
+        self._panel_visible = False
+        _hide_popup()
 
     def toggleDisplay_(self, sender):
         display_id = int(sender.tag())
-        new_state = sender.state()
-        log.info("[TOGGLE] display=%d → %s", display_id,
-                 "enable" if new_state == NSControlStateValueOn else "disable")
-        if new_state == NSControlStateValueOff:
-            self._disable_display(display_id)
+        if sender.state() == NSControlStateValueOff:
+            active = [s.deviceDescription().get("NSScreenNumber", 0) for s in NSScreen.screens()]
+            if display_id not in active:
+                log.warning("[DISABLE] display %d not active", display_id)
+                _show_popup(self)
+                return
+            if _sls_set_display_enabled(display_id, False):
+                disabled_displays[display_id] = True
         else:
-            self._enable_display(display_id)
-
-    @objc.python_method
-    def _disable_display(self, display_id: int):
-        active_ids = [s.deviceDescription().get("NSScreenNumber", 0) for s in NSScreen.screens()]
-        if display_id not in active_ids:
-            log.warning("[DISABLE] Display %d not in active config", display_id)
-            refresh_ui()
-            return
-        ok = _sls_set_display_enabled(display_id, False)
-        if ok:
-            disabled_displays[display_id] = True
-            log.info("[DISABLE] ✓ display %d removed from active config", display_id)
-        else:
-            log.error("[DISABLE] FAILED for display %d", display_id)
-        refresh_ui()
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            1.0, self, "delayedRefresh:", None, False
-        )
-
-    @objc.python_method
-    def _enable_display(self, display_id: int):
-        ok = _sls_set_display_enabled(display_id, True)
-        if ok:
-            disabled_displays[display_id] = False
-            log.info("[ENABLE] ✓ display %d restored to active config", display_id)
-        else:
-            log.error("[ENABLE] FAILED for display %d", display_id)
-        refresh_ui()
+            if _sls_set_display_enabled(display_id, True):
+                disabled_displays[display_id] = False
+        ensure_status_item(self)
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             1.0, self, "delayedRefresh:", None, False
         )
@@ -488,27 +590,26 @@ class AppDelegate(AppKit.NSObject):
         display_id = int(sender.tag())
         value = sender.doubleValue()
         set_display_brightness(display_id, value)
-        log.debug("[BRIGHTNESS] display=%d → %.0f%%", display_id, value * 100)
+        if popup_panel:
+            lbl = popup_panel.contentView().viewWithTag_(display_id + 100000)
+            if lbl:
+                lbl.setStringValue_(f"{int(value * 100)}%")
 
     def changeResolution_(self, sender):
         display_id = int(sender.tag())
         idx = sender.indexOfSelectedItem()
         modes = get_display_modes(display_id)
         if 0 <= idx < len(modes):
-            w, h, r = modes[idx]
-            log.info("[RES] Changing display %d → %dx%d", display_id, w, h)
-            ok = set_display_resolution(display_id, w, h, r)
-            if ok:
-                NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                    0.5, self, "delayedRefresh:", None, False
-                )
+            w, h, _ = modes[idx]
+            set_display_resolution(display_id, w, h)
+            NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                0.5, self, "delayedRefresh:", None, False
+            )
 
     def openDDCConfig_(self, sender):
-        log.info("[DDC] Opening System Display Preferences")
         subprocess.Popen(["open", "x-apple.systempreferences:com.apple.preference.displays"])
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     log.info("DisableScreen launching...")
     app = NSApplication.sharedApplication()
