@@ -6,6 +6,7 @@ import objc
 import ctypes
 import logging
 import subprocess
+import time
 from pathlib import Path
 from Quartz import (
     CGDisplayIsBuiltin, CGGetOnlineDisplayList,
@@ -519,6 +520,7 @@ def ensure_status_item(delegate):
 class AppDelegate(AppKit.NSObject):
     shared = None
     _panel_visible = False
+    _panel_last_close = 0.0
 
     def applicationDidFinishLaunching_(self, notification):
         AppDelegate.shared = self
@@ -553,7 +555,10 @@ class AppDelegate(AppKit.NSObject):
         ensure_status_item(self)
 
     def togglePanel_(self, sender):
-        if self._panel_visible:
+        # Guard against resignKeyWindow → hidePanel → togglePanel_ race:
+        # if the panel was just closed (< 200ms ago), don't reopen it
+        just_closed = (time.time() - self._panel_last_close) < 0.20
+        if self._panel_visible or just_closed:
             self.hidePanel()
         else:
             self.showPanel()
@@ -566,6 +571,7 @@ class AppDelegate(AppKit.NSObject):
     @objc.python_method
     def hidePanel(self):
         self._panel_visible = False
+        self._panel_last_close = time.time()
         _hide_popup()
 
     def toggleDisplay_(self, sender):
