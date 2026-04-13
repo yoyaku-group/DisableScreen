@@ -23,6 +23,9 @@ from AppKit import (
     NSTextAlignmentRight, NSBackingStoreBuffered, NSWindowStyleMaskBorderless,
     NSEvent, NSVisualEffectView, NSVisualEffectBlendingModeBehindWindow,
     NSVisualEffectStateActive,
+    NSWindow, NSBorderlessWindowMask, NSScreenSaverWindowLevel,
+    NSWindowCollectionBehaviorCanJoinAllSpaces, NSWindowCollectionBehaviorStationary,
+    NSWindowCollectionBehaviorFullScreenAuxiliary, NSWindowCollectionBehaviorIgnoresCycle,
 )
 from Foundation import NSMakeRect, NSNotificationCenter, NSMakePoint
 
@@ -141,44 +144,105 @@ def _iokit_brightness(value=None):
         return -1.0 if value is None else False
 
 
+# ── Dim overlay windows ───────────────────────────────────────────────────────
+# On Apple Silicon + USB-C portable monitors (e.g. ASUS MB16AH), both DDC writes
+# and CGSetDisplayTransferByFormula are ignored by the display. The only way to
+# actually dim visible output is a black, click-through NSWindow layered above
+# everything at NSScreenSaverWindowLevel.
+_dim_windows: dict = {}
+_sw_brightness: dict = {}
+
+
+def _screen_for_display(display_id: int):
+    for screen in NSScreen.screens():
+        if int(screen.deviceDescription().get("NSScreenNumber", 0)) == display_id:
+            return screen
+    return None
+
+
+def _ensure_dim_window(display_id: int):
+    screen = _screen_for_display(display_id)
+    if screen is None:
+        return None
+    frame = screen.frame()
+    win = _dim_windows.get(display_id)
+    if win is None:
+        win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_screen_(
+            frame, NSBorderlessWindowMask, NSBackingStoreBuffered, False, screen,
+        )
+        win.setOpaque_(False)
+        win.setHasShadow_(False)
+        win.setIgnoresMouseEvents_(True)
+        win.setLevel_(NSScreenSaverWindowLevel)
+        win.setBackgroundColor_(NSColor.blackColor())
+        win.setAlphaValue_(0.0)
+        win.setCollectionBehavior_(
+            NSWindowCollectionBehaviorCanJoinAllSpaces
+            | NSWindowCollectionBehaviorStationary
+            | NSWindowCollectionBehaviorFullScreenAuxiliary
+            | NSWindowCollectionBehaviorIgnoresCycle
+        )
+        win.orderFrontRegardless()
+        _dim_windows[display_id] = win
+        log.info("[DIM] created overlay for display %d", display_id)
+    else:
+        win.setFrame_display_(frame, True)
+        win.orderFrontRegardless()
+    return win
+
+
+def _apply_dim(display_id: int, value: float) -> bool:
+    value = max(0.08, min(1.0, value))  # floor so the screen never blacks out
+    win = _ensure_dim_window(display_id)
+    if win is None:
+        return False
+    win.setAlphaValue_(1.0 - value)
+    log.info("[DIM] display=%d brightness=%.2f", display_id, value)
+    return True
+
+
 def get_display_brightness(display_id: int) -> float:
-    if _ds_get:
-        try:
-            v = ctypes.c_float(0.0)
-            if _ds_get(ctypes.c_uint32(display_id), ctypes.byref(v)) == 0 and 0.0 <= v.value <= 1.0:
-                return float(v.value)
-        except Exception:
-            pass
-    if _cd:
-        try:
-            v = _cd.CoreDisplay_Display_GetUserBrightness(ctypes.c_uint32(display_id))
-            if 0.0 <= v <= 1.0:
-                return float(v)
-        except Exception:
-            pass
-    if not CGDisplayIsBuiltin(display_id):
-        v = _iokit_brightness(None)
-        if v >= 0.0:
-            return v
-    return -1.0
+    if CGDisplayIsBuiltin(display_id):
+        if _ds_get:
+            try:
+                v = ctypes.c_float(0.0)
+                if _ds_get(ctypes.c_uint32(display_id), ctypes.byref(v)) == 0 and 0.0 <= v.value <= 1.0:
+                    return float(v.value)
+            except Exception:
+                pass
+        if _cd:
+            try:
+                v = _cd.CoreDisplay_Display_GetUserBrightness(ctypes.c_uint32(display_id))
+                if 0.0 <= v <= 1.0:
+                    return float(v)
+            except Exception:
+                pass
+        return -1.0
+    # External → overlay state (IOKit kept as best-effort write fallback)
+    return _sw_brightness.get(display_id, 1.0)
 
 
 def set_display_brightness(display_id: int, value: float):
     value = max(0.0, min(1.0, value))
-    if _ds_set:
-        try:
-            if _ds_set(ctypes.c_uint32(display_id), ctypes.c_float(value)) == 0:
+    if CGDisplayIsBuiltin(display_id):
+        if _ds_set:
+            try:
+                if _ds_set(ctypes.c_uint32(display_id), ctypes.c_float(value)) == 0:
+                    return
+            except Exception:
+                pass
+        if _cd:
+            try:
+                _cd.CoreDisplay_Display_SetUserBrightness(ctypes.c_uint32(display_id), ctypes.c_double(value))
                 return
-        except Exception:
-            pass
-    if _cd:
-        try:
-            _cd.CoreDisplay_Display_SetUserBrightness(ctypes.c_uint32(display_id), ctypes.c_double(value))
-            return
-        except Exception:
-            pass
-    if not CGDisplayIsBuiltin(display_id):
-        _iokit_brightness(value)
+            except Exception:
+                pass
+        return
+    # External → overlay dim (only reliable path on Apple Silicon for USB-C portables)
+    if _apply_dim(display_id, value):
+        _sw_brightness[display_id] = value
+    # Best-effort DDC via IOKit, no-op on MB16AH but may help other monitors
+    _iokit_brightness(value)
 
 
 def _sls_set_display_enabled(display_id: int, enabled: bool) -> bool:
@@ -275,6 +339,8 @@ def _make_display_card(display_id, delegate, w):
         bri   = get_display_brightness(display_id)
         res   = get_current_resolution(display_id)
         modes = get_display_modes(display_id)
+    if not builtin and bri < 0.0:
+        bri = _sw_brightness.get(display_id, 1.0)
     has_bri = bri >= 0.0
 
     H_HDR = 46; H_DDC = 36; H_BRI = 34; H_RES = 34
@@ -346,7 +412,7 @@ def _make_display_card(display_id, delegate, w):
         pct.setTag_(display_id + 100000)
         card.addSubview_(pct)
 
-        sl = NSSlider.alloc().initWithFrame_(NSMakeRect(34, y + 10, w - 84, 14))
+        sl = NSSlider.alloc().initWithFrame_(NSMakeRect(34, y + 6, w - 84, 22))
         sl.setMinValue_(0.0)
         sl.setMaxValue_(1.0)
         sl.setDoubleValue_(bri)
