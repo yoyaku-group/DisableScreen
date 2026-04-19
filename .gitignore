@@ -1,5 +1,6 @@
+DisableScreen.app/
 __pycache__/
 *.pyc
-*.log
 .DS_Store
-DisableScreen.app/Contents/MacOS/__pycache__/
+.build/
+launcher

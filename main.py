@@ -22,7 +22,7 @@ from AppKit import (
     NSImageScaleProportionallyDown, NSApplicationDidChangeScreenParametersNotification,
     NSTextAlignmentRight, NSBackingStoreBuffered, NSWindowStyleMaskBorderless,
     NSEvent, NSVisualEffectView, NSVisualEffectBlendingModeBehindWindow,
-    NSVisualEffectStateActive,
+    NSVisualEffectStateActive, NSMenu, NSMenuItem,
     NSWindow, NSBorderlessWindowMask, NSScreenSaverWindowLevel,
     NSWindowCollectionBehaviorCanJoinAllSpaces, NSWindowCollectionBehaviorStationary,
     NSWindowCollectionBehaviorFullScreenAuxiliary, NSWindowCollectionBehaviorIgnoresCycle,
@@ -455,12 +455,12 @@ def _build_content(delegate):
     all_disp = sorted(list_all_online_displays(), key=lambda d: (1 if CGDisplayIsBuiltin(d) else 0, d))
     sections = [_make_display_card(d, delegate, PANEL_W) for d in all_disp]
 
-    H_PAD = 8; H_SEP = 1; H_QUIT = 36
+    H_PAD = 8; H_SEP = 1; H_QUIT = 36; H_LID = 36
     total_h = H_PAD
     for _, h in sections:
         total_h += h
     total_h += (len(sections) - 1) * (H_SEP + 4)
-    total_h += H_SEP + H_QUIT + H_PAD
+    total_h += H_SEP + H_QUIT + H_SEP + H_LID + H_PAD
 
     root = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, PANEL_W, total_h))
     y = H_PAD
@@ -473,6 +473,25 @@ def _build_content(delegate):
     q.setAction_("terminate:")
     root.addSubview_(q)
     y += H_QUIT
+
+    sv0 = _make_sep(PANEL_W)
+    sv0.setFrame_(NSMakeRect(0, y, PANEL_W, H_SEP))
+    root.addSubview_(sv0)
+    y += H_SEP
+
+    lid_on = _lid_stay_awake_state()
+    lid_lbl = NSTextField.labelWithString_("Garder allumé clapet fermé")
+    lid_lbl.setFrame_(NSMakeRect(14, y + 11, PANEL_W - 80, 14))
+    lid_lbl.setFont_(NSFont.systemFontOfSize_(12.0))
+    root.addSubview_(lid_lbl)
+
+    lid_sw = AppKit.NSSwitch.alloc().init()
+    lid_sw.setState_(NSControlStateValueOn if lid_on else NSControlStateValueOff)
+    lid_sw.setTarget_(delegate)
+    lid_sw.setAction_("toggleLidStayAwake:")
+    lid_sw.setFrame_(NSMakeRect(PANEL_W - 54, y + 7, 44, 22))
+    root.addSubview_(lid_sw)
+    y += H_LID
 
     sv = _make_sep(PANEL_W)
     sv.setFrame_(NSMakeRect(0, y, PANEL_W, H_SEP))
@@ -573,12 +592,101 @@ def _hide_popup():
         event_monitor = None
 
 
+# Login item management: the compiled launcher binary (this app's main executable)
+# owns SMAppService calls, because NSBundle.mainBundle() resolves to DisableScreen.app
+# only when called from the bundled binary — not from the Python interpreter.
+_LAUNCHER = "/Applications/DisableScreen.app/Contents/MacOS/DisableScreen"
+
+
+def _login_item_status_str() -> str:
+    try:
+        out = subprocess.check_output([_LAUNCHER, "--status"], text=True, timeout=5).strip()
+        return out
+    except Exception as e:
+        log.error("login status: %s", e)
+        return "unknown"
+
+
+def _is_login_item() -> bool:
+    return _login_item_status_str() == "enabled"
+
+
+def _set_login_item(enabled: bool):
+    arg = "--register" if enabled else "--unregister"
+    try:
+        r = subprocess.run([_LAUNCHER, arg], capture_output=True, text=True, timeout=10)
+        log.info("login item %s: rc=%d stderr=%s new_status=%s",
+                 arg, r.returncode, r.stderr.strip(), _login_item_status_str())
+        if r.returncode != 0 and enabled and _login_item_status_str() == "requiresApproval":
+            subprocess.Popen(["open", "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"])
+    except Exception as e:
+        log.error("login item toggle: %s", e)
+
+
+# ── Lid-close stay-awake (pmset disablesleep) ─────────────────────────────────
+def _lid_stay_awake_state() -> bool:
+    """True if pmset SleepDisabled is set (system stays on with lid closed)."""
+    try:
+        out = subprocess.check_output(["pmset", "-g"], text=True, timeout=3)
+        for line in out.splitlines():
+            s = line.strip()
+            if s.startswith("SleepDisabled"):
+                return s.split()[-1] == "1"
+    except Exception as e:
+        log.error("lid stay-awake state: %s", e)
+    return False
+
+
+def _set_lid_stay_awake(enabled: bool):
+    val = "1" if enabled else "0"
+    # Whitelisted in /etc/sudoers.d/disablescreen-pmset → no password prompt.
+    try:
+        r = subprocess.run(
+            ["sudo", "-n", "/usr/bin/pmset", "-a", "disablesleep", val],
+            capture_output=True, text=True, timeout=10,
+        )
+        log.info("lid stay-awake → %s: rc=%d stderr=%s",
+                 enabled, r.returncode, r.stderr.strip())
+        if r.returncode != 0:
+            log.error("sudo NOPASSWD failed — sudoers rule missing? rc=%d", r.returncode)
+    except Exception as e:
+        log.error("lid stay-awake toggle: %s", e)
+
+
+def _build_right_click_menu(delegate):
+    menu = NSMenu.alloc().init()
+
+    login_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Ouvrir au démarrage", "toggleLoginItem:", ""
+    )
+    login_item.setTarget_(delegate)
+    if _is_login_item():
+        login_item.setState_(NSControlStateValueOn)
+    menu.addItem_(login_item)
+
+    lid_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Garder allumé clapet fermé", "toggleLidStayAwake:", ""
+    )
+    lid_item.setTarget_(delegate)
+    if _lid_stay_awake_state():
+        lid_item.setState_(NSControlStateValueOn)
+    menu.addItem_(lid_item)
+
+    menu.addItem_(NSMenuItem.separatorItem())
+
+    quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Quitter", "terminate:", "q")
+    menu.addItem_(quit_item)
+
+    return menu
+
+
 def ensure_status_item(delegate):
     global status_item
     if status_item is None or status_item.button() is None:
         status_item = NSStatusBar.systemStatusBar().statusItemWithLength_(NSSquareStatusItemLength)
         status_item.button().setTarget_(delegate)
         status_item.button().setAction_("togglePanel:")
+        status_item.button().sendActionOn_(AppKit.NSEventMaskLeftMouseUp | AppKit.NSEventMaskRightMouseUp)
     any_dis = any(disabled_displays.values())
     status_item.button().setImage_(_sf("display.slash" if any_dis else "display"))
 
@@ -592,8 +700,8 @@ class AppDelegate(AppKit.NSObject):
         AppDelegate.shared = self
         NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
         ensure_status_item(self)
-        log.info("Started. Displays: %s | SkyLight=%s CoreDisplay=%s",
-                 list_all_online_displays(), _sls is not None, _cd is not None)
+        log.info("Started. Displays: %s | SkyLight=%s CoreDisplay=%s | LoginItem=%s",
+                 list_all_online_displays(), _sls is not None, _cd is not None, _login_item_status_str())
         NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
             self, "screensDidChange:", NSApplicationDidChangeScreenParametersNotification, None
         )
@@ -621,6 +729,11 @@ class AppDelegate(AppKit.NSObject):
         ensure_status_item(self)
 
     def togglePanel_(self, sender):
+        event = NSApp.currentEvent()
+        if event and event.type() == AppKit.NSEventTypeRightMouseUp:
+            menu = _build_right_click_menu(self)
+            status_item.popUpStatusItemMenu_(menu)
+            return
         # Guard against resignKeyWindow → hidePanel → togglePanel_ race:
         # if the panel was just closed (< 200ms ago), don't reopen it
         just_closed = (time.time() - self._panel_last_close) < 0.20
@@ -628,6 +741,16 @@ class AppDelegate(AppKit.NSObject):
             self.hidePanel()
         else:
             self.showPanel()
+
+    def toggleLoginItem_(self, sender):
+        currently = _is_login_item()
+        _set_login_item(not currently)
+        log.info("Login item: %s → %s", currently, not currently)
+
+    def toggleLidStayAwake_(self, sender):
+        currently = _lid_stay_awake_state()
+        _set_lid_stay_awake(not currently)
+        log.info("Lid stay-awake: %s → %s", currently, not currently)
 
     @objc.python_method
     def showPanel(self):
