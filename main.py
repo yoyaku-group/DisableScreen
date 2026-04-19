@@ -321,7 +321,7 @@ def set_display_resolution(display_id: int, width: int, height: int) -> bool:
 
 
 def list_all_online_displays():
-    _, displays, _ = CGGetOnlineDisplayList(16, None, None)
+    _err, displays, _count = CGGetOnlineDisplayList(16, None, None)
     return list(displays)
 
 
@@ -470,7 +470,7 @@ def _build_content(delegate):
 
     H_PAD = 8; H_SEP = 1; H_QUIT = 36; H_LID = 36
     total_h = H_PAD
-    for _, h in sections:
+    for _view, h in sections:
         total_h += h
     total_h += (len(sections) - 1) * (H_SEP + 4)
     total_h += H_SEP + H_QUIT + H_SEP + H_LID + H_PAD
@@ -580,8 +580,11 @@ def _show_popup(delegate):
     btn_win = btn.window()
     if btn_win:
         br = btn_win.convertRectToScreen_(btn.frame())
+        # Anchor to the screen that actually contains the status item (NOT
+        # mainScreen — that's the key-window screen, can differ on multi-display).
+        anchor_screen = btn_win.screen() or NSScreen.mainScreen()
+        sf = anchor_screen.frame()
         px = br.origin.x + br.size.width / 2 - PANEL_W / 2
-        sf = NSScreen.mainScreen().frame()
         px = max(sf.origin.x + 8, min(px, sf.origin.x + sf.size.width - PANEL_W - 8))
         popup_panel.setFrameTopLeftPoint_(NSMakePoint(px, br.origin.y))
 
@@ -768,7 +771,11 @@ class AppDelegate(AppKit.NSObject):
     @objc.python_method
     def showPanel(self):
         self._panel_visible = True
-        _show_popup(self)
+        try:
+            _show_popup(self)
+        except Exception:
+            log.exception("[POPUP] _show_popup crashed")
+            self._panel_visible = False
 
     @objc.python_method
     def hidePanel(self):
@@ -808,7 +815,7 @@ class AppDelegate(AppKit.NSObject):
         idx = sender.indexOfSelectedItem()
         modes = get_display_modes(display_id)
         if 0 <= idx < len(modes):
-            w, h, _ = modes[idx]
+            w, h, _mode = modes[idx]
             set_display_resolution(display_id, w, h)
             NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
                 0.5, self, "delayedRefresh:", None, False
