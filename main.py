@@ -27,9 +27,22 @@ from AppKit import (
     NSWindowCollectionBehaviorCanJoinAllSpaces, NSWindowCollectionBehaviorStationary,
     NSWindowCollectionBehaviorFullScreenAuxiliary, NSWindowCollectionBehaviorIgnoresCycle,
 )
-from Foundation import NSMakeRect, NSNotificationCenter, NSMakePoint
+from Foundation import NSMakeRect, NSNotificationCenter, NSMakePoint, NSBundle
 
 LOG_PATH = Path.home() / "DisableScreen" / "disablescreen.log"
+
+
+# Localization — resolves strings from Contents/Resources/<lang>.lproj/Localizable.strings
+# based on NSLocale.preferredLanguages. Falls back to the key itself if missing.
+def _(key: str, fallback: str = None) -> str:
+    try:
+        s = NSBundle.mainBundle().localizedStringForKey_value_table_(
+            key, fallback or key, None
+        )
+        return str(s)
+    except Exception:
+        return fallback or key
+
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -388,7 +401,7 @@ def _make_display_card(display_id, delegate, w):
     if not builtin:
         y -= H_DDC
         btn = NSButton.alloc().initWithFrame_(NSMakeRect(14, y + 6, w - 28, 24))
-        btn.setTitle_("Cliquez ici pour configurer DDC...")
+        btn.setTitle_(_("button.configure_ddc", "Click to configure DDC..."))
         btn.setBezelStyle_(1)
         btn.setFont_(NSFont.systemFontOfSize_(11.0))
         btn.setTag_(display_id)
@@ -466,7 +479,7 @@ def _build_content(delegate):
     y = H_PAD
 
     q = NSButton.alloc().initWithFrame_(NSMakeRect(14, y + 6, PANEL_W - 28, 24))
-    q.setTitle_("Quitter")
+    q.setTitle_(_("menu.quit", "Quit"))
     q.setBezelStyle_(1)
     q.setFont_(NSFont.systemFontOfSize_(13.0))
     q.setTarget_(NSApp)
@@ -480,7 +493,7 @@ def _build_content(delegate):
     y += H_SEP
 
     lid_on = _lid_stay_awake_state()
-    lid_lbl = NSTextField.labelWithString_("Garder allumé clapet fermé")
+    lid_lbl = NSTextField.labelWithString_(_("menu.keep_awake_lid_closed", "Keep awake with lid closed"))
     lid_lbl.setFrame_(NSMakeRect(14, y + 11, PANEL_W - 80, 14))
     lid_lbl.setFont_(NSFont.systemFontOfSize_(12.0))
     root.addSubview_(lid_lbl)
@@ -657,7 +670,7 @@ def _build_right_click_menu(delegate):
     menu = NSMenu.alloc().init()
 
     login_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "Ouvrir au démarrage", "toggleLoginItem:", ""
+        _("menu.open_at_login", "Open at Login"), "toggleLoginItem:", ""
     )
     login_item.setTarget_(delegate)
     if _is_login_item():
@@ -665,7 +678,7 @@ def _build_right_click_menu(delegate):
     menu.addItem_(login_item)
 
     lid_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "Garder allumé clapet fermé", "toggleLidStayAwake:", ""
+        _("menu.keep_awake_lid_closed", "Keep awake with lid closed"), "toggleLidStayAwake:", ""
     )
     lid_item.setTarget_(delegate)
     if _lid_stay_awake_state():
@@ -674,7 +687,7 @@ def _build_right_click_menu(delegate):
 
     menu.addItem_(NSMenuItem.separatorItem())
 
-    quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Quitter", "terminate:", "q")
+    quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(_("menu.quit", "Quit"), "terminate:", "q")
     menu.addItem_(quit_item)
 
     return menu

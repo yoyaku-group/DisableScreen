@@ -1,0 +1,6 @@
+/* DisableScreen — French strings */
+
+"menu.quit" = "Quitter";
+"menu.open_at_login" = "Ouvrir au démarrage";
+"menu.keep_awake_lid_closed" = "Garder allumé clapet fermé";
+"button.configure_ddc" = "Cliquez ici pour configurer DDC...";

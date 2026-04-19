@@ -1,8 +1,9 @@
 #!/bin/bash
 # Build DisableScreen.app bundle.
 # Layout:
-#   Contents/MacOS/DisableScreen  = compiled Obj-C launcher (SMAppService + execs python3)
-#   Contents/Resources/main.py    = PyObjC menubar app
+#   Contents/MacOS/DisableScreen        = compiled Obj-C launcher (SMAppService + execs python3)
+#   Contents/Resources/main.py          = PyObjC menubar app
+#   Contents/Resources/<lang>.lproj/... = Localizable.strings per language
 #   Contents/Info.plist
 set -e
 
@@ -24,6 +25,11 @@ clang -fobjc-arc -framework Foundation -framework ServiceManagement \
 cp "$SCRIPT_DIR/main.py" "$RES/main.py"
 cp "$SCRIPT_DIR/Info.plist" "$APP/Contents/Info.plist"
 [ -f "$SCRIPT_DIR/AppIcon.icns" ] && cp "$SCRIPT_DIR/AppIcon.icns" "$RES/AppIcon.icns"
+
+# Copy localization bundles.
+for d in "$SCRIPT_DIR"/*.lproj; do
+    [ -d "$d" ] && cp -R "$d" "$RES/"
+done
 
 # Ad-hoc sign (SMAppService requires a signed binary).
 codesign --force --sign - "$APP"

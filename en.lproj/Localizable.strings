@@ -1,0 +1,6 @@
+/* DisableScreen — English strings */
+
+"menu.quit" = "Quit";
+"menu.open_at_login" = "Open at Login";
+"menu.keep_awake_lid_closed" = "Keep awake with lid closed";
+"button.configure_ddc" = "Click to configure DDC...";
