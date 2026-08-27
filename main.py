@@ -586,7 +586,19 @@ def _show_popup(delegate):
         sf = anchor_screen.frame()
         px = br.origin.x + br.size.width / 2 - PANEL_W / 2
         px = max(sf.origin.x + 8, min(px, sf.origin.x + sf.size.width - PANEL_W - 8))
-        popup_panel.setFrameTopLeftPoint_(NSMakePoint(px, br.origin.y))
+        # Vertical clamp: a Bartender-collapsed status item reports an
+        # off-screen button frame (observed y=1120 on a 1117pt screen),
+        # which used to open the panel below the visible area.
+        y_top = br.origin.y
+        y_top = min(y_top, sf.origin.y + sf.size.height - 2.0)
+        y_top = max(y_top, sf.origin.y + panel_h + 2.0)
+        popup_panel.setFrameTopLeftPoint_(NSMakePoint(px, y_top))
+    else:
+        # No resolvable status-item window: anchor top-right of main screen.
+        sf = NSScreen.mainScreen().frame()
+        px = sf.origin.x + sf.size.width - PANEL_W - 12
+        popup_panel.setFrameTopLeftPoint_(
+            NSMakePoint(px, sf.origin.y + sf.size.height - 40.0))
 
     popup_panel.makeKeyAndOrderFront_(None)
 
@@ -724,6 +736,13 @@ class AppDelegate(AppKit.NSObject):
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             5.0, self, "pollScreens:", None, True
         )
+
+    def applicationShouldHandleReopen_hasVisibleWindows_(self, sender, has_visible):
+        # Finder double-click / `open -a` on the already-running app must
+        # still show the panel even when the menu-bar icon is collapsed
+        # (Bartender). Fixes "app won't open" reports.
+        self.togglePanel_(None)
+        return True
 
     def applicationWillTerminate_(self, notification):
         for did, is_dis in list(disabled_displays.items()):
