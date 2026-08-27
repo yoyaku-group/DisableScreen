@@ -4,6 +4,7 @@
 import AppKit
 import objc
 import ctypes
+import json
 import logging
 import subprocess
 import time
@@ -635,6 +636,32 @@ def _login_item_status_str() -> str:
         return "unknown"
 
 
+_SETTINGS = Path.home() / "DisableScreen" / "settings.json"
+
+
+def _read_wants_login_item():
+    """True/False if the user ever toggled the login item, None otherwise.
+    Stored as a plain file: this PyObjC process is exec'd from the Python
+    framework, so NSUserDefaults does not reliably resolve the app domain."""
+    try:
+        v = json.loads(_SETTINGS.read_text()).get("wants_login_item")
+        return v if isinstance(v, bool) else None
+    except Exception:
+        return None
+
+
+def _write_wants_login_item(value: bool):
+    try:
+        _SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if _SETTINGS.exists():
+            data = json.loads(_SETTINGS.read_text())
+        data["wants_login_item"] = value
+        _SETTINGS.write_text(json.dumps(data, indent=2))
+    except Exception as e:
+        log.error("settings write: %s", e)
+
+
 def _is_login_item() -> bool:
     return _login_item_status_str() == "enabled"
 
@@ -728,6 +755,15 @@ class AppDelegate(AppKit.NSObject):
         AppDelegate.shared = self
         NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
         ensure_status_item(self)
+        # Self-heal the login item: a rebuild changes the ad-hoc signature and
+        # silently drops the SMAppService registration. Restore the user's
+        # last known choice without asking again (trap found 2026-08-27).
+        _wants_li = _read_wants_login_item()
+        if _wants_li is None:
+            _write_wants_login_item(_is_login_item())
+        elif _wants_li and not _is_login_item():
+            _set_login_item(True)
+            log.info("[SELF-HEAL] login item re-registered (signature changed by rebuild)")
         log.info("Started. Displays: %s | SkyLight=%s CoreDisplay=%s | LoginItem=%s",
                  list_all_online_displays(), _sls is not None, _cd is not None, _login_item_status_str())
         NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
@@ -780,6 +816,7 @@ class AppDelegate(AppKit.NSObject):
     def toggleLoginItem_(self, sender):
         currently = _is_login_item()
         _set_login_item(not currently)
+        _write_wants_login_item(not currently)
         log.info("Login item: %s → %s", currently, not currently)
 
     def toggleLidStayAwake_(self, sender):
