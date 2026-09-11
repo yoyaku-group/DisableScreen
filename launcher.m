@@ -6,7 +6,11 @@
 #include <time.h>
 
 static void launcher_log(const char *fmt, ...) {
-    FILE *f = fopen("/Users/yoyaku/DisableScreen/launcher.log", "a");
+    const char *home = getenv("HOME");
+    if (!home) return;
+    char path[1024];
+    snprintf(path, sizeof path, "%s/DisableScreen/launcher.log", home);
+    FILE *f = fopen(path, "a");
     if (!f) return;
     time_t t = time(NULL);
     char ts[32]; strftime(ts, sizeof ts, "%F %T", localtime(&t));

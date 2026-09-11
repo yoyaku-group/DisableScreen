@@ -624,12 +624,21 @@ def _hide_popup():
 # Login item management: the compiled launcher binary (this app's main executable)
 # owns SMAppService calls, because NSBundle.mainBundle() resolves to DisableScreen.app
 # only when called from the bundled binary — not from the Python interpreter.
-_LAUNCHER = "/Applications/DisableScreen.app/Contents/MacOS/DisableScreen"
+def _launcher_path() -> str:
+    """Path to the DisableScreen launcher executable (the binary that launched
+    this Python interpreter). Resolved at runtime via NSBundle — falls back to
+    the standard install location when running outside a bundle (e.g. dev)."""
+    b = NSBundle.mainBundle()
+    if b is not None:
+        p = b.executablePath()
+        if p:
+            return str(p)
+    return "/Applications/DisableScreen.app/Contents/MacOS/DisableScreen"
 
 
 def _login_item_status_str() -> str:
     try:
-        out = subprocess.check_output([_LAUNCHER, "--status"], text=True, timeout=5).strip()
+        out = subprocess.check_output([_launcher_path(), "--status"], text=True, timeout=5).strip()
         return out
     except Exception as e:
         log.error("login status: %s", e)
@@ -669,7 +678,7 @@ def _is_login_item() -> bool:
 def _set_login_item(enabled: bool):
     arg = "--register" if enabled else "--unregister"
     try:
-        r = subprocess.run([_LAUNCHER, arg], capture_output=True, text=True, timeout=10)
+        r = subprocess.run([_launcher_path(), arg], capture_output=True, text=True, timeout=10)
         log.info("login item %s: rc=%d stderr=%s new_status=%s",
                  arg, r.returncode, r.stderr.strip(), _login_item_status_str())
         if r.returncode != 0 and enabled and _login_item_status_str() == "requiresApproval":

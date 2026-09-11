@@ -1,0 +1,20 @@
+# Normalize line endings for source files (LF everywhere).
+# Disable macOS Finder from mangling metadata.
+
+*.py     text eol=lf
+*.m      text eol=lf
+*.h      text eol=lf
+*.sh     text eol=lf
+*.plist  text eol=lf
+*.strings text eol=lf
+*.md     text eol=lf
+LICENSE  text eol=lf
+
+# Binary assets
+*.icns binary
+*.png   binary
+*.jpg   binary
+
+# Build artifacts
+DisableScreen.app/        export-ignore
+__pycache__/              export-ignore

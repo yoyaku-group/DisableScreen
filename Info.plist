@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>fr.yoyaku.DisableScreen</string>
+    <string>com.benjaminbelaga.DisableScreen</string>
     <key>CFBundleName</key>
     <string>DisableScreen</string>
     <key>CFBundleExecutable</key>
