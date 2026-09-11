@@ -3,4 +3,5 @@
 "menu.quit" = "Quit";
 "menu.open_at_login" = "Open at Login";
 "menu.keep_awake_lid_closed" = "Keep awake with lid closed";
+"button.open_display_settings" = "Open macOS Display Settings…";
 "button.configure_ddc" = "Click to configure DDC...";

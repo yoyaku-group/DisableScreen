@@ -21,5 +21,25 @@ Ran 8 tests in 0.76s
 OK
 ```
 
-## G1 / G2
-NOT_TESTED — à venir (voir PROGRESS.md).
+## G1 — attentes inversées sur le main.py corrigé + e2e sur l'app installée
+
+```
+$ python3.12 -m unittest tests.test_main_fixed tests.legacy_defects.test_reproductions
+Ran 18 tests in ~1.0s
+OK                          # 10 inversés (fixed) + 8 reproductions (archive), rc=0
+```
+
+Livraison locale (build arm64 + swap /Applications, réversible) :
+```
+$ ./build.sh            → Built DisableScreen.app (adhoc, com.benjaminbelaga.DisableScreen)
+# swap + relance
+log: [SELF-HEAL] login item re-registered (signature changed by rebuild)   # A17 vérifié
+log: Started. Displays: [1] | SkyLight=True CoreDisplay=True
+$ .../MacOS/DisableScreen --status → enabled
+$ python3.12 test_e2e.py → tous PASS, 0 FAIL (skips 0)
+```
+
+NOT_TESTED (live) : toggle pmset disablesleep 0→1→0 réel (logique prouvée par A03 unit tests ; non exercé sur le flag root pour ne pas perturber l'instance live).
+
+## G2
+NOT_TESTED — noyau Swift + CLI (à venir, voir PROGRESS.md).
