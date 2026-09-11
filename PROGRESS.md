@@ -18,7 +18,13 @@ Statuts stricts : **DONE** (fait + vérifié) · **FAILED** · **NOT_TESTED** ·
 - NOT_DONE (backlog G3) — A11 (identité écran stable), A12 (backend partiel), A14 (helper borné remplace sudoers), A16 (bundle Swift autonome), A18 (identité de mode stable), A20/A21 (CI/Store).
 
 ## G2 — Noyau Swift + CLI + wrapper idle
-- NOT_TESTED — Package.swift, RunClosedCore, RunClosedMacSystem, CLI `runclosed`, tests.
+- DONE — `Package.swift` (swift-tools 6.0, macOS 14, zéro dépendance externe).
+- DONE — `RunClosedCore` : Models (Codable, schemaVersion), Clock injectable, `LeaseEngine` (acquire idempotent, reap expiration + autre boot, decide keep-awake), `DisplayPolicy.canDeactivate` (garde dernier écran). Aucun import AppKit.
+- DONE — `RunClosedMacSystem` : `DisplayInventory` (CoreGraphics read-only, capability honnête native/softwareDim + détection d'ambiguïté), `IdleAssertion` (IOPMAssertionCreateWithName), `PowerReadback` (pmset tri-état), `BootID` (sysctl).
+- DONE — CLI `runclosed` : `status/displays/doctor --json`, `run [--idle-only] [--max] -- <cmd>` (préflight + assertion + lease + propagation du code de sortie + relais SIGINT/SIGTERM), `run --lid` → **exit 3** avant lancement, `restore --owned` → stub G3.
+- DONE — `swift test` : **9/9 OK** (idempotence, expiration, autre boot, keep-awake états, release, dernier écran, unknown≠off, erreur≠succès).
+- DONE — vérif live : `displays`/`doctor` corrects, `run --lid`→3, `run --idle-only -- sh -c 'exit 7'`→7, assertion `PreventUserIdleSystemSleep` visible dans `pmset -g assertions` pendant le run + lease dans `status`, tout libéré après.
 
 ## G3 — Capot
-- BLOCKED_HARDWARE — un seul écran, capot non testable sans Ben présent. Protocole `scripts/hardware/lid-qualification.sh` à préparer (opt-in).
+- BLOCKED_HARDWARE — un seul écran XDR intégré ; capot non testable sans Ben présent. Protocole `scripts/hardware/lid-qualification.sh` **prêt** (opt-in `RUNCLOSED_HW_OPTIN=1`, refuse sinon = vérifié ; baseline→set→témoin 10s→cycle capot→restore→verdict PASS/FAIL/INDÉTERMINÉ). `restore --owned` = stub.
+- NOT_DONE (backlog) : G2 suite (UI AppKit à parité écrans, suppression launcher Python), G4 (adaptateurs Claude/Codex), G5 (Developer ID/notarisation/rename public).

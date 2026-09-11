@@ -41,5 +41,24 @@ $ python3.12 test_e2e.py → tous PASS, 0 FAIL (skips 0)
 
 NOT_TESTED (live) : toggle pmset disablesleep 0→1→0 réel (logique prouvée par A03 unit tests ; non exercé sur le flag root pour ne pas perturber l'instance live).
 
-## G2
-NOT_TESTED — noyau Swift + CLI (à venir, voir PROGRESS.md).
+## G2 — noyau Swift + CLI + wrapper idle
+
+```
+$ arch -arm64 swift build   → Build complete! (aucun warning)
+$ arch -arm64 swift test    → Executed 9 tests, with 0 failures   (LeaseEngine/DisplayPolicy/ModelHonesty)
+```
+
+Vérif CLI live (M5 Max, macOS 26.6) :
+```
+$ runclosed displays --json   → [ builtin, brightness=supported/native, mode 1728x1117 ]
+$ runclosed doctor  --json    → lid.backend="unqualified", idleAssertion.capability="supported", lidStayAwake="off"
+$ runclosed run --lid -- true             → exit 3 (refusé avant lancement)
+$ runclosed run --idle-only -- sh -c 'exit 7'  → exit 7 (code propagé)
+$ runclosed run --idle-only -- sleep 4 &  → pmset -g assertions montre
+    pid …(runclosed): PreventUserIdleSystemSleep named: "runclosed run: sleep 4"
+   status --json (mid-run) → keepAwake=true, 1 lease "working"
+   status --json (après)   → keepAwake=false, 0 lease ; 0 assertion runclosed
+```
+
+## G3
+BLOCKED_HARDWARE — `scripts/hardware/lid-qualification.sh` refuse sans `RUNCLOSED_HW_OPTIN=1` (vérifié, exit 3). Non exécuté (un seul écran, capot).
