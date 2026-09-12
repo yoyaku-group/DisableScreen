@@ -27,10 +27,10 @@ struct LeaseStore {
 
     func save(_ engine: LeaseEngine) {
         guard let data = try? JSONEncoder().encode(engine.leases) else { return }
-        // Atomic write: temp + rename, so a crash never leaves a torn file.
-        let tmp = url.appendingPathExtension("tmp")
-        try? data.write(to: tmp, options: .atomic)
-        try? FileManager.default.removeItem(at: url)
-        try? FileManager.default.moveItem(at: tmp, to: url)
+        // `.atomic` writes a sibling temp file then rename(2)s it into place in a
+        // single step — a crash leaves either the old file or the new one, never
+        // a torn or missing one. (The previous remove-then-move dance was NOT
+        // atomic: a crash between the two lost the lease file entirely.)
+        try? data.write(to: url, options: .atomic)
     }
 }

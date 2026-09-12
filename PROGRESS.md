@@ -25,6 +25,13 @@ Statuts stricts : **DONE** (fait + vérifié) · **FAILED** · **NOT_TESTED** ·
 - DONE — `swift test` : **9/9 OK** (idempotence, expiration, autre boot, keep-awake états, release, dernier écran, unknown≠off, erreur≠succès).
 - DONE — vérif live : `displays`/`doctor` corrects, `run --lid`→3, `run --idle-only -- sh -c 'exit 7'`→7, assertion `PreventUserIdleSystemSleep` visible dans `pmset -g assertions` pendant le run + lease dans `status`, tout libéré après.
 
+## Audit pré-merge PR #1 (2026-09-12) — durcissement recovery/ownership
+- DONE — **B1** `_set_lid_stay_awake` : pré-état `None` (illisible) → REFUSE la mutation (`precondition_unknown`, `mutated=False`), aucun write pmset, aucun ownership. Invariant UNKNOWN ≠ OFF appliqué au point de mutation.
+- DONE — **B2** ownership prouvé par observation : activation ne réclame l'ownership que si `rc==0` **ET** readback `observed is True` ; désactivation manuelle ne libère que si readback `observed is False` ; `_restore_owned_lid_on_quit` ne supprime le `lid_owner` qu'après readback confirmant OFF, sinon garde le record + log `RESTORE_FAILED` (retry possible au prochain run).
+- DONE — **B3** `_reactivate_owned_displays` : réécrit le record depuis le **résultat de réactivation** (IDs FAILED/exception conservés), plus jamais reconstruit depuis `disabled_displays` (vide au lancement). Writer atomique partagé `_write_owned_disabled` (temp + `os.replace`).
+- DONE — **latent Swift** `LeaseStore.save` : `write(.atomic)` direct au lieu de `write(tmp)+remove(url)+move` (non atomique, crash entre remove/move = fichier de leases perdu).
+- DONE — 9 régressions inversées `tests/test_main_fixed.py::RecoverySafety` (B1/B2/B3) vertes ; suite combinée **27/27** ; `swift test` **9/9** ; CLI live round-trip leases OK.
+
 ## G3 — Capot
 - BLOCKED_HARDWARE — un seul écran XDR intégré ; capot non testable sans Ben présent. Protocole `scripts/hardware/lid-qualification.sh` **prêt** (opt-in `RUNCLOSED_HW_OPTIN=1`, refuse sinon = vérifié ; baseline→set→témoin 10s→cycle capot→restore→verdict PASS/FAIL/INDÉTERMINÉ). `restore --owned` = stub.
 - NOT_DONE (backlog) : G2 suite (UI AppKit à parité écrans, suppression launcher Python), G4 (adaptateurs Claude/Codex), G5 (Developer ID/notarisation/rename public).

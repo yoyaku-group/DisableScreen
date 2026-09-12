@@ -153,5 +153,128 @@ class FixedBehaviour(unittest.TestCase):
         self.assertIn('"Started." in content', e2e)
 
 
+class RecoverySafety(unittest.TestCase):
+    """2026-09-12 post-audit: three residual recovery/ownership defects that
+    must stay fixed before the PR merges (UNKNOWN != OFF; never drop ownership
+    before a verified restore; never lose a FAILED display id)."""
+
+    # ── B1 — an unknown pre-state must block the disablesleep mutation ────────
+    def test_b1_unknown_prestate_blocks_mutation(self):
+        mod = _load_fixed_main()
+        pmset_calls, owner_writes = [], []
+        mod._pmset_disablesleep = lambda v: pmset_calls.append(v) or 0
+        mod._lid_stay_awake_state = lambda: None          # baseline unobservable
+        mod._write_lid_owner = lambda rec: owner_writes.append(rec)
+        res = mod._set_lid_stay_awake(True)
+        self.assertEqual(pmset_calls, [])                 # never wrote the flag
+        self.assertEqual(owner_writes, [])                # never claimed ownership
+        self.assertTrue(res["precondition_unknown"])
+        self.assertFalse(res["mutated"])
+
+    # ── B2 — ownership requires a verified read-back, both ways ───────────────
+    def test_b2_activation_claims_ownership_only_when_readback_true(self):
+        mod = _load_fixed_main()
+        mod._pmset_disablesleep = lambda v: 0
+        mod._current_boot_uuid = lambda: "BOOT-A"
+        # No lying owner when the write returns rc=0 but the flag did NOT flip.
+        states = iter([False, False])                     # before OFF, after still OFF
+        mod._lid_stay_awake_state = lambda: next(states)
+        owner_writes = []
+        mod._write_lid_owner = lambda rec: owner_writes.append(rec)
+        mod._set_lid_stay_awake(True)
+        self.assertEqual(owner_writes, [])                # observed != True → no ownership
+        # And ownership IS claimed once the read-back proves the flip.
+        mod2 = _load_fixed_main()
+        mod2._pmset_disablesleep = lambda v: 0
+        mod2._current_boot_uuid = lambda: "BOOT-A"
+        s2 = iter([False, True])                          # before OFF, after ON
+        mod2._lid_stay_awake_state = lambda: next(s2)
+        w2 = []
+        mod2._write_lid_owner = lambda rec: w2.append(rec)
+        mod2._set_lid_stay_awake(True)
+        self.assertEqual(len(w2), 1)
+        self.assertEqual(w2[0]["boot_uuid"], "BOOT-A")
+
+    def test_b2_manual_deactivation_releases_only_when_readback_off(self):
+        mod = _load_fixed_main()
+        mod._pmset_disablesleep = lambda v: 0
+        # rc=0 but flag stays ON → must NOT drop ownership.
+        s = iter([True, True])
+        mod._lid_stay_awake_state = lambda: next(s)
+        w = []
+        mod._write_lid_owner = lambda rec: w.append(rec)
+        mod._set_lid_stay_awake(False)
+        self.assertEqual(w, [])
+        # rc=0 and flag verified OFF → release.
+        mod2 = _load_fixed_main()
+        mod2._pmset_disablesleep = lambda v: 0
+        s2 = iter([True, False])
+        mod2._lid_stay_awake_state = lambda: next(s2)
+        w2 = []
+        mod2._write_lid_owner = lambda rec: w2.append(rec)
+        mod2._set_lid_stay_awake(False)
+        self.assertEqual(w2, [None])
+
+    def _owned_restore_case(self, rc, states):
+        """Helper: run _restore_owned_lid_on_quit with a live owner and return the
+        surviving owner record."""
+        mod = _load_fixed_main()
+        mod._current_boot_uuid = lambda: "BOOT-A"
+        mod._pmset_disablesleep = lambda v: rc
+        it = iter(states)
+        mod._lid_stay_awake_state = lambda: next(it)
+        box = {"v": {"prev": False, "boot_uuid": "BOOT-A", "set_at": 0}}
+        mod._read_lid_owner = lambda: box["v"]
+        mod._write_lid_owner = lambda rec: box.__setitem__("v", rec)
+        mod._restore_owned_lid_on_quit()
+        return box["v"]
+
+    def test_b2_restore_keeps_ownership_on_rc_failure(self):
+        # guard sees ON, pmset rc=1, post-restore still ON → keep for retry.
+        self.assertIsNotNone(self._owned_restore_case(1, [True, True]))
+
+    def test_b2_restore_keeps_ownership_when_readback_still_on(self):
+        # pmset rc=0 but flag never goes off → keep for retry.
+        self.assertIsNotNone(self._owned_restore_case(0, [True, True]))
+
+    def test_b2_restore_clears_ownership_only_when_verified_off(self):
+        # guard sees ON, pmset rc=0, post-restore OFF → release.
+        self.assertIsNone(self._owned_restore_case(0, [True, False]))
+
+    # ── B3 — display recovery must retain ids it could not bring back online ──
+    def _run_reactivate(self, mod, owned, sls_ok, online_ids, raise_on=None):
+        import json as _json
+        data = _json.loads(mod._SETTINGS.read_text()) if mod._SETTINGS.exists() else {}
+        data["owned_disabled_displays"] = owned
+        mod._SETTINGS.write_text(_json.dumps(data))
+
+        def _sls(did, enabled):
+            if raise_on is not None and did == raise_on:
+                raise RuntimeError("backend blew up")
+            return sls_ok
+        mod._sls_set_display_enabled = _sls
+        mod.list_all_online_displays = lambda: list(online_ids)
+        mod.AppDelegate._reactivate_owned_displays(object())
+        return _json.loads(mod._SETTINGS.read_text())["owned_disabled_displays"]
+
+    def test_b3_only_failed_display_id_is_retained(self):
+        mod = _load_fixed_main()
+        # 101 comes back online (DONE), 102 does not (FAILED) → only 102 retained.
+        out = self._run_reactivate(mod, [101, 102], sls_ok=True, online_ids=[101])
+        self.assertEqual(out, [102])
+
+    def test_b3_exception_keeps_display_id(self):
+        mod = _load_fixed_main()
+        # backend raises for 102 → id must survive, not vanish.
+        out = self._run_reactivate(mod, [101, 102], sls_ok=True,
+                                    online_ids=[101], raise_on=102)
+        self.assertEqual(out, [102])
+
+    def test_b3_all_recovered_clears_list(self):
+        mod = _load_fixed_main()
+        out = self._run_reactivate(mod, [101, 102], sls_ok=True, online_ids=[101, 102])
+        self.assertEqual(out, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

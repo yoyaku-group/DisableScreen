@@ -6,6 +6,7 @@ import objc
 import ctypes
 import json
 import logging
+import os
 import subprocess
 import threading
 import time
@@ -818,22 +819,32 @@ def _pmset_disablesleep(val: str) -> int:
 def _set_lid_stay_awake(enabled: bool) -> dict:
     """Set the flag with ownership tracking (A03) and a typed result (A10).
 
-    Records {prev, boot_uuid, set_at} in settings.json the first time WE flip
-    OFF→ON, so quit can restore exactly what we changed. Returns
-    {desired, native_rc, observed}."""
+    Invariant UNKNOWN != OFF (2026-09-12): the disablesleep flag is a global,
+    root-scoped, persistent effect. We NEVER mutate it without an observable
+    baseline — a write with no known pre-state leaves us unable to tell what to
+    restore. Ownership is claimed only when the write AND the read-back BOTH
+    prove the flag flipped OFF→ON, and released only when the read-back confirms
+    it is actually OFF. Returns
+    {desired, native_rc, observed, precondition_unknown, mutated}."""
     before = _lid_stay_awake_state()
+    if before is None:
+        # No observable baseline → refuse the mutation (never write blind).
+        log.warning("lid stay-awake: pre-state UNKNOWN → refusing mutation (UNKNOWN != OFF)")
+        return {"desired": enabled, "native_rc": None, "observed": None,
+                "precondition_unknown": True, "mutated": False}
     val = "1" if enabled else "0"
     rc = _pmset_disablesleep(val)
     observed = _lid_stay_awake_state()
-    if rc == 0 and enabled and before is False:
-        # We are the ones enabling it → claim ownership.
+    if enabled and rc == 0 and before is False and observed is True:
+        # Write AND read-back both confirm WE flipped OFF→ON → claim ownership.
         _write_lid_owner({"prev": False, "boot_uuid": _current_boot_uuid(),
                            "set_at": time.time()})
-    elif rc == 0 and not enabled:
-        # User turned it back off → release any ownership we held.
+    elif not enabled and rc == 0 and observed is False:
+        # Read-back confirms the flag is actually OFF → release ownership.
         _write_lid_owner(None)
     log.info("lid stay-awake desired=%s rc=%d observed=%s", enabled, rc, observed)
-    return {"desired": enabled, "native_rc": rc, "observed": observed}
+    return {"desired": enabled, "native_rc": rc, "observed": observed,
+            "precondition_unknown": False, "mutated": True}
 
 
 def _read_lid_owner():
@@ -856,6 +867,22 @@ def _write_lid_owner(record):
         log.error("lid owner write: %s", e)
 
 
+def _write_owned_disabled(ids):
+    """Atomically persist the exact list of display ids we still own as disabled
+    (A04). Explicit list in → explicit list out; callers decide the contents.
+    Atomic (temp file + os.replace) so an interrupted write never truncates the
+    recovery record."""
+    try:
+        _SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+        data = json.loads(_SETTINGS.read_text()) if _SETTINGS.exists() else {}
+        data["owned_disabled_displays"] = [int(i) for i in ids]
+        tmp = _SETTINGS.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, indent=2))
+        os.replace(tmp, _SETTINGS)
+    except Exception as e:
+        log.error("persist owned displays: %s", e)
+
+
 def _restore_owned_lid_on_quit():
     """On quit, restore disablesleep ONLY if we own it, same boot, and it still
     reads as ON (A03). Otherwise log conflict/stale and touch nothing."""
@@ -871,8 +898,16 @@ def _restore_owned_lid_on_quit():
         _write_lid_owner(None)
         return
     log.info("[QUIT] restoring disablesleep to owned prev=%s", owner.get("prev"))
-    _pmset_disablesleep("0")
-    _write_lid_owner(None)
+    rc = _pmset_disablesleep("0")
+    observed = _lid_stay_awake_state()
+    if rc == 0 and observed is False:
+        # Read-back confirms the flag is actually back OFF → release ownership.
+        _write_lid_owner(None)
+    else:
+        # Restore did not verifiably take effect. NEVER drop the only record that
+        # lets a later run know it must retry — keep it and surface the failure.
+        log.error("[QUIT] RESTORE_FAILED disablesleep observed=%s rc=%d → keeping owner for retry",
+                  observed, rc)
 
 
 def _purge_stale_lid_owner_at_launch():
@@ -994,19 +1029,40 @@ class AppDelegate(AppKit.NSObject):
     def _reactivate_owned_displays(self):
         """A04: displays WE disabled are persisted; on launch try to re-enable
         them with a read-back, logging DONE/FAILED. Prevents an owned display from
-        staying dark across a restart with no way back."""
+        staying dark across a restart with no way back.
+
+        2026-09-12: retain the ids we could NOT verifiably bring back online. The
+        persisted record must be rewritten from the *reactivation outcome*, never
+        rebuilt from the live `disabled_displays` map (empty at launch) — that
+        would silently forget a display that is still dark."""
         owned = []
         try:
             owned = json.loads(_SETTINGS.read_text()).get("owned_disabled_displays", [])
         except Exception:
             pass
+        if not owned:
+            return
+        still_owned = []
         for did in list(owned):
-            ok = _sls_set_display_enabled(int(did), True)
-            online = did in list_all_online_displays()
+            try:
+                ok = _sls_set_display_enabled(int(did), True)
+                online = int(did) in [int(x) for x in list_all_online_displays()]
+            except Exception as e:
+                # Backend raised mid-recovery → keep the id; do not lose it.
+                log.error("[LAUNCH] re-enable owned display %s raised %s → keeping for retry", did, e)
+                still_owned.append(did)
+                disabled_displays[int(did)] = True
+                continue
+            done = bool(ok and online)
             log.info("[LAUNCH] re-enable owned display %s: sls_ok=%s online=%s → %s",
-                     did, ok, online, "DONE" if online else "FAILED")
-        if owned:
-            self._persist_owned_disabled()  # rewrite from current disabled_displays
+                     did, ok, online, "DONE" if done else "FAILED")
+            if not done:
+                # Still dark / unverified → retain for a later retry and reflect
+                # the real runtime state.
+                still_owned.append(did)
+                disabled_displays[int(did)] = True
+        # Persist ONLY the still-owned (FAILED/unknown) ids — atomic, explicit.
+        _write_owned_disabled(still_owned)
 
     def applicationShouldHandleReopen_hasVisibleWindows_(self, sender, has_visible):
         # Finder double-click / `open -a` on the already-running app must
@@ -1024,13 +1080,10 @@ class AppDelegate(AppKit.NSObject):
 
     @objc.python_method
     def _persist_owned_disabled(self):
-        try:
-            _SETTINGS.parent.mkdir(parents=True, exist_ok=True)
-            data = json.loads(_SETTINGS.read_text()) if _SETTINGS.exists() else {}
-            data["owned_disabled_displays"] = [d for d, v in disabled_displays.items() if v]
-            _SETTINGS.write_text(json.dumps(data, indent=2))
-        except Exception as e:
-            log.error("persist owned displays: %s", e)
+        # Live-toggle path: `disabled_displays` reflects reality here, so
+        # rebuilding the record from it is correct. (Launch recovery uses the
+        # explicit `_write_owned_disabled` writer instead — see A04 note.)
+        _write_owned_disabled([d for d, v in disabled_displays.items() if v])
 
     def refreshFromStatusCache_(self, _sender):
         # A09: called on the main thread once the background probe finished.

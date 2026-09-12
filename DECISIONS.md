@@ -12,6 +12,7 @@ Décisions d'architecture. Un ADR = une décision. Nom RunClosed **provisoire** 
 | 006 | Broadcast DDC/IOKit supprimé ; `brightness.external = softwareDim` (honnête), pas de faux DDC. | Aucun transport par-écran prouvé (A02, invariant 1). |
 | 007 | `run --lid` refuse tant que le backend capot n'est pas qualifié (Phase 3, opt-in matériel). `run --idle-only` = premier wrapper réel sur API publique `IOPMAssertionCreateWithName`. | Une assertion idle publique ne couvre pas la fermeture du capot (S01). Pas de promesse non tenue. |
 | 008 | Distribution directe signée/notarisée avant toute variante App Store. | Le Store exige des API publiques ; la notarisation ne transforme pas une API privée en publique. |
+| 009 | **Un effet global/root n'est jamais muté sans baseline observable, et un état de récupération n'est jamais supprimé avant qu'un readback ne confirme le retour à l'état visé.** UNKNOWN ≠ OFF ; succès d'API ≠ succès observable. (Généralise ADR 005 aux 3 chemins : flag capot, écrans possédés, leases.) | Audit pré-merge PR #1 (2026-09-12) : 3 défauts recovery où un pré-état inconnu était traité comme OFF, où l'ownership était lâché avant readback, et où un écran non ré-activé perdait son id. La correction fait de l'observation (pas du rc d'API seul) la condition de tout write/delete d'état de récupération. |
 
 ## Décisions de périmètre (cette tranche G0–G2)
 

@@ -62,3 +62,42 @@ $ runclosed run --idle-only -- sleep 4 &  → pmset -g assertions montre
 
 ## G3
 BLOCKED_HARDWARE — `scripts/hardware/lid-qualification.sh` refuse sans `RUNCLOSED_HW_OPTIN=1` (vérifié, exit 3). Non exécuté (un seul écran, capot).
+
+## Audit pré-merge PR #1 (2026-09-12) — 3 défauts recovery/ownership + 1 latent Swift
+
+Revue externe (ChatGPT) validée ligne-à-ligne contre le code réel puis corrigée. 4 régressions inversées + suite existante toujours verte.
+
+```
+$ python3.12 -m unittest tests.test_main_fixed tests.legacy_defects.test_reproductions
+Ran 27 tests in 0.55s
+OK          # 19 fixed (dont 9 RecoverySafety B1/B2/B3) + 8 reproductions archive
+```
+
+Nouvelles régressions (`tests/test_main_fixed.py::RecoverySafety`) :
+```
+test_b1_unknown_prestate_blocks_mutation ................ ok  # pre-read=None → 0 pmset, 0 owner
+test_b2_activation_claims_ownership_only_when_readback_true  ok  # rc=0 + observed False → pas d'owner mensonger
+test_b2_manual_deactivation_releases_only_when_readback_off  ok  # disable rc=0 + still ON → owner conservé
+test_b2_restore_keeps_ownership_on_rc_failure ........... ok  # restore rc!=0 → RESTORE_FAILED, owner gardé
+test_b2_restore_keeps_ownership_when_readback_still_on .. ok  # restore rc=0 + still ON → owner gardé
+test_b2_restore_clears_ownership_only_when_verified_off . ok  # readback OFF → owner libéré
+test_b3_only_failed_display_id_is_retained ............. ok  # 2 owned, 1 OK + 1 FAIL → seul le FAIL reste
+test_b3_exception_keeps_display_id ..................... ok  # backend lève → id conservé
+test_b3_all_recovered_clears_list ..................... ok  # tous OK → liste vide
+```
+Logs observés confirmant le fix (extraits) :
+```
+[QUIT] RESTORE_FAILED disablesleep observed=True rc=1 → keeping owner for retry
+[LAUNCH] re-enable owned display 102: sls_ok=True online=False → FAILED
+```
+
+Swift (noyau inchangé + fix atomicité `LeaseStore.save`) :
+```
+$ arch -arm64 swift build   → Build complete! (aucun warning)
+$ arch -arm64 swift test    → Executed 9 tests, with 0 failures
+$ runclosed run --idle-only -- sh -c 'exit 7'   → exit 7
+$ runclosed doctor --json                       → idleAssertion supported, lid unqualified
+$ cat …/RunClosed/leases.json (après run)       → []  (round-trip OK, non torn)
+```
+
+NOT_TESTED (live, inchangé) : flip `pmset disablesleep` 0→1→0 réel (logique prouvée par unit tests B1/B2 ; non exercé sur le flag root live). e2e non ré-exécuté sur ces fixes (l'app installée dans `/Applications` est le build G1 d'hier, pas encore reswappée — les fixes recovery sont couverts par unit tests, pas par l'e2e du binaire installé).
