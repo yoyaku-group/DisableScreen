@@ -55,7 +55,7 @@ public struct DisplayMutationService {
             }
             return .failure(.lastActiveDisplay(id: target))
         }
-        var result = mutator.setEnabled(target, false)
+        let result = mutator.setEnabled(target, false)
         if result.state == .verified {
             // Persist ownership so the launch recovery path can try to re-enable
             // it on the next process start (mirrors main.py:_persist_owned_disabled).
@@ -85,7 +85,7 @@ public struct DisplayMutationService {
            !rec.ids.contains(target) {
             return .failure(.unknownTarget(id: target))
         }
-        var result = mutator.setEnabled(target, true)
+        let result = mutator.setEnabled(target, true)
         if result.state == .verified {
             rec.bootID = bootID
             rec.ids.removeAll { $0 == target }

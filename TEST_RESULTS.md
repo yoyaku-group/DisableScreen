@@ -208,3 +208,63 @@ testRecordSchemaVersionIsCarried           ok
 
 NOT_TESTED (live) — chemin happy-path disable 2e écran : `BLOCKED_HARDWARE` (1 écran). Le fake mutator couvre exactement les invariants B3 (rewrite depuis outcome, retain FAILED, cross-boot discard, last-active guard, stale-target guard, persistence conditionnée au succès).
 
+## G2c — Lid stay-awake Swift (2026-09-14)
+
+`LidMutationPolicy` (pure, Core) + `LidAssertion` protocol + `PMSetLidAssertion` (subprocess wrapper) + `LidMutationService` (orchestration : B1+B2 invariants, persistence conditionnée au readback) + `OwnedLidAssertion` (atomic + cross-boot discard). CLI `lid-stay-awake on|off|status`. Architecture pmset fork+exec : exit code non-fiable (renvoie 0 même quand flag non muté) → readback `pmset -g` est autoritaire. Logique unit-testée avec fakes ; chemin live nécessite élévation root (lien A14).
+
+```
+$ arch -arm64 swift build   → Build complete, 0 warning
+$ arch -arm64 swift test    → Executed 68 tests, with 0 failures
+                              (9 Core + 7 Lid Policy + 5 Lease + 6 Owned Display
+                               + 6 Owned Lid + 9 Service Display + 9 Service Lid
+                               + 6 Display Policy + 11 ViewModel)
+$ pmset -g | grep SleepDisabled  → SleepDisabled 0 (baseline)
+$ runclosed lid-stay-awake status    → exit 0, JSON observed:"off", ownedByThisBoot:false
+$ runclosed lid-stay-awake on        → exit 5, message:
+   backend failed: '/usr/bin/pmset' must be run as root... | readback: observed=false, expected=true
+$ runclosed lid-stay-awake status    → exit 0, JSON unchanged (B2 honest refuse,
+                                        pas de fausse réclamation ownership)
+$ runclosed lid-stay-awake off       → exit 3, noChangeRequested (policy no-op guard)
+$ pmset -g | grep SleepDisabled  → SleepDisabled 0 (état inchangé, cycle propre)
+```
+
+Nouvelles régressions (22) :
+
+`LidMutationPolicyTests` (7/7) :
+```
+testSetOnAllowedWhenPriorIsOff                       ok
+testSetOnRefusedWhenPriorIsOn                        ok   # no-op guard (pas de silent no-op)
+testSetOnRefusedOnUnknownPrior                       ok   # B1 invariant
+testSetOffAllowedWhenPriorIsOn                       ok
+testSetOffRefusedWhenPriorIsOff                      ok   # no-op guard
+testSetOffRefusedOnUnknownPrior                      ok   # B1 invariant
+testPolicyIsDeterministic                            ok
+```
+
+`LidMutationServiceTests` (9/9, avec FakeLidAssertion) :
+```
+testSetOnRefusedOnUnknownPrior                                ok   # mutator jamais invoqué
+testSetOffRefusedOnUnknownPrior                               ok   # mutator jamais invoqué
+testSetOnSucceedsWhenPriorIsOff                                ok   # B2 readback → ownership claim
+testSetOnOnBackendFailureDoesNotClaimOwnership                 ok   # B2 failure → record vide
+testSetOnRefusedWhenAlreadyOn                                  ok   # no-op guard (policy catches first)
+testSetOffRefusedWhenWeDoNotOwn                                ok   # mutator jamais invoqué (B2)
+testSetOffSucceedsAndReleasesOwnershipWhenWeOwn                ok   # restore releases ownership
+testRestoreIfOwnedNoOpsWhenNothingOwned                        ok
+testRestoreIfOwnedPerformsRestoreWhenOwned                    ok   # mutator exactement 1 appel
+```
+
+`OwnedLidAssertionStoreTests` (6/6) :
+```
+testRoundTripPreservesOwnership        ok
+testMissingFileReturnsEmptyRecord      ok   # cross-boot discard, no phantom ownership
+testCorruptFileReturnsEmptyRecord      ok   # B3 strict
+testStaleBootRecordIsDiscarded         ok
+testAtomicWriteLeavesNoTempFile        ok
+testRecordSchemaVersionIsCarried       ok
+```
+
+NOT_TESTED (live) — chemin happy-path (on→off complet avec readback success). **Nécessite élévation root** : `pmset -a disablesleep` requiert root sur macOS. La logique est couverte par les 9 tests Service (FakeLidAssertion simule le round-trip readback, incluant le cas verified vs readback-contradiction). Le live verify ci-dessus **prouve la B2 a honnêtement refusé** (pas de fausse réclamation ownership) + fournit un message actionable (`must be run as root...`). Relie backlog **A14** (helper borné remplace sudoers) — décision d'élévation séparée de cette tranche.
+
+[DISCOVERY] Quirk macOS `pmset` : **stderr→stdout swap quand stderr ≠ tty** + **exit code non-fiable quand privilèges insuffisants**. Détecté au live verify, fix immédiat dans `PMSetLidAssertion.runPmsetWrite()` : capture combinée des deux flux + readback autoritaire via `PowerReadback.lidStayAwake()`. Pattern réutilisable pour future intégration subprocess pmset.
+

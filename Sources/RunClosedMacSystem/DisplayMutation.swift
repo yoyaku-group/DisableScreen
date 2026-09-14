@@ -41,7 +41,7 @@ public struct SLSDisplayMutator: DisplayMutator {
     // C signature: `int SLSConfigureDisplayEnabled(CGDisplayConfigRef, CGDirectDisplayID, bool)`
     private typealias SLSFn = @convention(c) (UnsafeMutableRawPointer?, UInt32, Bool) -> Int32
 
-    private nonisolated(unsafe) static let slsConfigureDisplayEnabled: SLSFn? = {
+    private static let slsConfigureDisplayEnabled: SLSFn? = {
         guard let handle = skylightHandle else { return nil }
         guard let sym = dlsym(handle, "SLSConfigureDisplayEnabled") else { return nil }
         return unsafeBitCast(sym, to: SLSFn.self)

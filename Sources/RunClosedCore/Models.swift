@@ -18,7 +18,9 @@ public enum OperationState: String, Codable, Sendable {
     case idle, pending, verified, failed, conflict, unknown
 }
 
-/// Distinct display operations (invariant 5): they are NOT interchangeable.
+/// Distinct power-management operations (invariant 5): they are NOT
+/// interchangeable. `sleepAll` covers global posture changes (currently the
+/// `pmset disablesleep` flag) distinct from `deactivate` (per-display).
 public enum DisplayAction: String, Codable, Sendable {
     case softwareDim, brightness, deactivate, sleepAll
 }

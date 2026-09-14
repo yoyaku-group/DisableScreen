@@ -62,6 +62,24 @@ Statuts stricts : **DONE** (fait + vérifié) · **FAILED** · **NOT_TESTED** ·
 - NOT_TESTED (live) — chemin happy-path (disable 2e écran → enable) = `BLOCKED_HARDWARE` (1 écran sur cette machine). La logique est couverte par les 9 tests Service avec fake mutator qui simulent exactement le round-trip. Le `enable 1` exit 5 sur 1 écran valide le policy backend handshake (la requête atteint le backend et le backend refuse proprement) — c'est la 2e moitié de l'invariant ADR 009 (`success d'API ≠ success observable`).
 - ADR 012 ajoutée (DECISIONS.md).
 
+## G2c — Lid stay-awake Swift (2026-09-14)
+- DONE — `LidMutationPolicy` (`Sources/RunClosedCore/`) : policy pure — refuse `prior == nil` (B1 invariant : UNKNOWN ≠ OFF), refuse no-op (déjà dans l'état cible). Pas de reference persistence depuis Core (cycle de dépendance) — la décision d'ownership (B2) vit dans la service layer.
+- DONE — `LidAssertion` protocol + `PMSetLidAssertion` (`Sources/RunClosedMacSystem/`) : backend subprocess fork+exec `pmset -a disablesleep <0|1>` + readback via `PowerReadback.lidStayAwake()` (`pmset -g`). Capture **combinée stdout+stderr** : `pmset` redirige ses warnings stderr → stdout quand stderr ≠ tty (quirk macOS détecté au live verify). Readback = autoritaire — exit code pmset est NON-FIABLE (`pmset` retourne 0 même quand le flag n'est pas réellement muté si l'appelant n'a pas root).
+- DONE — `LidMutationService` (`Sources/RunClosedMacSystem/`) : orchestration B1 → policy → B2 ownership check (record bootID==currentBootID + ownedEnabled) → mutator → persist ownership if .verified. `restoreIfOwned()` pour réactivation au lancement (B3 strict : écrit depuis outcome, ne reconstruit jamais depuis une carte live vide).
+- DONE — `OwnedLidAssertion` (`Sources/RunClosedPersistence/`) : persistence atomique `~/Library/Application Support/RunClosed/owned_lid.json` avec schemaVersion. **Cross-boot discard** au load : un record d'un boot précédent est jeté sans tenter de restore aveuglément (same B3 strict que `OwnedDisabledDisplays`).
+- DONE — CLI `runclosed lid-stay-awake on|off|status`. Exit codes : 0 succès / 3 refusal (B1 unknown / no-change / notOwned) / 5 backend failure / 64 usage.
+- DONE — **22 nouveaux tests verts** : `LidMutationPolicyTests` (7) + `LidMutationServiceTests` (9, avec FakeLidAssertion) + `OwnedLidAssertionStoreTests` (6). Suite globale **68/68 verts** (9 Core originaux + 7 policy + 5 Lease + 6 Owned + 9 Service + 11 ViewModel + 9 DisplayMutationPolicy + 6 OwnedDisabled + 6 policy G2c mis sur Core). Build 0 warning.
+- DONE — Live verify (machine Ben, non-root) :
+  - baseline `pmset -g | grep SleepDisabled` = `0` → vérifié avant tout.
+  - `lid-stay-awake status` → JSON `{"observed":"off","ownedByThisBoot":false,...}` (exit 0).
+  - `lid-stay-awake on` → exit 5 avec erreur exacte : `'/usr/bin/pmset' must be run as root... | readback: observed=false, expected=true`. La B2 a honnêtement refusé — pas de fausse réclamation d'ownership.
+  - `lid-stay-awake off` sur baseline off → exit 3 `noChangeRequested` (policy no-op guard).
+  - `lid-stay-awake status` après → toujours `{"observed":"off","ownedByThisBoot":false}` (record vide).
+- NOT_TESTED (live) — chemin happy-path (on→off complet) = **nécessite élévation root** (`pmset -a disablesleep` requiert root sur macOS). Relie le backlog **A14** (helper borné remplace sudoers) — décision architecturale d'élévation séparée de cette tranche. La logique est couverte par les 9 tests Service avec FakeLidAssertion + la lecture authoritative via readback (`pmset -g`) qui marche sans privilège.
+- ADR 013 ajoutée (DECISIONS.md).
+- [DISCOVERY] **pmset stderr→stdout swap quand stderr ≠ tty** : détecté au live verify G2c, fix immédiat (capture combinée). Pattern réutilisable pour tout subprocess backend (PowerReadback futur, futures intégrations pmset).
+- [DISCOVERY] **pmset exit code non-fiable** : `pmset -a disablesleep 1` exécuté sans root → exit 0 + flag non muté + warning stderr. Le readback via `pmset -g` est l'UNIQUE signal autoritaire. Capturé implicitement par notre B2 invariant (readback → state=`.failed` plutôt que rc=0 → vérifié).
+
 ## G3 — Capot
 - BLOCKED_HARDWARE — un seul écran XDR intégré ; capot non testable sans Ben présent. Protocole `scripts/hardware/lid-qualification.sh` **prêt** (opt-in `RUNCLOSED_HW_OPTIN=1`, refuse sinon = vérifié ; baseline→set→témoin 10s→cycle capot→restore→verdict PASS/FAIL/INDÉTERMINÉ). `restore --owned` = stub.
 - NOT_DONE (backlog) : G2 suite (UI AppKit à parité écrans, suppression launcher Python), G4 (adaptateurs Claude/Codex), G5 (Developer ID/notarisation/rename public).
