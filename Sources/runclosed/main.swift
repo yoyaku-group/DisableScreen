@@ -149,10 +149,126 @@ enum FileHandler {
     static func err(_ s: String) { FileHandle.standardError.write((s + "\n").data(using: .utf8)!) }
 }
 
+// ── G2b — display mutation subcommands ───────────────────────────────────────
+
+/// Build a DisplayMutationService wired against the production SLS backend
+/// and the live DisplayInventory active-IDs provider.
+func makeDisplayService() -> DisplayMutationService {
+    let store = OwnedDisabledDisplays(currentBootID: clock.bootID)
+    return DisplayMutationService(
+        bootID: clock.bootID,
+        mutator: DisplayMutators.live(),
+        store: store,
+        activeIDsProvider: { DisplayInventory.activeIDs() }
+    )
+}
+
+func parseDisplayID(_ s: String) -> UInt32? {
+    return UInt32(s)
+}
+
+func cmdDisable(_ rest: [String]) -> Int32 {
+    guard let first = rest.first, let id = parseDisplayID(first) else {
+        FileHandler.err("usage: runclosed disable <displayID>")
+        return 64
+    }
+    var svc = makeDisplayService()
+    switch svc.disable(target: id) {
+    case .success(let r):
+        emitJSON([
+            "schemaVersion": kSchemaVersion,
+            "bootID": clock.bootID,
+            "action": "disable",
+            "displayID": id,
+            "state": r.state.rawValue,
+            "nativeRC": r.nativeRC as Any? ?? NSNull(),
+            "readbackOK": r.readbackOK,
+        ])
+        return 0
+    case .failure(let e):
+        let msg: String
+        let code: Int32
+        switch e {
+        case .staleTarget(let did):
+            msg = "refused: display \(did) not in the active set (stale target)"
+            code = 3
+        case .lastActiveDisplay(let did):
+            msg = "refused: display \(did) is the last active one — would leave the Mac headless"
+            code = 3
+        case .unknownTarget(let did):
+            msg = "refused: display \(did) not known to the system"
+            code = 3
+        case .backendFailed(let m):
+            msg = "backend failed: \(m)"
+            code = 5
+        }
+        FileHandler.err(msg)
+        return code
+    }
+}
+
+func cmdEnable(_ rest: [String]) -> Int32 {
+    guard let first = rest.first, let id = parseDisplayID(first) else {
+        FileHandler.err("usage: runclosed enable <displayID>")
+        return 64
+    }
+    var svc = makeDisplayService()
+    switch svc.enable(target: id) {
+    case .success(let r):
+        emitJSON([
+            "schemaVersion": kSchemaVersion,
+            "bootID": clock.bootID,
+            "action": "enable",
+            "displayID": id,
+            "state": r.state.rawValue,
+            "nativeRC": r.nativeRC as Any? ?? NSNull(),
+            "readbackOK": r.readbackOK,
+        ])
+        return 0
+    case .failure(let e):
+        let msg: String
+        let code: Int32
+        switch e {
+        case .staleTarget(let did):
+            msg = "refused: display \(did) not in the active set (stale target)"
+            code = 3
+        case .lastActiveDisplay:
+            // .lastActiveDisplay cannot happen on enable path (only disable
+            // can refuse for being last). Keep the branch for completeness.
+            msg = "refused: cannot enable (last-active guard)"
+            code = 3
+        case .unknownTarget(let did):
+            msg = "refused: display \(did) not known — not in the owned-disabled record either"
+            code = 3
+        case .backendFailed(let m):
+            msg = "backend failed: \(m)"
+            code = 5
+        }
+        FileHandler.err(msg)
+        return code
+    }
+}
+
+/// Restore all owned-disabled displays — used at launch recovery and as an
+/// explicit recovery subcommand. Returns 0 on success even if some ids
+/// remained owned (they are listed in JSON for follow-up).
+func cmdRestoreOwned() -> Int32 {
+    var svc = makeDisplayService()
+    let stillOwned = svc.restoreOwned()
+    emitJSON([
+        "schemaVersion": kSchemaVersion,
+        "bootID": clock.bootID,
+        "action": "restore-owned",
+        "restored": stillOwned.count == 0 ? "all" : "partial",
+        "stillOwned": stillOwned,
+    ])
+    return 0
+}
+
 // ── dispatch ─────────────────────────────────────────────────────────────────
 let args = Array(CommandLine.arguments.dropFirst())
 guard let sub = args.first else {
-    FileHandler.err("usage: runclosed <status|displays|doctor|run|restore> [...]")
+    FileHandler.err("usage: runclosed <status|displays|doctor|run|restore|disable|enable> [...]")
     exit(64)
 }
 let rest = Array(args.dropFirst())
@@ -162,10 +278,15 @@ case "status":   cmdStatus()
 case "displays": cmdDisplays()
 case "doctor":   cmdDoctor()
 case "run":      exit(cmdRun(rest))
+case "disable":  exit(cmdDisable(rest))
+case "enable":   exit(cmdEnable(rest))
 case "restore":
-    // G3 stub — restore --owned must verify the system before any change; that
-    // logic lands with the session-owner service. It changes nothing today.
-    FileHandler.err("restore --owned: not implemented in this tranche (G3). No changes made.")
+    // restore --owned = re-enable every display we previously disabled (B3).
+    // restore --lid = closed-lid keep-awake restore (G3 stub, unchanged).
+    if rest.first == "--owned" {
+        exit(cmdRestoreOwned())
+    }
+    FileHandler.err("restore --owned: implemented in G2b. 'restore --lid' remains a G3 stub. No changes made.")
     exit(0)
 default:
     FileHandler.err("unknown command: \(sub)")
