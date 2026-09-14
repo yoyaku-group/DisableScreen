@@ -15,10 +15,24 @@ let package = Package(
             name: "runclosed",
             dependencies: ["RunClosedCore", "RunClosedMacSystem"]
         ),
+        // G2a — pure presentation logic (ViewModel + renderer). AppKit lives in
+        // the RunClosedMenuBar executable target so the Core stays platform-
+        // agnostic and testable on Linux CI (per ADR 002).
+        .target(
+            name: "RunClosedApp",
+            dependencies: ["RunClosedCore", "RunClosedMacSystem"]
+        ),
+        // G2a — menu-bar app shell (READ-ONLY; mutation toggles disabled).
+        .executableTarget(
+            name: "RunClosedMenuBar",
+            dependencies: ["RunClosedCore", "RunClosedMacSystem", "RunClosedApp"]
+        ),
         // Explicit lowercase path: this repo already has a `tests/` dir (Python),
         // and on a case-sensitive filesystem SwiftPM's default `Tests/` would not
         // resolve to it. Pin the path so the package builds on Linux CI too.
         .testTarget(name: "RunClosedCoreTests", dependencies: ["RunClosedCore"],
                     path: "tests/RunClosedCoreTests"),
+        .testTarget(name: "RunClosedAppTests", dependencies: ["RunClosedCore", "RunClosedApp"],
+                    path: "tests/RunClosedAppTests"),
     ]
 )
