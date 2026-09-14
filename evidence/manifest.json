@@ -1,0 +1,27 @@
+{
+  "generated": "2026-09-11",
+  "git_head": "a7665b5b9d1435aab9448a2758f42a8db00cb152",
+  "note": "sha256 of legacy files audited as baseline (archive == this HEAD)",
+  "files": {
+    "main.py": {
+      "sha256": "e43fddccb1d3adb45ae0070768a7a08bcb5035c7f13d26bdef8d1d9e67169fab",
+      "bytes": 34736
+    },
+    "launcher.m": {
+      "sha256": "082428ddd84a11e1cf38b4c327e433d9e85c9fdd9c3f6aea92fff5fdf5f6d449",
+      "bytes": 3710
+    },
+    "build.sh": {
+      "sha256": "a376dbb6e8054857a52341cfeda28a65b9d9f3545745dfa38435d47db52eb57e",
+      "bytes": 1246
+    },
+    "test_e2e.py": {
+      "sha256": "4afc2013aa8991fd7f4a170ad118dcf229a344a21ee73e5c3807888bd1ee0cd5",
+      "bytes": 4055
+    },
+    "Info.plist": {
+      "sha256": "25cef1434b5d596ffb2ab3e5db9dabd8e574503622b059cfee78ed125704b44e",
+      "bytes": 865
+    }
+  }
+}

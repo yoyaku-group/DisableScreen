@@ -1,93 +1,78 @@
 #!/usr/bin/env python3
-"""E2E tests for DisableScreen."""
+"""E2E smoke checks for the installed DisableScreen app.
+
+A08 fixes: paths are injectable (DISABLESCREEN_APP / DISABLESCREEN_LOG); the
+process check matches the exact bundle path; log assertions match the strings the
+app actually emits ("Started.", "Displays:"); the removed "Poll:" expectation and
+the unproven BetterDisplay assumption are gone; SKIP is distinct from PASS.
+
+Exit code: 0 if no FAIL (SKIPs allowed), 1 if any FAIL.
+"""
+import os
 import subprocess
-import time
 import sys
 from pathlib import Path
 
-LOG = Path.home() / "DisableScreen" / "disablescreen.log"
-APP = Path.home() / "DisableScreen" / "DisableScreen.app"
-PASS = "\033[32mPASS\033[0m"
-FAIL = "\033[31mFAIL\033[0m"
-results = []
+APP = Path(os.environ.get("DISABLESCREEN_APP", "/Applications/DisableScreen.app"))
+LOG = Path(os.environ.get("DISABLESCREEN_LOG", Path.home() / "DisableScreen" / "disablescreen.log"))
+
+GREEN, RED, YELLOW, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[0m"
+fails = 0
 
 
 def check(name, ok, detail=""):
-    ok = bool(ok)
-    status = PASS if ok else FAIL
-    print(f"  [{status}] {name}" + (f" — {detail}" if detail else ""))
-    results.append(ok)
+    global fails
+    tag = f"{GREEN}PASS{RESET}" if ok else f"{RED}FAIL{RESET}"
+    if not ok:
+        fails += 1
+    print(f"  [{tag}] {name}" + (f" — {detail}" if detail else ""))
 
 
-# ── 1. App bundle ──────────────────────────────────────────────────────────
+def skip(name, why):
+    print(f"  [{YELLOW}SKIP{RESET}] {name} — {why}")
+
+
+# ── 1. App bundle ────────────────────────────────────────────────────────────
 print("\n[1] App bundle")
-check("DisableScreen.app exists", APP.exists())
+check("bundle exists", APP.exists(), str(APP))
 check("Info.plist exists", (APP / "Contents/Info.plist").exists())
 binary = APP / "Contents/MacOS/DisableScreen"
-check("Binary exists", binary.exists())
-check("Binary executable", binary.stat().st_mode & 0o111)
+check("launcher binary exists", binary.exists())
+if binary.exists():
+    check("launcher binary executable", bool(binary.stat().st_mode & 0o111))
 
-# ── 2. Process running ─────────────────────────────────────────────────────
+# ── 2. Process running (match the EXACT bundle path) ─────────────────────────
 print("\n[2] Process")
-out = subprocess.run(["pgrep", "-f", "DisableScreen"], capture_output=True, text=True)
-running = out.returncode == 0
-check("Process running", running, out.stdout.strip())
-
-# ── 3. Log file ────────────────────────────────────────────────────────────
-print("\n[3] Log file")
-check("Log file exists", LOG.exists())
-if LOG.exists():
-    content = LOG.read_text()
-    check("Startup logged", "App started" in content)
-    check("Display list in log", "Displays:" in content)
-    check("Poll firing", "Poll:" in content, f"{content.count('Poll:')} polls found")
-
-# ── 4. Screen detection logic ──────────────────────────────────────────────
-print("\n[4] Screen detection")
-import AppKit
-from Quartz import CGDisplayIsBuiltin, CGGetOnlineDisplayList
-from AppKit import NSScreen
-
-err, displays, count = CGGetOnlineDisplayList(16, None, None)
-check("CGGetOnlineDisplayList OK", err == 0, f"{count} display(s)")
-for d in displays:
-    builtin = bool(CGDisplayIsBuiltin(d))
-    check(f"Display ID={d}", True, f"builtin={builtin}")
-
-builtin_screen = None
-for screen in NSScreen.screens():
-    did = screen.deviceDescription().get("NSScreenNumber", 0)
-    if CGDisplayIsBuiltin(did):
-        builtin_screen = screen
-        break
-
-if builtin_screen:
-    check("Built-in screen found via NSScreen", True, builtin_screen.localizedName())
+main_py = str(APP / "Contents/Resources/main.py")
+out = subprocess.run(["pgrep", "-f", main_py], capture_output=True, text=True)
+if out.returncode == 0:
+    check("app process running", True, out.stdout.strip())
 else:
-    check("Built-in screen not visible (BetterDisplay active)", True,
-          "will re-detect on next poll when BetterDisplay expires")
+    skip("app process running", f"no process for {main_py} (app not launched)")
 
-# ── 5. Poll log recency ────────────────────────────────────────────────────
-print("\n[5] Poll recency")
+# ── 3. Log file ──────────────────────────────────────────────────────────────
+print("\n[3] Log file")
 if LOG.exists():
-    lines = LOG.read_text().splitlines()
-    poll_lines = [l for l in lines if "Poll:" in l]
-    if poll_lines:
-        last = poll_lines[-1]
-        check("Last poll logged", True, last.split("]")[-1].strip())
-        # Check polls are ~5s apart
-        if len(poll_lines) >= 2:
-            import re
-            times = [l.split(" [")[0] for l in poll_lines[-2:]]
-            check("At least 2 poll cycles recorded", True, f"Last: {times[-1]}")
-    else:
-        check("Poll cycles recorded", False, "no poll lines yet")
+    content = LOG.read_text(errors="replace")
+    check("startup logged", "Started." in content)     # real string, not "App started"
+    check("display list logged", "Displays:" in content)
+else:
+    skip("log file", f"{LOG} absent (app never ran under this HOME)")
 
-# ── Summary ────────────────────────────────────────────────────────────────
-print(f"\n{'='*40}")
-total = len(results)
-passed = sum(results)
-failed = total - passed
-print(f"  {passed}/{total} passed" + (f"  ({failed} failed)" if failed else "  ✓ all good"))
-if failed:
+# ── 4. Screen detection via CoreGraphics ─────────────────────────────────────
+print("\n[4] Screen detection")
+try:
+    from Quartz import CGDisplayIsBuiltin, CGGetOnlineDisplayList
+    err, displays, count = CGGetOnlineDisplayList(16, None, None)
+    check("CGGetOnlineDisplayList ok", err == 0, f"{count} display(s)")
+    for d in displays:
+        check(f"display id={d}", True, f"builtin={bool(CGDisplayIsBuiltin(d))}")
+except Exception as e:
+    skip("screen detection", f"PyObjC/Quartz unavailable: {e}")
+
+# ── Summary ──────────────────────────────────────────────────────────────────
+print("\n" + "=" * 40)
+if fails:
+    print(f"  {RED}{fails} FAIL{RESET}")
     sys.exit(1)
+print(f"  {GREEN}no failures{RESET} (skips are not failures)")

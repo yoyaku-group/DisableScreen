@@ -3,4 +3,5 @@
 "menu.quit" = "Quitter";
 "menu.open_at_login" = "Ouvrir au démarrage";
 "menu.keep_awake_lid_closed" = "Garder allumé clapet fermé";
+"button.open_display_settings" = "Ouvrir les Réglages Écran macOS…";
 "button.configure_ddc" = "Cliquez ici pour configurer DDC...";
