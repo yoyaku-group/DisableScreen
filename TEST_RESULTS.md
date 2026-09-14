@@ -157,3 +157,54 @@ testAtomicWriteLeavesNoTempFile        ok    # aucun temp sibling après save (r
 
 NOT_TESTED (live) — les 5 tests utilisent FakeClock + URL-injectée (zéro dépendance filesystem live) ; le round-trip end-to-end avec leases réelles est validé par le `runclosed run --idle-only` ci-dessus.
 
+## G2b — Display mutation Swift (2026-09-14)
+
+`DisplayMutator` protocol + `SLSDisplayMutator` (SkyLight via dlsym) + `DisplayMutationPolicy` (pure) + `DisplayMutationService` (orchestration) + `OwnedDisabledDisplays` (persistence atomique + cross-boot discard). CLI `disable <id>` / `enable <id>` / `restore --owned`. Logique unit-testée avec fakes ; chemin live happy-path = `BLOCKED_HARDWARE` (1 écran XDR).
+
+```
+$ arch -arm64 swift build   → Build complete, 0 warning
+$ arch -arm64 swift test    → Executed 46 tests, with 0 failures   (9 Core + 6 Policy + 5 Lease + 6 Owned + 9 Service + 11 ViewModel)
+$ runclosed disable 1       → exit 3 (refused: last active)
+$ runclosed enable 1        → exit 5 (backend: kCGErrorCannotComplete — no-op sur 1 écran)
+$ runclosed restore --owned → exit 0 (JSON stillOwned: [], owned record empty)
+$ runclosed doctor          → JSON OK (unchangé)
+$ runclosed displays        → JSON OK (unchangé)
+```
+
+Nouvelles régressions (21) :
+
+`DisplayMutationPolicyTests` (6/6) :
+```
+testDisableAllowedOnMultiDisplayTopology ok
+testDisableRefusedOnLastActiveDisplay    ok
+testDisableRefusedOnStaleTargetNotInActiveSet ok
+testDisableOnEmptyActiveSetAlwaysRefused ok
+testEnableAllowsKnownTargets              ok
+testEnableRefusesUnknownTargets          ok
+```
+
+`DisplayMutationServiceTests` (9/9, avec FakeDisplayMutator) :
+```
+testDisableRefusedOnLastActiveDisplay                 ok   # mutator jamais appelé
+testDisableRefusedOnStaleTarget                       ok   # mutator jamais appelé
+testDisableOnSuccessPersistsOwnership                 ok   # owned_displays.json écrit avec [2]
+testDisableOnBackendFailureDoesNotPersistOwnership    ok   # record reste vide
+testEnableRefusesUnknownTarget                        ok   # mutator jamais appelé
+testEnableAcceptsOwnedTargetEvenIfNotCurrentlyActive  ok   # recovery path
+testRestoreOwnedPersistsOnlyStillOwnedIDs             ok   # B3: rewrite depuis outcome
+testRestoreOwnedClearsSuccessfullyReEnabledIDs        ok
+testRestoreOwnedDiscardsStaleBootRecord               ok   # cross-boot discard
+```
+
+`OwnedDisabledDisplaysStoreTests` (6/6) :
+```
+testRoundTripPreservesIDs                  ok
+testMissingFileReturnsEmptyRecord          ok
+testCorruptFileReturnsEmptyRecord          ok   # B3: never assume ownership
+testStaleBootRecordIsDiscarded             ok   # cross-boot discard
+testAtomicWriteLeavesNoTempFile            ok
+testRecordSchemaVersionIsCarried           ok
+```
+
+NOT_TESTED (live) — chemin happy-path disable 2e écran : `BLOCKED_HARDWARE` (1 écran). Le fake mutator couvre exactement les invariants B3 (rewrite depuis outcome, retain FAILED, cross-boot discard, last-active guard, stale-target guard, persistence conditionnée au succès).
+
