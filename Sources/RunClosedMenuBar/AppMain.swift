@@ -1,6 +1,7 @@
 import AppKit
 import RunClosedCore
 import RunClosedMacSystem
+import RunClosedPersistence
 import RunClosedApp
 
 // G2a — menu-bar app, READ-ONLY.
@@ -89,7 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let snapshots = DisplayInventory.snapshot()
             let lid = PowerReadback.lidStayAwake()
-            let engine = LeaseReader.load(clock: SystemClock(bootID: boot))
+            let engine = LeaseStore(clock: SystemClock(bootID: boot)).load()
             let vm = SnapshotBuilder.make(now: Date(), snapshots: snapshots,
                                           lidStayAwake: lid,
                                           leases: engine.leases,

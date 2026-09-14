@@ -11,9 +11,13 @@ let package = Package(
     targets: [
         .target(name: "RunClosedCore"),
         .target(name: "RunClosedMacSystem", dependencies: ["RunClosedCore"]),
+        // Cross-target persistence layer (ADR 011): owns the on-disk lease
+        // file path + atomic write discipline so the CLI writer and the
+        // menu-bar reader can never drift apart.
+        .target(name: "RunClosedPersistence", dependencies: ["RunClosedCore"]),
         .executableTarget(
             name: "runclosed",
-            dependencies: ["RunClosedCore", "RunClosedMacSystem"]
+            dependencies: ["RunClosedCore", "RunClosedMacSystem", "RunClosedPersistence"]
         ),
         // G2a — pure presentation logic (ViewModel + renderer). AppKit lives in
         // the RunClosedMenuBar executable target so the Core stays platform-
@@ -25,7 +29,7 @@ let package = Package(
         // G2a — menu-bar app shell (READ-ONLY; mutation toggles disabled).
         .executableTarget(
             name: "RunClosedMenuBar",
-            dependencies: ["RunClosedCore", "RunClosedMacSystem", "RunClosedApp"]
+            dependencies: ["RunClosedCore", "RunClosedMacSystem", "RunClosedPersistence", "RunClosedApp"]
         ),
         // Explicit lowercase path: this repo already has a `tests/` dir (Python),
         // and on a case-sensitive filesystem SwiftPM's default `Tests/` would not
@@ -34,5 +38,8 @@ let package = Package(
                     path: "tests/RunClosedCoreTests"),
         .testTarget(name: "RunClosedAppTests", dependencies: ["RunClosedCore", "RunClosedApp"],
                     path: "tests/RunClosedAppTests"),
+        .testTarget(name: "RunClosedPersistenceTests",
+                    dependencies: ["RunClosedCore", "RunClosedPersistence"],
+                    path: "tests/RunClosedPersistenceTests"),
     ]
 )

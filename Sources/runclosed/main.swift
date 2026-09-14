@@ -1,6 +1,7 @@
 import Foundation
 import RunClosedCore
 import RunClosedMacSystem
+import RunClosedPersistence
 
 // RunClosed CLI (provisional). Dependency-free arg parsing (ADR 003).
 //   runclosed status   --json
