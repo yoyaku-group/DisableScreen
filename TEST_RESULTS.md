@@ -133,3 +133,27 @@ testRendererIsDeterministic                ok   # même entrée → même sortie
 
 NOT_TESTED (live) — clic interactif dans le menu NSMenu (les éléments sont désactivés par design). Démarrage + cycle de refresh + arrêt validés. Le toggle écran/lid reste **visible mais grisé** (sincérité : l'affordance est présente, le tooltip pointe G2b/G2c).
 
+## G2d-prep — Unification persistence (2026-09-14)
+
+`runclosed` writer + `RunClosedMenuBar` reader partagent maintenant `RunClosedPersistence.LeaseStore`. Refactor T2, blast radius ≤1 (un repo, comportement externe inchangé), rollback = `git revert`.
+
+```
+$ arch -arm64 swift build   → Build complete, 0 warning
+$ arch -arm64 swift test    → Executed 25 tests, with 0 failures (9 Core + 11 ViewModel + 5 Persistence)
+$ ./.build/.../runclosed doctor --json                     → JSON OK (bootID lu, displays=1)
+$ ./.build/.../runclosed run --idle-only -- sh -c 'exit 7'  → exit 7
+$ cat ~/Library/Application\ Support/RunClosed/leases.json → []   (round-trip propre)
+$ ./.build/.../RunClosedMenuBar & sleep 3 ; kill -TERM $!  → exit 143 (SIGTERM, clean)
+```
+
+Nouvelles régressions `tests/RunClosedPersistenceTests/LeaseStoreTests` (5/5) :
+```
+testRoundTripPreservesLeases           ok    # save+load, lease identique (bootID, deadline, owner)
+testMissingFileReturnsEmptyEngine      ok    # load sur fichier absent → engine vide
+testReapOnLoadDropsOtherBootLeases     ok    # lease boot-B → reaped sous clock boot-A
+testReapOnLoadDropsExpiredLeases       ok    # deadline dépassée → reaped
+testAtomicWriteLeavesNoTempFile        ok    # aucun temp sibling après save (rename atomique)
+```
+
+NOT_TESTED (live) — les 5 tests utilisent FakeClock + URL-injectée (zéro dépendance filesystem live) ; le round-trip end-to-end avec leases réelles est validé par le `runclosed run --idle-only` ci-dessus.
+

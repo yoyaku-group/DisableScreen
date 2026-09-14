@@ -43,6 +43,14 @@ Statuts stricts : **DONE** (fait + vérifié) · **FAILED** · **NOT_TESTED** ·
 - NOT_TESTED (live) — chemin interactif UI (clic menu « Rafraîchir », navigation éléments) — l'app a été lancée en background 3 s, démarrage + cycle de refresh + SIGTERM propres (`exit=143`), mais l'UI n'a pas été cliquée par un humain. Couverture suffisante pour G2a (read-only, zéro mutation possible).
 - BLOCKED_HARDWARE (inchangé) — G2b/G2c : mutation écran nécessite 2e écran, mutation `pmset disablesleep` = NOT_TESTED live (flag root), G3 capot inchangé.
 
+## G2d-prep — Unification persistence (2026-09-14)
+- DONE — nouveau target `RunClosedPersistence` (lib, dépend de `RunClosedCore`) absorbe la résolution de path + écriture atomique des leases. `LeaseStore` y est `public` avec 2 inits (canonique + URL-injecté pour tests).
+- DONE — `runclosed` et `RunClosedMenuBar` dépendent maintenant de `RunClosedPersistence` ; les anciens fichiers locaux (`Sources/runclosed/LeaseStore.swift`, `Sources/RunClosedMenuBar/LeaseReader.swift`) sont supprimés. Le CLI writer (`main.swift:40,109`) et le menu-bar reader (`AppMain.swift:92`) partagent désormais le même module.
+- DONE — `tests/RunClosedPersistenceTests/LeaseStoreTests.swift` (5/5 verts) : round-trip save/load, missing-file → empty, reap cross-boot, reap expired, atomicité (pas de fichier temp sibling). FakeClock local pour contrôle déterministe.
+- DONE — Swift test suite global : **25/25 verts** (9 Core + 11 ViewModel + 5 Persistence) ; build 0 warning ; CLI live `runclosed doctor --json` + `runclosed run --idle-only -- sh -c 'exit 7'` → exit 7 + `leases.json` round-trip `[]` ; menu-bar app lance + refresh + SIGTERM exit 143 (clean).
+- DONE — ADR 011 ajoutée (DECISIONS.md) : « toute surface cross-target vit dans un module dédié, pas dupliquée ». Préparation structurelle pour G2b / G4 qui vont multiplier les writers/lecteurs de leases.
+- NOT_TESTED (live) — les 5 régressions Persistence sont unit-tests avec FakeClock + URL-injectée (pas de dépendance au filesystem live) ; le round-trip end-to-end avec leases réelles est déjà couvert par le live `runclosed run --idle-only` ci-dessus.
+
 ## G3 — Capot
 - BLOCKED_HARDWARE — un seul écran XDR intégré ; capot non testable sans Ben présent. Protocole `scripts/hardware/lid-qualification.sh` **prêt** (opt-in `RUNCLOSED_HW_OPTIN=1`, refuse sinon = vérifié ; baseline→set→témoin 10s→cycle capot→restore→verdict PASS/FAIL/INDÉTERMINÉ). `restore --owned` = stub.
 - NOT_DONE (backlog) : G2 suite (UI AppKit à parité écrans, suppression launcher Python), G4 (adaptateurs Claude/Codex), G5 (Developer ID/notarisation/rename public).
