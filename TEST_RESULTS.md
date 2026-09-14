@@ -101,3 +101,35 @@ $ cat …/RunClosed/leases.json (après run)       → []  (round-trip OK, non t
 ```
 
 NOT_TESTED (live, inchangé) : flip `pmset disablesleep` 0→1→0 réel (logique prouvée par unit tests B1/B2 ; non exercé sur le flag root live). e2e non ré-exécuté sur ces fixes (l'app installée dans `/Applications` est le build G1 d'hier, pas encore reswappée — les fixes recovery sont couverts par unit tests, pas par l'e2e du binaire installé).
+
+## G2a — UI Swift menu-bar READ-ONLY (2026-09-14)
+
+ViewModel pur + executable AppKit. Zéro mutation possible (G2b/G2c) ; affiordances présentes mais grisées avec tooltip explicite.
+
+```
+$ arch -arm64 swift build --product RunClosedMenuBar → Build complete, 0 warning
+$ arch -arm64 swift test → Executed 20 tests, with 0 failures   (9 Core + 11 ViewModel)
+$ /Library/.../python3.12 -m unittest tests.test_main_fixed tests.legacy_defects.test_reproductions
+   → Ran 27 tests in 0.587s · OK
+$ arch -arm64 swift build → Build complete, 0 warning
+$ build/.../runclosed run --idle-only -- sh -c 'exit 7'  → exit 7
+$ build/.../RunClosedMenuBar &  sleep 3 ; kill -TERM $!   → exit 143 (SIGTERM, démarrage + refresh + arrêt propres)
+```
+
+Nouvelles régressions (`tests/RunClosedAppTests/SnapshotViewModelTests`, **11/11**) :
+```
+testLidUnknownIsNeverRenderedAsOff  ok    # UNKNOWN power jamais "off"
+testLidOnRendersOn                  ok
+testLidOffRendersOff                ok
+testSoftwareDimBackendNeverLabeledNative  ok   # capability softwareDim jamais "native"
+testBuiltinNativeBackendLabeledNative     ok
+testBrightnessUnknownRendersUnknown        ok
+testLeasesFromOtherBootFiltered            ok   # leases d'un autre bootID filtrées
+testNoLeasesRendersNone                    ok
+testAmbiguousDisplayFlagged                ok   # recalcul d'ambigüité dans le builder (defence-in-depth)
+testNoDisplaysRendersEmpty                 ok
+testRendererIsDeterministic                ok   # même entrée → même sortie
+```
+
+NOT_TESTED (live) — clic interactif dans le menu NSMenu (les éléments sont désactivés par design). Démarrage + cycle de refresh + arrêt validés. Le toggle écran/lid reste **visible mais grisé** (sincérité : l'affordance est présente, le tooltip pointe G2b/G2c).
+
