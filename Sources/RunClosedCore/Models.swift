@@ -19,8 +19,12 @@ public enum OperationState: String, Codable, Sendable {
 }
 
 /// Distinct display operations (invariant 5): they are NOT interchangeable.
+/// `activate`/`deactivate` are the per-display pair (G2b — they MUST differ
+/// so logs, diagnostics and future agents can tell which side of the toggle
+/// was actually issued; the prior `enabled ? .deactivate : .deactivate` typo
+/// masked the operation entirely. ADR 014.)
 public enum DisplayAction: String, Codable, Sendable {
-    case softwareDim, brightness, deactivate, sleepAll
+    case softwareDim, brightness, activate, deactivate, sleepAll
 }
 
 /// What a tracked unit of work is doing. Invariant 7: a live process / low CPU

@@ -59,7 +59,7 @@ public struct SLSDisplayMutator: DisplayMutator {
         guard beginRC == .success, let config = config else {
             return OperationResult(
                 requestID: UUID().uuidString,
-                action: enabled ? .deactivate : .deactivate,
+                action: enabled ? .activate : .deactivate,
                 state: .failed,
                 nativeRC: Int(beginRC.rawValue),
                 readbackOK: false,
@@ -70,7 +70,7 @@ public struct SLSDisplayMutator: DisplayMutator {
             _ = CGCancelDisplayConfiguration(config)
             return OperationResult(
                 requestID: UUID().uuidString,
-                action: enabled ? .deactivate : .deactivate,
+                action: enabled ? .activate : .deactivate,
                 state: .unknown,
                 nativeRC: nil,
                 readbackOK: false,
@@ -82,7 +82,7 @@ public struct SLSDisplayMutator: DisplayMutator {
             _ = CGCancelDisplayConfiguration(config)
             return OperationResult(
                 requestID: UUID().uuidString,
-                action: enabled ? .deactivate : .deactivate,
+                action: enabled ? .activate : .deactivate,
                 state: .failed,
                 nativeRC: Int(slsRC),
                 readbackOK: false,
@@ -93,7 +93,7 @@ public struct SLSDisplayMutator: DisplayMutator {
         if completeRC != .success {
             return OperationResult(
                 requestID: UUID().uuidString,
-                action: enabled ? .deactivate : .deactivate,
+                action: enabled ? .activate : .deactivate,
                 state: .failed,
                 nativeRC: Int(completeRC.rawValue),
                 readbackOK: false,
@@ -110,7 +110,7 @@ public struct SLSDisplayMutator: DisplayMutator {
         let state: OperationState = expected ? .verified : .failed
         return OperationResult(
             requestID: UUID().uuidString,
-            action: enabled ? .deactivate : .deactivate,
+            action: enabled ? .activate : .deactivate,
             state: state,
             nativeRC: 0,
             readbackOK: expected,
