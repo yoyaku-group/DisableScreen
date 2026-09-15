@@ -268,3 +268,38 @@ NOT_TESTED (live) — chemin happy-path (on→off complet avec readback success)
 
 [DISCOVERY] Quirk macOS `pmset` : **stderr→stdout swap quand stderr ≠ tty** + **exit code non-fiable quand privilèges insuffisants**. Détecté au live verify, fix immédiat dans `PMSetLidAssertion.runPmsetWrite()` : capture combinée des deux flux + readback autoritaire via `PowerReadback.lidStayAwake()`. Pattern réutilisable pour future intégration subprocess pmset.
 
+## G2b-corrections — Pré-merge correctness fixes (2026-09-15, Phase 1)
+
+Review externe (Ben, 2026-09-14) identifie 3 défauts dans G2b avant merge PR #2. Corrigés en Phase 1 sur la même branche, build clean, suite 72/72 verts.
+
+```
+$ arch -arm64 swift build   → Build complete, 0 warning
+$ arch -arm64 swift test    → Executed 72 tests, with 0 failures
+                              (9 Core + 7 Lid Policy + 5 Lease + 6 Owned Display
+                               + 6 Owned Lid + 9 Service Display + 9 Service Lid
+                               + 6 Display Policy + 11 ViewModel + 4 G2b-corrections)
+$ runclosed restore --owned → exit 0, JSON {"restored":"all","stillOwned":[]} (machine Ben, 1 écran, record vide)
+$ runclosed displays        → JSON OK (unchangé)
+$ runclosed doctor          → JSON OK (unchangé)
+$ runclosed status          → JSON OK (unchangé)
+```
+
+Nouvelles régressions (4) :
+
+`DisplayMutationServiceTests` (4/4 ajoutés) :
+```
+testDisablePropagatesDeactivateAction                       ok    # disable → action == .deactivate (régression typo G2b)
+testEnablePropagatesActivateAction                          ok    # enable → action == .activate (régression typo G2b)
+testRestoreOwnedPropagatesActivateAction                    ok    # restore loop → chaque appel est un enable (pas disable)
+testRestoreOwnedReturnsNonEmptyListOnPartial                ok    # service expose stillOwned non-vide → CLI mappe à exit 5
+```
+
+Tests existants **inchangés verts** (les 9 + 6 + 6 d'avant G2c + les 22 de G2c = 65 anciens + 4 nouveaux = 69 attendus, plus 3 ViewModel supplémentaires = 72).
+
+NOT_TESTED (live) — chemin exit 5 du CLI sur machine Ben : impossible en live (1 écran, `restore --owned` ne peut jamais être partiel puisque `OwnedDisabledDisplays` est vide). La logique est couverte par `testRestoreOwnedReturnsNonEmptyListOnPartial` qui exerce le contrat service-level dont le CLI dépend ; le mapping `stillOwned.isEmpty ? 0 : 5` est trivialement testable par lecture du code (5 lignes, pas de logique cachée).
+
+Defect ledger :
+- `[DEFECT:action-typo-displaymutation]` (where: `DisplayMutation.swift:62,73,85,96,113` — fix ADR 014) — résolu Phase 1
+- `[DEFECT:cli-exit-code-partial-restore]` (where: `main.swift:255` — fix ADR 014) — résolu Phase 1
+- `[DEFECT:doc-drift-restore-owned-stub]` (where: `PROGRESS.md:84` — fix ADR 014) — résolu Phase 1
+

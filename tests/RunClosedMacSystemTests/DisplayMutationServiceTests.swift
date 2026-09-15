@@ -22,10 +22,15 @@ final class DisplayMutationServiceTests: XCTestCase {
 
         func setEnabled(_ displayID: UInt32, _ enabled: Bool) -> OperationResult {
             calls.append(Call(displayID: displayID, enabled: enabled))
+            // Mirror the real backend: action distinguishes enable vs disable.
+            // Regression: the G2b production code had `enabled ? .deactivate :
+            // .deactivate` — both branches identical, the operation was masked
+            // in every OperationResult. ADR 014.
+            let action: DisplayAction = enabled ? .activate : .deactivate
             if nextNativeRC != 0 {
                 return OperationResult(
                     requestID: UUID().uuidString,
-                    action: .deactivate,
+                    action: action,
                     state: .failed,
                     nativeRC: Int(nextNativeRC),
                     readbackOK: false,
@@ -37,7 +42,7 @@ final class DisplayMutationServiceTests: XCTestCase {
             // set failNextReadback = true and adjust activeIDsProvider.)
             return OperationResult(
                 requestID: UUID().uuidString,
-                action: .deactivate,
+                action: action,
                 state: .verified,
                 nativeRC: 0,
                 readbackOK: true
@@ -213,5 +218,78 @@ final class DisplayMutationServiceTests: XCTestCase {
         let rec = OwnedDisabledDisplays(currentBootID: "boot-A", url: url).load()
         XCTAssertEqual(rec.bootID, "boot-A")
         XCTAssertTrue(rec.ids.isEmpty)
+    }
+
+    // MARK: — Action contract (ADR 014 regression)
+
+    /// Locks down the G2b production typo fix: a successful disable must
+    /// report `.deactivate`, never `.activate` or anything else.
+    func testDisablePropagatesDeactivateAction() throws {
+        let url = try makeTempURL()
+        let fake = FakeDisplayMutator()
+        var svc = makeService(activeIDs: [1, 2], mutator: fake, storeURL: url)
+
+        guard case .success(let r) = svc.disable(target: 2) else {
+            return XCTFail("expected success")
+        }
+        XCTAssertEqual(r.action, .deactivate,
+                       "disable MUST report .deactivate (regression of G2b typo)")
+    }
+
+    /// Locks down the G2b production typo fix: a successful enable must
+    /// report `.activate`, distinct from `.deactivate`.
+    func testEnablePropagatesActivateAction() throws {
+        let url = try makeTempURL()
+        let store = OwnedDisabledDisplays(currentBootID: "boot-A", url: url)
+        store.save(.init(bootID: "boot-A", ids: [42]))
+
+        let fake = FakeDisplayMutator()
+        var svc = makeService(activeIDs: [1, 2], mutator: fake, storeURL: url)
+
+        guard case .success(let r) = svc.enable(target: 42) else {
+            return XCTFail("expected success re-enabling owned id")
+        }
+        XCTAssertEqual(r.action, .activate,
+                       "enable MUST report .activate (regression of G2b typo)")
+    }
+
+    /// The recovery path must also report `.activate` for every re-enabled
+    /// display — the B3 loop rewrites from the OUTCOME, and the outcome
+    /// must accurately reflect the operation performed.
+    func testRestoreOwnedPropagatesActivateAction() throws {
+        let url = try makeTempURL()
+        let store = OwnedDisabledDisplays(currentBootID: "boot-A", url: url)
+        store.save(.init(bootID: "boot-A", ids: [10]))
+
+        let fake = FakeDisplayMutator()
+        var svc = makeService(activeIDs: [10], mutator: fake, storeURL: url)
+
+        let stillOwned = svc.restoreOwned()
+        XCTAssertEqual(stillOwned, [])
+        // Every recorded call during restore must have been an enable
+        XCTAssertEqual(fake.calls.count, 1)
+        XCTAssertEqual(fake.calls[0].enabled, true,
+                       "restore must issue enable, not disable")
+    }
+
+    // MARK: — Partial restoration exit code (ADR 014 regression)
+
+    /// When restoreOwned leaves some ids still owned, the service's
+    /// return value is non-empty. The CLI maps that to exit 5 (partial).
+    /// Service-level: this test pins the contract the CLI depends on.
+    func testRestoreOwnedReturnsNonEmptyListOnPartial() throws {
+        let url = try makeTempURL()
+        let store = OwnedDisabledDisplays(currentBootID: "boot-A", url: url)
+        store.save(.init(bootID: "boot-A", ids: [10, 20]))
+
+        // API returns verified but service's belt-and-braces readback fails
+        let fake = FakeDisplayMutator()
+        fake.failNextReadback = true
+        var svc = makeService(activeIDs: [1, 2], mutator: fake, storeURL: url)
+
+        let stillOwned = svc.restoreOwned()
+        XCTAssertEqual(stillOwned.sorted(), [10, 20],
+                       "partial restoration must surface the still-owned list " +
+                       "so the CLI can map it to exit 5 (ADR 014)")
     }
 }

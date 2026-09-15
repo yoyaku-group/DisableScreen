@@ -250,8 +250,12 @@ func cmdEnable(_ rest: [String]) -> Int32 {
 }
 
 /// Restore all owned-disabled displays — used at launch recovery and as an
-/// explicit recovery subcommand. Returns 0 on success even if some ids
-/// remained owned (they are listed in JSON for follow-up).
+/// explicit recovery subcommand. Exit code is part of the contract:
+///   - 0   = full restoration (stillOwned empty)
+///   - 5   = partial restoration (some ids still owned — JSON `stillOwned`
+///           lists them for follow-up; agents/scripts MUST inspect it)
+/// A recovery subcommand that returns 0 on partial is dangerous: callers
+/// assume success and skip the retry. ADR 014 corrects this.
 func cmdRestoreOwned() -> Int32 {
     var svc = makeDisplayService()
     let stillOwned = svc.restoreOwned()
@@ -262,7 +266,7 @@ func cmdRestoreOwned() -> Int32 {
         "restored": stillOwned.count == 0 ? "all" : "partial",
         "stillOwned": stillOwned,
     ])
-    return 0
+    return stillOwned.isEmpty ? 0 : 5
 }
 
 // ── G2c — lid stay-awake subcommand ────────────────────────────────────────

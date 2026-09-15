@@ -20,9 +20,12 @@ public enum OperationState: String, Codable, Sendable {
 
 /// Distinct power-management operations (invariant 5): they are NOT
 /// interchangeable. `sleepAll` covers global posture changes (currently the
-/// `pmset disablesleep` flag) distinct from `deactivate` (per-display).
+/// `pmset disablesleep` flag). `activate`/`deactivate` are the per-display
+/// pair (G2b — they MUST differ so logs, diagnostics and future agents can
+/// tell which side of the toggle was actually issued; the prior
+/// `enabled ? .deactivate : .deactivate` typo masked the operation entirely).
 public enum DisplayAction: String, Codable, Sendable {
-    case softwareDim, brightness, deactivate, sleepAll
+    case softwareDim, brightness, activate, deactivate, sleepAll
 }
 
 /// What a tracked unit of work is doing. Invariant 7: a live process / low CPU
