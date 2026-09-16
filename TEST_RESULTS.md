@@ -157,3 +157,29 @@ testAtomicWriteLeavesNoTempFile        ok    # aucun temp sibling après save (r
 
 NOT_TESTED (live) — les 5 tests utilisent FakeClock + URL-injectée (zéro dépendance filesystem live) ; le round-trip end-to-end avec leases réelles est validé par le `runclosed run --idle-only` ci-dessus.
 
+
+## A14 — Helper LaunchDaemon, tranche 1 registration/status SANS XPC (2026-09-16, branche dédiée)
+
+`RunClosedHelperSupport` (descriptor + DaemonStatus 1:1 SMAppService + DaemonRegistrar seam + HelperLifecycleService au rapport honnête) + `RunClosedHelper` daemon (start/log/SIGTERM, zéro opération privilégiée) + plist sans MachServices (volontaire). ADR 016 : SMAppService.daemon, PAS SMJobBless ni AuthorizationExecuteWithPrivileges (deprecated) ; API root bornée `setDisableSleep(Bool)` + health/version ; ad-hoc interdit.
+
+```
+$ build (workaround Xcode 27, frontend direct + SDKROOT)   → Build complete! (0 warning)
+$ xctest (workaround arch -arm64 + frameworks rpaths):
+  RunClosedHelperSupportTests  Executed 6 tests,  0 failures   # ADR 016 contract
+  RunClosedCoreTests           Executed 9 tests,  0 failures
+  RunClosedAppTests            Executed 11 tests, 0 failures
+  RunClosedPersistenceTests    Executed 5 tests,  0 failures
+  → 31/31 verts
+```
+
+Nouvelles régressions (`HelperLifecycleTests`, FakeRegistrar — 6/6) :
+```
+testRequiresApprovalIsSurfacedNotSwallowed      ok  # état attendu, jamais avalé/normalisé
+testNotFoundIsDistinctFromNotRegistered         ok  # bundle cassé ≠ clean slate
+testRegisterOnlyFromNotRegistered               ok  # pas de re-registration
+testRegisterAndReportNormalPathLeadsToRequiresApproval  ok  # porte approbation utilisateur = chemin normal
+testReportIsHonestAboutBoundedOperationAndXPC   ok  # bounded-op exacte + xpcImplemented:false en clair
+testDescriptorIdentityIsStable                  ok  # plist/binary/label = points fixes partagés
+```
+
+NOT_TESTED (live) — registration réelle SMAppService (nécessite app bundle signée + geste Login Items utilisateur), XPC (tranche 2), setDisableSleep root (tranche 2). Aucun chemin privilégié n'existe dans cette tranche (plist sans MachServices + daemon sans opération).

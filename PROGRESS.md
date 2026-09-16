@@ -51,6 +51,14 @@ Statuts stricts : **DONE** (fait + vérifié) · **FAILED** · **NOT_TESTED** ·
 - DONE — ADR 011 ajoutée (DECISIONS.md) : « toute surface cross-target vit dans un module dédié, pas dupliquée ». Préparation structurelle pour G2b / G4 qui vont multiplier les writers/lecteurs de leases.
 - NOT_TESTED (live) — les 5 régressions Persistence sont unit-tests avec FakeClock + URL-injectée (pas de dépendance au filesystem live) ; le round-trip end-to-end avec leases réelles est déjà couvert par le live `runclosed run --idle-only` ci-dessus.
 
+## A14 — Helper privilégié LaunchDaemon (2026-09-16, PR dédiée — tranche 1 : registration/status SANS XPC)
+- DONE — `RunClosedHelperSupport` : `RunClosedHelperDescriptor` (plist/binary/label + opération bornée unique documentée) + `DaemonStatus` (4 états SMAppService mappés 1:1 + unknown) + `DaemonRegistrar` protocol (seam de test) + `SMAppServiceDaemonRegistrar` (production, `SMAppService.daemon(plistName:)`) + `HelperLifecycleService` (`Report` honest avec `xpcImplemented:false`).
+- DONE — `RunClosedHelper` daemon executable : start + log + attente SIGTERM + exit propre. **Aucune opération privilégiée dans cette tranche.**
+- DONE — `Resources/com.benjaminbelaga.runclosed.helper.plist` : Label/Program/KeepAlive, **sans MachServices volontairement** (aucune surface XPC atteignable pendant la qualification de la registration).
+- DONE — **6 tests verts** `HelperLifecycleTests` (FakeRegistrar) : requiresApproval surfacé jamais avalé · notFound ≠ notRegistered · register seulement depuis notRegistered · chemin normal → requiresApproval · report honest (bounded-op exacte + no-XPC) · identités descriptor stables. Suite branche **31/31**.
+- NOT_TESTED (live) — registration réelle (nécessite app bundle signée — identités Apple présentes sur la machine : Development/Distribution/Developer ID — + geste utilisateur Login Items) · XPC (tranche 2) · `setDisableSleep` live (tranche 2, après code-signing requirement). Ad-hoc = invalide pour A14 (ADR 016).
+- ADR 016 ajoutée (DECISIONS.md).
+
 ## G3 — Capot
 - BLOCKED_HARDWARE — un seul écran XDR intégré ; capot non testable sans Ben présent. Protocole `scripts/hardware/lid-qualification.sh` **prêt** (opt-in `RUNCLOSED_HW_OPTIN=1`, refuse sinon = vérifié ; baseline→set→témoin 10s→cycle capot→restore→verdict PASS/FAIL/INDÉTERMINÉ). `restore --owned` = stub.
 - NOT_DONE (backlog) : G2 suite (UI AppKit à parité écrans, suppression launcher Python), G4 (adaptateurs Claude/Codex), G5 (Developer ID/notarisation/rename public).

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- A14 root helper daemon (ADR 016). Lives in the app bundle at
+         Contents/Library/LaunchDaemons/ and is registered via
+         SMAppService.daemon(plistName:). The Label MUST match
+         RunClosedHelperDescriptor.daemonLabel. -->
+    <key>Label</key>
+    <string>com.benjaminbelaga.runclosed.helper</string>
+
+    <key>Program</key>
+    <string>/Library/LaunchDaemons/runclosed-privileged-helper</string>
+
+    <!-- Run only when asked (the app drives the daemon through XPC once
+         that lands); no periodic scheduling. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- Keep the daemon resident so XPC connections are cheap; exits on
+         SIGTERM are honored (see helper main.swift). -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ProcessType</key>
+    <string>Adaptive</string>
+
+    <!-- No MachServices yet: XPC arrives in the SECOND A14 tranche. The
+         plist intentionally ships without a listener socket so the
+         registration skeleton can be validated without any reachable
+         privileged surface. -->
+</dict>
+</plist>
