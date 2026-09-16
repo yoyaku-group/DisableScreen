@@ -10,7 +10,10 @@ let package = Package(
     platforms: [.macOS(.v14)],
     targets: [
         .target(name: "RunClosedCore"),
-        .target(name: "RunClosedMacSystem", dependencies: ["RunClosedCore"]),
+        // LidMutationService (G2c) consumes OwnedLidAssertion from the
+        // persistence layer, mirroring how DisplayMutationService will in G2b.
+        .target(name: "RunClosedMacSystem",
+                dependencies: ["RunClosedCore", "RunClosedPersistence"]),
         // Cross-target persistence layer (ADR 011): owns the on-disk lease
         // file path + atomic write discipline so the CLI writer and the
         // menu-bar reader can never drift apart.
@@ -41,5 +44,8 @@ let package = Package(
         .testTarget(name: "RunClosedPersistenceTests",
                     dependencies: ["RunClosedCore", "RunClosedPersistence"],
                     path: "tests/RunClosedPersistenceTests"),
+        .testTarget(name: "RunClosedMacSystemTests",
+                    dependencies: ["RunClosedCore", "RunClosedMacSystem", "RunClosedPersistence"],
+                    path: "tests/RunClosedMacSystemTests"),
     ]
 )

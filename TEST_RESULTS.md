@@ -157,3 +157,75 @@ testAtomicWriteLeavesNoTempFile        ok    # aucun temp sibling après save (r
 
 NOT_TESTED (live) — les 5 tests utilisent FakeClock + URL-injectée (zéro dépendance filesystem live) ; le round-trip end-to-end avec leases réelles est validé par le `runclosed run --idle-only` ci-dessus.
 
+## G2c — Lid stay-awake Swift (2026-09-14, PR #5 ; cross-boot rework 2026-09-16)
+
+`LidMutationPolicy` (pure, Core) + `LidAssertion` protocol + `PMSetLidAssertion` (subprocess wrapper) + `LidMutationService` (orchestration B1+B2 invariants + reconcile cross-boot ADR 015) + `OwnedLidAssertion` (atomic, load verbatim + purge explicite). CLI `lid-stay-awake on|off|status`. Architecture pmset fork+exec : exit code non-fiable → readback `pmset -g` autoritaire. Cross-boot fail-closed : BOOT CHANGE ≠ PROOF OF RESTORATION (ADR 015).
+
+**Live verify (machine Ben, non-root, 2026-09-14, commit omnibus `c386aa7` — logique identique re-structurée dans cette PR)** :
+```
+$ pmset -g | grep SleepDisabled  → SleepDisabled 0 (baseline)
+$ runclosed lid-stay-awake status    → exit 0, JSON observed:"off", ownedByThisBoot:false, recoveryPending:false
+$ runclosed lid-stay-awake on        → exit 5, message:
+   backend failed: '/usr/bin/pmset' must be run as root... | readback: observed=false, expected=true
+$ runclosed lid-stay-awake status    → exit 0, JSON unchanged (B2 honest refuse,
+                                        pas de fausse réclamation ownership)
+$ runclosed lid-stay-awake off       → exit 3, noChangeRequested (policy no-op guard)
+$ pmset -g | grep SleepDisabled  → SleepDisabled 0 (état inchangé, cycle propre)
+```
+
+**Build 2026-09-16 (environnement dégradé — voir §Environment note)** :
+```
+$ SDKROOT=…/MacOSX.sdk arch -arm64 …/XcodeDefault.xctoolchain/usr/bin/swift build
+   → Build complete! (0 warning)
+```
+
+Nouvelles régressions G2c (30 attendus) :
+
+`LidMutationPolicyTests` (7) :
+```
+testSetOnAllowedWhenPriorIsOff                       ok
+testSetOnRefusedWhenPriorIsOn                        ok   # no-op guard
+testSetOnRefusedOnUnknownPrior                       ok   # B1 invariant
+testSetOffAllowedWhenPriorIsOn                       ok
+testSetOffRefusedWhenPriorIsOff                      ok   # no-op guard
+testSetOffRefusedOnUnknownPrior                      ok   # B1 invariant
+testPolicyIsDeterministic                            ok
+```
+
+`LidMutationServiceTests` (15, avec FakeLidAssertion — dont 6 nouveaux ADR 015) :
+```
+testSetOnRefusedOnUnknownPrior                                ok   # mutator jamais invoqué
+testSetOffRefusedOnUnknownPrior                               ok   # mutator jamais invoqué
+testSetOnSucceedsWhenPriorIsOff                                ok   # B2 readback → ownership claim
+testSetOnOnBackendFailureDoesNotClaimOwnership                 ok   # B2 failure → record vide
+testSetOnRefusedWhenAlreadyOn                                  ok   # no-op guard (policy catches first)
+testSetOffRefusedWhenWeDoNotOwn                                ok   # mutator jamais invoqué (B2)
+testSetOffSucceedsAndReleasesOwnershipWhenWeOwn                ok   # restore releases ownership
+testRestoreIfOwnedNoOpsWhenNothingOwned                        ok
+testRestoreIfOwnedPerformsRestoreWhenOwned                    ok   # mutator exactement 1 appel
+testReconcileStaleBootObservedOffPurges                       ok   # ADR 015: seul chemin de purge
+testReconcileStaleBootObservedOnKeepsRecoveryPending          ok   # ADR 015: conservé, pas d'auto-mutation
+testReconcileStaleBootUnknownKeepsRecoveryPending             ok   # ADR 015: UNKNOWN ≠ OFF
+testReconcileSameBootRecordNoOp                               ok
+testHasStaleRecoveryPendingFlagsStaleRecordOnly               ok
+testSetOffRefusesEvenWithStaleOwnershipRecord                 ok   # stale ≠ ownership sur le nouveau boot
+```
+
+`OwnedLidAssertionStoreTests` (8 — dont 3 rework ADR 015) :
+```
+testRoundTripPreservesOwnership        ok
+testMissingFileReturnsEmptyRecord      ok   # no phantom ownership
+testCorruptFileReturnsEmptyRecord      ok   # B3 strict
+testLoadNeverDiscardsStaleBootRecord   ok   # ADR 015: verbatim, remplace testStaleBootRecordIsDiscarded
+testRepeatedLoadsNeverEraseStaleRecord ok   # ADR 015: boot change seul n'efface jamais
+testPurgeClearsTheRecordExplicitly     ok   # ADR 015: purge = décision explicite
+testAtomicWriteLeavesNoTempFile        ok
+testRecordSchemaVersionIsCarried       ok
+```
+
+**⚠ Environment note (2026-09-16) — workaround toolchain Xcode 27** : Xcode auto-update 26.6 → 27.0 cette nuit, licence non acceptée → `swift`/`xcodebuild`/`install_name_tool` shims refusent (`You have not agreed to the Xcode license agreements`). Workaround utilisé (script `scripts/dev/run-tests-xcode27.sh`) : build via le frontend toolchain direct (`Toolchains/XcodeDefault.xctoolchain/usr/bin/swift build --build-tests` + `SDKROOT` explicite), frameworks XCTest/Testing copiés dans les rpaths du `.build`, puis run via `arch -arm64 …/usr/bin/xctest <bundle>` (le shim seul est licence-gated, pas les frontends). **Résultat : les 55 tests de la branche tournent VERTS malgré l'environnement dégradé** (16 Core + 13 Persistence + 15 MacSystem + 11 App, 0 failures). **Unblock Ben définitif (une ligne) : `sudo xcodebuild -license accept`** puis `arch -arm64 swift test` redevient canonique.
+
+NOT_TESTED (live) — chemin happy-path (on→off complet avec readback success) : **nécessite élévation root** (A14). Reboot-comportement `disablesleep` = UNDOCUMENTED → protocole Phase 4 (opérateur présent) ; le modèle fail-closed ADR 015 est correct dans les deux cas observés.
+
+[DISCOVERY] Quirk macOS `pmset` : **stderr→stdout swap quand stderr ≠ tty** + **exit code non-fiable quand privilèges insuffisants**. Fix dans `PMSetLidAssertion.runPmsetWrite()` : capture combinée des deux flux + readback autoritaire via `PowerReadback.lidStayAwake()`. Pattern réutilisable pour toute intégration subprocess pmset.
+
