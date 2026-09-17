@@ -51,13 +51,16 @@ Statuts stricts : **DONE** (fait + vérifié) · **FAILED** · **NOT_TESTED** ·
 - DONE — ADR 011 ajoutée (DECISIONS.md) : « toute surface cross-target vit dans un module dédié, pas dupliquée ». Préparation structurelle pour G2b / G4 qui vont multiplier les writers/lecteurs de leases.
 - NOT_TESTED (live) — les 5 régressions Persistence sont unit-tests avec FakeClock + URL-injectée (pas de dépendance au filesystem live) ; le round-trip end-to-end avec leases réelles est déjà couvert par le live `runclosed run --idle-only` ci-dessus.
 
-## A14 — Helper privilégié LaunchDaemon (2026-09-16, PR dédiée — tranche 1 : registration/status SANS XPC)
-- DONE — `RunClosedHelperSupport` : `RunClosedHelperDescriptor` (plist/binary/label + opération bornée unique documentée) + `DaemonStatus` (4 états SMAppService mappés 1:1 + unknown) + `DaemonRegistrar` protocol (seam de test) + `SMAppServiceDaemonRegistrar` (production, `SMAppService.daemon(plistName:)`) + `HelperLifecycleService` (`Report` honest avec `xpcImplemented:false`).
-- DONE — `RunClosedHelper` daemon executable : start + log + attente SIGTERM + exit propre. **Aucune opération privilégiée dans cette tranche.**
-- DONE — `Resources/com.benjaminbelaga.runclosed.helper.plist` : Label/Program/KeepAlive, **sans MachServices volontairement** (aucune surface XPC atteignable pendant la qualification de la registration).
-- DONE — **6 tests verts** `HelperLifecycleTests` (FakeRegistrar) : requiresApproval surfacé jamais avalé · notFound ≠ notRegistered · register seulement depuis notRegistered · chemin normal → requiresApproval · report honest (bounded-op exacte + no-XPC) · identités descriptor stables. Suite branche **31/31**.
-- NOT_TESTED (live) — registration réelle (nécessite app bundle signée — identités Apple présentes sur la machine : Development/Distribution/Developer ID — + geste utilisateur Login Items) · XPC (tranche 2) · `setDisableSleep` live (tranche 2, après code-signing requirement). Ad-hoc = invalide pour A14 (ADR 016).
-- ADR 016 ajoutée (DECISIONS.md).
+## A14 — Helper privilégié LaunchDaemon (T1 packaging + registration E2E-qualifiée 2026-09-17 ; T2 XPC NOT_STARTED)
+- DONE — `RunClosedHelperSupport` : `RunClosedHelperDescriptor` (plist/binary/label + `bundleProgramRelativePath` + opération bornée unique) + `DaemonStatus` (4 états SMAppService mappés 1:1 + unknown, sémantique macOS 26 documentée ADR 018) + `DaemonRegistrar` protocol (seam de test, inclut `openLoginItemsSettings()`) + `SMAppServiceDaemonRegistrar` (production) + `HelperLifecycleService` (`Report` honest : `xpcImplemented:false` + `lastOperationSucceeded` jamais avalé).
+- DONE — `RunClosedHelper` daemon executable : start + log + SIGTERM. **Aucune opération privilégiée.**
+- DONE — Plist : **`BundleProgram` relatif** (`Contents/MacOS/runclosed-privileged-helper`) — PAS `Program` absolu ; **sans `RunAtLoad`/`KeepAlive`/`MachServices`** : le daemon ne tourne jamais en T1 ; régression unitaire plist ↔ descriptor.
+- DONE — `scripts/build-runclosed-app.sh` : assemble `RunClosed.app` (MacOS/{RunClosed, runclosed-cli, runclosed-privileged-helper} + Library/LaunchDaemons/{plist} + Info.plist LSUIElement) + `SIGN_IDENTITY` + `codesign --verify --strict`. CLI embarqué = `runclosed-cli` (APFS insensible à la casse : `runclosed` écrasait `RunClosed` — détecté en E2E).
+- DONE — CLI `runclosed helper status/register/login-items/unregister`.
+- DONE — **38/38 tests** (36 + 2 : register depuis `notFound` (réalité macOS 26), no-op sur `requiresApproval`).
+- DONE — **E2E réel (macOS 26.6, .app Developer ID YZYJJPX484 installé /Applications)** : `status` notRegistered → `register` (**requiresApproval, exit 0**, wrapper corrigé ADR 018) → `status` requiresApproval → `unregister` → notRegistered → `status` notRegistered. `codesign -dv` app + daemon = TeamIdentifier YZYJJPX484. RunClosed n'a émis **aucun pmset** ; daemon jamais lancé (aucun trigger). NB : le `SleepDisabled=1` observé pendant l'E2E est tenu par l'app quotidienne **DisableScreen** (PID 57018, log « lid stay-awake … observed=True » daté 2026-09-16 21:21) — antérieur et indépendant de l'E2E.
+- NOT_TESTED (live, restant) — **approbation humaine Login Items → `enabled`** (geste opérateur ; re-register = 1 commande) · XPC (T2) · `setDisableSleep` live (T2, après code-signing requirement).
+- ADR 016 + 017 + 018 (DECISIONS.md).
 
 ## G3 — Capot
 - BLOCKED_HARDWARE — un seul écran XDR intégré ; capot non testable sans Ben présent. Protocole `scripts/hardware/lid-qualification.sh` **prêt** (opt-in `RUNCLOSED_HW_OPTIN=1`, refuse sinon = vérifié ; baseline→set→témoin 10s→cycle capot→restore→verdict PASS/FAIL/INDÉTERMINÉ). `restore --owned` = stub.

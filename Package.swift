@@ -17,7 +17,8 @@ let package = Package(
         .target(name: "RunClosedPersistence", dependencies: ["RunClosedCore"]),
         .executableTarget(
             name: "runclosed",
-            dependencies: ["RunClosedCore", "RunClosedMacSystem", "RunClosedPersistence"]
+            dependencies: ["RunClosedCore", "RunClosedMacSystem", "RunClosedPersistence",
+                           "RunClosedHelperSupport"]
         ),
         // G2a — pure presentation logic (ViewModel + renderer). AppKit lives in
         // the RunClosedMenuBar executable target so the Core stays platform-

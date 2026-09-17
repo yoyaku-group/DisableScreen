@@ -182,4 +182,42 @@ testReportIsHonestAboutBoundedOperationAndXPC   ok  # bounded-op exacte + xpcImp
 testDescriptorIdentityIsStable                  ok  # plist/binary/label = points fixes partagés
 ```
 
-NOT_TESTED (live) — registration réelle SMAppService (nécessite app bundle signée + geste Login Items utilisateur), XPC (tranche 2), setDisableSleep root (tranche 2). Aucun chemin privilégié n'existe dans cette tranche (plist sans MachServices + daemon sans opération).
+NOT_TESTED (live) → **voir §A14-T1 (2026-09-17)** : la registration réelle est désormais QUALIFIÉE en E2E ; restent l'approbation humaine Login Items → `enabled`, XPC (tranche 2), setDisableSleep root (tranche 2).
+
+## A14-T1 — packaging + BundleProgram + E2E registration réelle (2026-09-17, branche dédiée)
+
+Correctifs de la deep review : plist `Program` absolu → `BundleProgram` relatif (spec Apple « make the path relative to the bundle ») ; contradictions `KeepAlive`/`RunAtLoad` retirées (le daemon ne tourne pas en T1) ; script d'assemblage du vrai `.app` ; deep link d'approbation exposé (`openLoginItemsSettings()`) + CLI `runclosed helper …` ; sémantique OS mesurée + codée (ADR 017/018). Build + tests :
+
+```
+$ arch -arm64 swift build   → Build complete! (0 warning)
+$ arch -arm64 swift test    → 38/38 (9 Core + 11 App + 5 Persistence + 13 Helper)
+$ bash scripts/build-runclosed-app.sh SIGN_IDENTITY="Developer ID Application: YOYAKU (YZYJJPX484)"
+   → RunClosed.app assemblé + signé + `codesign --verify --strict` OK
+```
+
+E2E réel sur le .app signé installé dans /Applications (macOS 26.6, machine Ben) :
+
+```
+$ runclosed-cli helper status     → {"status":"notRegistered"}                 exit 0
+$ runclosed-cli helper register   → {"lastOperationSucceeded":true,
+                                     "status":"requiresApproval"}              exit 0
+$ runclosed-cli helper status     → {"status":"requiresApproval"}              exit 0
+$ runclosed-cli helper unregister → {"lastOperationSucceeded":true,
+                                     "status":"notRegistered"}                 exit 0
+$ runclosed-cli helper status     → {"status":"notRegistered"}                 exit 0
+$ codesign -dv app     → Identifier=com.benjaminbelaga.RunClosed · TeamIdentifier=YZYJJPX484
+$ codesign -dv daemon  → Identifier=runclosed-privileged-helper  · TeamIdentifier=YZYJJPX484
+$ pgrep runclosed-privileged-helper → aucun process (daemon jamais lancé : aucun trigger/MachServices)
+```
+
+pmset : RunClosed n'a émis **aucun pmset** (aucun appel dans les binaires de cette tranche). Le `SleepDisabled=1` observé pendant l'E2E est tenu par l'app quotidienne **DisableScreen** (PID 57018, `~/DisableScreen/disablescreen.log` : « lid stay-awake desired=True rc=0 observed=True », 2026-09-16 21:21) — antérieur de ~17h et indépendant de l'E2E ; non touché.
+
+Découvertes E2E (corrigées + documentées ADR 018) :
+- **Collision de casse APFS** : `runclosed` et `RunClosed` sont le MÊME fichier (l'app était écrasée par le CLI) → CLI embarqué renommé `runclosed-cli`.
+- **macOS 26 — état frais = `notFound`** (pas `notRegistered`) : `registerAndReport()` tente depuis les deux, sinon une machine fraîche ne registrerait jamais.
+- **macOS 26 — `register()` peut THROW "Operation not permitted" (code 1) tout en passant à `requiresApproval`** : pending = succès (le throw seul aurait produit un faux échec CLI).
+- `unregister()` depuis `requiresApproval` → `notRegistered` : teardown propre vérifié.
+
+Nouvelles régressions (+2) : `testRegisterProceedsFromNotFound` · `testRegisterNoopWhenRequiresApproval`.
+
+NOT_TESTED (live, restant) : approbation humaine Login Items → `enabled` (geste opérateur) · XPC (A14-T2) · setDisableSleep live.
