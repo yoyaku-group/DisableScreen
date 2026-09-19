@@ -10,8 +10,8 @@ let package = Package(
     platforms: [.macOS(.v14)],
     targets: [
         .target(name: "RunClosedCore"),
-        // LidMutationService (G2c) consumes OwnedLidAssertion from the
-        // persistence layer, mirroring how DisplayMutationService will in G2b.
+        // Both mutation services (G2b display, G2c lid) consume their owned-
+        // record stores from the persistence layer.
         .target(name: "RunClosedMacSystem",
                 dependencies: ["RunClosedCore", "RunClosedPersistence"]),
         // Cross-target persistence layer (ADR 011): owns the on-disk lease
