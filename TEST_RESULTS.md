@@ -379,3 +379,34 @@ Découvertes E2E (corrigées + documentées ADR 018) :
 Nouvelles régressions (+2) : `testRegisterProceedsFromNotFound` · `testRegisterNoopWhenRequiresApproval`.
 
 NOT_TESTED (live, restant) : approbation humaine Login Items → `enabled` (geste opérateur) · XPC (A14-T2) · setDisableSleep live.
+
+## G2d — Popup UI à toggles (2026-09-20, branche `g2d-popup-toggles`)
+
+Parité fonctionnelle avec le panneau Python DisableScreen : NSPanel + NSSwitch par écran, slider luminosité, sélecteur résolution, switch capot, switch login item, leases, Quit.
+
+**Défaut racine trouvé et corrigé en cours de route** — `PowerReadback` splittait la ligne `pmset -g` sur l'espace littéral alors que `pmset` sépare par TABULATION :
+```
+$ pmset -g | grep SleepDisabled | cat -v
+ SleepDisabled^I^I1
+```
+Le readback retournait `false` sur un flag réellement à `1` → chaque toggle capot était rapporté « backend failed » alors que le write avait réussi (et l'ownership n'était pas enregistré). Fix : split whitespace-run + retry borné (5×150ms) pour la latence de propagation du flag noyau.
+
+**Tests** (suite globale 295 exécutions uniques, 0 failure) — nouveaux :
+```
+DisplayModeSelectionTests (8)      ok  # dedupe géométrie/fréquence, tri, label, best, index
+PowerReadbackTests (6)             ok  # tabs réels, espaces, clé absente=unknown, vide
+LidMutationServiceTests (15)       ok  # inchangés, contrat B1/B2/ADR015
+```
+
+**Preuve live UI (cliclick, app installée `/Applications`, 2026-09-20)** :
+```
+$ pmset -g | grep SleepDisabled      → 0
+$ <clic toggle capot dans le popup>  → 1   + status: observed "on", ownedByThisBoot true
+$ <re-clic toggle>                   → 0   + status: observed "off", ownedByThisBoot false
+$ <capture écran>                    → slider 100%, résolution 3456x2234 @120Hz,
+                                       switch écran grisé (dernier écran), capot + login item présents
+```
+
+**Cutover** — app Python : `--unregister` (login item), arrêtée, retirée de `/Applications` (zip + `.retired` réversibles) ; alias Desktop → `/Applications/RunClosed.app` ; login item `RunClosed` enregistré (`requiresApproval` — approbation Ben).
+
+NOT_TESTED — chemin 2 écrans (BLOCKED_HARDWARE), approbation Login Items (geste Ben), reboot `disablesleep` (ADR 015 Phase 4).

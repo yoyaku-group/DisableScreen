@@ -94,6 +94,23 @@ Statuts stricts : **DONE** (fait + vérifié) · **FAILED** · **NOT_TESTED** ·
 - NOT_TESTED (live, restant) — **approbation humaine Login Items → `enabled`** (geste opérateur ; re-register = 1 commande) · XPC (T2) · `setDisableSleep` live (T2, après code-signing requirement).
 - ADR 016 + 017 + 018 (DECISIONS.md).
 
+## G2d — POPUP UI À TOGGLES, PARITÉ PYTHON (2026-09-20) — branche `agent/opencode/20260919/4784-g2d-popup-toggles`
+
+**Livré** — l'app Swift remplace l'app Python pour l'usage quotidien : popup NSPanel ancré sous l'icône, NSSwitch par écran, slider luminosité, sélecteur résolution, switch capot, switch login item, résumé leases, Quit. Constantes de layout portées depuis le panneau Python (280pt, rangées 46/36/34/34).
+
+- DONE — `PopupPanel` + `PopupState` (AppKit) : rendu pur, chaque contrôle porte un tag display-id + cible les actions @objc du delegate.
+- DONE — `SudoPMsetLidAssertion` : chemin `sudo -n pmset -a disablesleep <0|1>` — exactement la mutation M6 de l'app Python (`/etc/sudoers.d/disablescreen-pmset`, NOPASSWD). Readback autoritaire ; jamais de prompt (`sudo -n`).
+- DONE — **DÉFAUT RACINE RÉSOLU — parsing `pmset -g`** : `PowerReadback` splittait sur l'espace littéral, mais `pmset` sépare par TABULATION (` SleepDisabled\t\t1`). Le readback retournait `false` en permanence → tout toggle capot était rapporté en échec pendant que le flag était réellement muté (cause exacte du « ça ne marche pas » du 2026-09-20). Fix : split sur toute suite d'espaces + 6 tests de régression ; `LidReadback.waitFor()` = retry borné 5×150ms (le flag noyau peut accuser un temps de retard sur le retour de `pmset`).
+- DONE — `DisplayModes` (CoreGraphics public) : liste des modes dédupliquée (meilleure fréquence par géométrie, tri décroissant) + `set` typé avec readback (A05). `DisplayModeSelection` (Core, pur) : 8 tests.
+- DONE — `DisplayBrightness` : dlopen CoreDisplay depuis `/System/Library/Frameworks/` — le chemin PrivateFrameworks retourne nil en dlopen Swift direct (l'app Python ne le résolvait que via le cache dyld ; mesuré 2026-09-20). Luminosité native builtin, une seule cible (invariant 1).
+- DONE — `DimOverlayController` : overlay noir cliquable-transparent pour les externes (M4/A02), plancher 0.08 (A07 : la valeur cachée est celle appliquée).
+- DONE — `LoginItemControl` (MacSystem, partagé popup + CLI) : `runclosed login-item status|on|off` (0 / 4=requiresApproval / 5).
+- DONE — switch écran grisé quand cible = dernier écran actif (parité Python) — le raccourci `experimental` précédent contournait le garde.
+- DONE — Cutover complet : app signée Developer ID installée `/Applications`, ancienne app Python `--unregister` + arrêtée + retirée (backup zip + dossier `.retired` réversibles), alias Desktop → RunClosed, login item `RunClosed` enregistré (requiresApproval — approbation Ben en 1 clic).
+- **Preuves live (UI, via cliclick, 2026-09-20)** : toggle capot ON → `pmset -g` SleepDisabled 1 + `ownedByThisBoot: true` ; re-toggle OFF → 0 + ownership libéré. Slider luminosité rendu à 100%. Popup capturé (capture d'écran).
+- NOT_TESTED — chemin 2 écrans (disable/enable externe) = BLOCKED_HARDWARE inchangé ; approbation Login Items côté Ben ; reboot-comportement `disablesleep` (ADR 015, Phase 4).
+- ADR 019 (DECISIONS.md).
+
 ## G3 — Capot
 - BLOCKED_HARDWARE — un seul écran XDR intégré ; capot non testable sans Ben présent. Protocole `scripts/hardware/lid-qualification.sh` **prêt** (opt-in `RUNCLOSED_HW_OPTIN=1`, refuse sinon = vérifié ; baseline→set→témoin 10s→cycle capot→restore→verdict PASS/FAIL/INDÉTERMINÉ). `restore --lid` reste un **G3 stub** (chemin capot non qualifié) ; `restore --owned` = **G2b live** (correctif Phase 1 — voir §G2b-corrections).
 - NOT_DONE (backlog) : G2 suite (UI AppKit à parité écrans, suppression launcher Python), G4 (adaptateurs Claude/Codex), G5 (Developer ID/notarisation/rename public).

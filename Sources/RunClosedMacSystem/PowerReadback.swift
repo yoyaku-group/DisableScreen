@@ -6,11 +6,21 @@ public enum PowerReadback {
     /// disablesleep flag from `pmset -g`. true/false, or nil if undeterminable.
     public static func lidStayAwake() -> Bool? {
         guard let out = run("/usr/bin/pmset", ["-g"]) else { return nil }
-        for line in out.split(separator: "\n") {
+        return parseLidStayAwake(out)
+    }
+
+    /// Pure parser — unit-tested. `pmset -g` separates key and value with one
+    /// or more TABS (` SleepDisabled\t\t1`); the original `split(separator: " ")`
+    /// never matched, so the readback reported `false` even while the flag was
+    /// ON, and every lid toggle looked broken (live finding 2026-09-20).
+    /// Split on any whitespace run instead.
+    static func parseLidStayAwake(_ output: String) -> Bool? {
+        for line in output.split(separator: "\n") {
             let s = line.trimmingCharacters(in: .whitespaces)
-            if s.hasPrefix("SleepDisabled") {
-                return s.split(separator: " ").last == "1"
-            }
+            guard s.hasPrefix("SleepDisabled") else { continue }
+            let fields = s.split(whereSeparator: \.isWhitespace)
+            guard let value = fields.last else { return nil }
+            return value == "1"
         }
         return nil  // key absent → unknown, not false
     }

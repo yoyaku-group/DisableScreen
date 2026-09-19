@@ -401,11 +401,40 @@ func cmdRestoreOwned() -> Int32 {
     return stillOwned.isEmpty ? 0 : 5
 }
 
+// ── G2d — login item (SMAppService.mainApp of THIS bundle) ───────────────────
+
+func cmdLoginItem(_ rest: [String]) -> Int32 {
+    guard let sub = rest.first else {
+        FileHandler.err("usage: runclosed login-item <status|on|off>")
+        return 64
+    }
+    switch sub {
+    case "status":
+        emitJSON([
+            "schemaVersion": kSchemaVersion,
+            "status": LoginItemControl.status().rawValue,
+            "actionable": LoginItemControl.isActionable(),
+        ])
+        return 0
+    case "on":
+        let s = LoginItemControl.setEnabled(true)
+        emitJSON(["schemaVersion": kSchemaVersion, "action": "on", "status": s.rawValue])
+        return s == .enabled ? 0 : (s == .requiresApproval ? 4 : 5)
+    case "off":
+        let s = LoginItemControl.setEnabled(false)
+        emitJSON(["schemaVersion": kSchemaVersion, "action": "off", "status": s.rawValue])
+        return s == .notRegistered ? 0 : 5
+    default:
+        FileHandler.err("usage: runclosed login-item <status|on|off>")
+        return 64
+    }
+}
+
 
 // ── dispatch ─────────────────────────────────────────────────────────────────
 let args = Array(CommandLine.arguments.dropFirst())
 guard let sub = args.first else {
-    FileHandler.err("usage: runclosed <status|displays|doctor|run|restore|disable|enable|lid-stay-awake|helper> [...]")
+    FileHandler.err("usage: runclosed <status|displays|doctor|run|restore|disable|enable|lid-stay-awake|login-item|helper> [...]")
     exit(64)
 }
 let rest = Array(args.dropFirst())
@@ -418,6 +447,7 @@ case "run":      exit(cmdRun(rest))
 case "disable":  exit(cmdDisable(rest))
 case "enable":   exit(cmdEnable(rest))
 case "lid-stay-awake": exit(cmdLidStayAwake(rest))
+case "login-item": exit(cmdLoginItem(rest))
 case "helper":   exit(cmdHelper(rest))
 case "restore":
     // restore --owned = re-enable every display we previously disabled (B3).
