@@ -157,3 +157,91 @@ testAtomicWriteLeavesNoTempFile        ok    # aucun temp sibling après save (r
 
 NOT_TESTED (live) — les 5 tests utilisent FakeClock + URL-injectée (zéro dépendance filesystem live) ; le round-trip end-to-end avec leases réelles est validé par le `runclosed run --idle-only` ci-dessus.
 
+## G2b — Display mutation Swift (2026-09-14)
+
+`DisplayMutator` protocol + `SLSDisplayMutator` (SkyLight via dlsym) + `DisplayMutationPolicy` (pure) + `DisplayMutationService` (orchestration) + `OwnedDisabledDisplays` (persistence atomique + cross-boot discard). CLI `disable <id>` / `enable <id>` / `restore --owned`. Logique unit-testée avec fakes ; chemin live happy-path = `BLOCKED_HARDWARE` (1 écran XDR).
+
+```
+$ arch -arm64 swift build   → Build complete, 0 warning
+$ arch -arm64 swift test    → Executed 46 tests, with 0 failures   (9 Core + 6 Policy + 5 Lease + 6 Owned + 9 Service + 11 ViewModel)
+$ runclosed disable 1       → exit 3 (refused: last active)
+$ runclosed enable 1        → exit 5 (backend: kCGErrorCannotComplete — no-op sur 1 écran)
+$ runclosed restore --owned → exit 0 (JSON stillOwned: [], owned record empty)
+$ runclosed doctor          → JSON OK (unchangé)
+$ runclosed displays        → JSON OK (unchangé)
+```
+
+Nouvelles régressions (21) :
+
+`DisplayMutationPolicyTests` (6/6) :
+```
+testDisableAllowedOnMultiDisplayTopology ok
+testDisableRefusedOnLastActiveDisplay    ok
+testDisableRefusedOnStaleTargetNotInActiveSet ok
+testDisableOnEmptyActiveSetAlwaysRefused ok
+testEnableAllowsKnownTargets              ok
+testEnableRefusesUnknownTargets          ok
+```
+
+`DisplayMutationServiceTests` (9/9, avec FakeDisplayMutator) :
+```
+testDisableRefusedOnLastActiveDisplay                 ok   # mutator jamais appelé
+testDisableRefusedOnStaleTarget                       ok   # mutator jamais appelé
+testDisableOnSuccessPersistsOwnership                 ok   # owned_displays.json écrit avec [2]
+testDisableOnBackendFailureDoesNotPersistOwnership    ok   # record reste vide
+testEnableRefusesUnknownTarget                        ok   # mutator jamais appelé
+testEnableAcceptsOwnedTargetEvenIfNotCurrentlyActive  ok   # recovery path
+testRestoreOwnedPersistsOnlyStillOwnedIDs             ok   # B3: rewrite depuis outcome
+testRestoreOwnedClearsSuccessfullyReEnabledIDs        ok
+testRestoreOwnedDiscardsStaleBootRecord               ok   # cross-boot discard
+```
+
+`OwnedDisabledDisplaysStoreTests` (6/6) :
+```
+testRoundTripPreservesIDs                  ok
+testMissingFileReturnsEmptyRecord          ok
+testCorruptFileReturnsEmptyRecord          ok   # B3: never assume ownership
+testStaleBootRecordIsDiscarded             ok   # cross-boot discard
+testAtomicWriteLeavesNoTempFile            ok
+testRecordSchemaVersionIsCarried           ok
+```
+
+NOT_TESTED (live) — chemin happy-path disable 2e écran : `BLOCKED_HARDWARE` (1 écran). Le fake mutator couvre exactement les invariants B3 (rewrite depuis outcome, retain FAILED, cross-boot discard, last-active guard, stale-target guard, persistence conditionnée au succès).
+
+## G2b-corrections — Pré-merge correctness fixes (2026-09-15, Phase 1, branche PR B)
+
+Review externe (Ben, 2026-09-14) identifie 3 défauts dans G2b avant merge. Corrigés en Phase 1 sur la branche PR B (`agent/claude/20260915/runclosed-g2b-display`). Build clean, suite augmentée.
+
+```
+$ arch -arm64 swift build   → Build complete, 0 warning
+$ arch -arm64 swift test    → Executed 50 tests, with 0 failures
+                              (9 Core + 7 Lid Policy n/a + 5 Lease + 6 Owned Display
+                               + 6 Owned Lid n/a + 9 Service Display + 9 Service Lid n/a
+                               + 6 Display Policy + 11 ViewModel + 4 G2b-corrections)
+$ runclosed restore --owned → exit 0, JSON {"restored":"all","stillOwned":[]} (machine Ben, 1 écran, record vide)
+$ runclosed displays        → JSON OK (unchangé)
+$ runclosed doctor          → JSON OK (inchangé)
+$ runclosed status          → JSON OK (inchangé)
+```
+
+Note : G2b-corrections branche ne contient PAS G2c (lid stay-awake), donc les tests Lid (7 + 6 + 9 = 22) ne s'appliquent pas ici — ils sont dans PR C. PR B's scope = G2a + G2d-prep + G2b + Phase 1 corrections = 50 tests verts.
+
+Nouvelles régressions (4) :
+
+`DisplayMutationServiceTests` (4/4 ajoutés) :
+```
+testDisablePropagatesDeactivateAction                       ok    # disable → action == .deactivate (régression typo G2b)
+testEnablePropagatesActivateAction                          ok    # enable → action == .activate (régression typo G2b)
+testRestoreOwnedPropagatesActivateAction                    ok    # restore loop → chaque appel est un enable (pas disable)
+testRestoreOwnedReturnsNonEmptyListOnPartial                ok    # service expose stillOwned non-vide → CLI mappe à exit 5
+```
+
+Tests existants **inchangés verts** (les 9 + 6 + 6 d'avant G2c + les 21 de G2b = 42 anciens + 4 nouveaux = 46 attendus ; plus 4 ViewModel supplémentaires = 50).
+
+NOT_TESTED (live) — chemin exit 5 du CLI sur machine Ben : impossible en live (1 écran, `restore --owned` ne peut jamais être partiel puisque `OwnedDisabledDisplays` est vide). La logique est couverte par `testRestoreOwnedReturnsNonEmptyListOnPartial` qui exerce le contrat service-level dont le CLI dépend ; le mapping `stillOwned.isEmpty ? 0 : 5` est trivialement testable par lecture du code.
+
+Defect ledger :
+- `[DEFECT:action-typo-displaymutation]` (where: `DisplayMutation.swift:62,73,85,96,113` — fix ADR 014) — résolu Phase 1
+- `[DEFECT:cli-exit-code-partial-restore]` (where: `main.swift:255` — fix ADR 014) — résolu Phase 1
+- `[DEFECT:doc-drift-restore-owned-stub]` (where: `PROGRESS.md:84` omnibus — fix ADR 014) — résolu sur PR omnibus, propagé ici via §G3 cross-référence
+
