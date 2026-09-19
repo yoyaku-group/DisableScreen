@@ -298,8 +298,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             let canToggle: Bool = {
                 if isDisabled { return true }                 // always offer re-enable
-                if builtin && snap?.capability.deactivate == .experimental { return true }
-                return DisplayMutationPolicy.canDisable(target: id, activeIDs: activeIDs)
+                // Backend must support deactivation at all (builtin =
+                // experimental on this hardware) AND the last-active guard
+                // must allow it right now. Python parity: the switch is greyed
+                // when this is the only active display.
+                let backendCan = snap?.capability.deactivate != .unsupported
+                return backendCan && DisplayMutationPolicy.canDisable(target: id, activeIDs: activeIDs)
             }()
 
             return DisplayCard(
@@ -402,8 +406,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func toggleLoginItem(_ sender: NSSwitch) {
         let target = !LoginItemControl.isEnabled()
         withBusy {
-            let now = LoginItemControl.setEnabled(target)
-            sender.state = now ? .on : .off
+            let status = LoginItemControl.setEnabled(target)
+            sender.state = status == .enabled ? .on : .off
         }
     }
 

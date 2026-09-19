@@ -14,8 +14,19 @@ public enum DisplayBrightness {
 
     // MARK: — dlopen plumbing (CoreDisplay exports both symbol families)
 
+    /// The framework lives under `/System/Library/Frameworks/` on current
+    /// macOS (the PrivateFrameworks path fails to dlopen — the Python app's
+    /// ctypes handle only worked because the dyld cache resolved it; a direct
+    /// Swift dlopen of the Private path returns nil. Measured 2026-09-20).
     private nonisolated(unsafe) static let coreDisplayHandle: UnsafeMutableRawPointer? = {
-        dlopen("/System/Library/PrivateFrameworks/CoreDisplay.framework/CoreDisplay", RTLD_NOW)
+        let candidates = [
+            "/System/Library/Frameworks/CoreDisplay.framework/CoreDisplay",
+            "/System/Library/PrivateFrameworks/CoreDisplay.framework/CoreDisplay",
+        ]
+        for path in candidates {
+            if let h = dlopen(path, RTLD_NOW) { return h }
+        }
+        return nil
     }()
 
     // DisplayServices family (preferred, same as Python `_ds_get/_ds_set`).
