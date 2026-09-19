@@ -149,6 +149,92 @@ enum FileHandler {
     static func err(_ s: String) { FileHandle.standardError.write((s + "\n").data(using: .utf8)!) }
 }
 
+// ── G2c — lid stay-awake subcommand ────────────────────────────────────────
+
+/// Build a LidMutationService wired against the production pmset backend
+/// and the live PowerReadback prior-state provider.
+func makeLidService() -> LidMutationService {
+    let store = OwnedLidAssertion(currentBootID: clock.bootID)
+    return LidMutationService(
+        bootID: clock.bootID,
+        mutator: LidAssertions.live(),
+        store: store,
+        priorProvider: { PowerReadback.lidStayAwake() }
+    )
+}
+
+func cmdLidStayAwake(_ rest: [String]) -> Int32 {
+    guard let sub = rest.first else {
+        FileHandler.err("usage: runclosed lid-stay-awake <on|off|status>")
+        return 64
+    }
+    switch sub {
+    case "status":
+        // Read-only — no ownership claim, no mutation. Cross-boot stale
+        // records are surfaced as recoveryPending, never silently discarded
+        // (ADR 015: BOOT CHANGE ≠ PROOF OF RESTORATION).
+        let prior = PowerReadback.lidStayAwake()
+        let store = OwnedLidAssertion(currentBootID: clock.bootID)
+        let owned = store.load()
+        let staleRecoveryPending = owned.ownedEnabled && owned.bootID != clock.bootID
+        emitJSON([
+            "schemaVersion": kSchemaVersion,
+            "bootID": clock.bootID,
+            "observed": prior.map { $0 ? "on" : "off" } ?? "unknown",
+            "ownedByThisBoot": owned.bootID == clock.bootID && owned.ownedEnabled,
+            "recoveryPending": staleRecoveryPending,
+            "ownedBootID": owned.bootID,
+            "ownedReferenceState": owned.referenceState,
+        ])
+        return 0
+    case "on":
+        var svc = makeLidService()
+        let r = svc.setEnabled(true)
+        return renderLidResult(r, requestedAction: "on")
+    case "off":
+        var svc = makeLidService()
+        let r = svc.setEnabled(false)
+        return renderLidResult(r, requestedAction: "off")
+    default:
+        FileHandler.err("usage: runclosed lid-stay-awake <on|off|status>")
+        return 64
+    }
+}
+
+func renderLidResult(_ r: Result<OperationResult, LidMutationError>, requestedAction: String) -> Int32 {
+    switch r {
+    case .success(let op):
+        emitJSON([
+            "schemaVersion": kSchemaVersion,
+            "bootID": clock.bootID,
+            "action": requestedAction,
+            "state": op.state.rawValue,
+            "nativeRC": op.nativeRC as Any? ?? NSNull(),
+            "readbackOK": op.readbackOK,
+        ])
+        return 0
+    case .failure(let e):
+        let msg: String
+        let code: Int32
+        switch e {
+        case .preconditionUnknown:
+            msg = "refused: B1 invariant — observed prior state is UNKNOWN (pmset -g did not report SleepDisabled). Cannot mutate without baseline."
+            code = 3
+        case .noChangeRequested(let target):
+            msg = "refused: no-change — flag already at the requested state (\(target ? "on" : "off"))"
+            code = 3
+        case .notOwned:
+            msg = "refused: B2 invariant — we do not own the disablesleep flag on this boot. Only 'on' followed by 'off' is allowed, never a free 'off'."
+            code = 3
+        case .backendFailed(let m):
+            msg = "backend failed: \(m)"
+            code = 5
+        }
+        FileHandler.err(msg)
+        return code
+    }
+}
+
 // ── G2b — display mutation subcommands ───────────────────────────────────────
 
 /// Build a DisplayMutationService wired against the production SLS backend
@@ -269,30 +355,3 @@ func cmdRestoreOwned() -> Int32 {
     return stillOwned.isEmpty ? 0 : 5
 }
 
-// ── dispatch ─────────────────────────────────────────────────────────────────
-let args = Array(CommandLine.arguments.dropFirst())
-guard let sub = args.first else {
-    FileHandler.err("usage: runclosed <status|displays|doctor|run|restore|disable|enable> [...]")
-    exit(64)
-}
-let rest = Array(args.dropFirst())
-
-switch sub {
-case "status":   cmdStatus()
-case "displays": cmdDisplays()
-case "doctor":   cmdDoctor()
-case "run":      exit(cmdRun(rest))
-case "disable":  exit(cmdDisable(rest))
-case "enable":   exit(cmdEnable(rest))
-case "restore":
-    // restore --owned = re-enable every display we previously disabled (B3).
-    // restore --lid = closed-lid keep-awake restore (G3 stub, unchanged).
-    if rest.first == "--owned" {
-        exit(cmdRestoreOwned())
-    }
-    FileHandler.err("restore --owned: implemented in G2b. 'restore --lid' remains a G3 stub. No changes made.")
-    exit(0)
-default:
-    FileHandler.err("unknown command: \(sub)")
-    exit(64)
-}
