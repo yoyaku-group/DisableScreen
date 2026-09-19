@@ -158,6 +158,164 @@ testAtomicWriteLeavesNoTempFile        ok    # aucun temp sibling après save (r
 NOT_TESTED (live) — les 5 tests utilisent FakeClock + URL-injectée (zéro dépendance filesystem live) ; le round-trip end-to-end avec leases réelles est validé par le `runclosed run --idle-only` ci-dessus.
 
 
+## G2c — Lid stay-awake Swift (2026-09-14, PR #5 ; cross-boot rework 2026-09-16)
+
+`LidMutationPolicy` (pure, Core) + `LidAssertion` protocol + `PMSetLidAssertion` (subprocess wrapper) + `LidMutationService` (orchestration B1+B2 invariants + reconcile cross-boot ADR 015) + `OwnedLidAssertion` (atomic, load verbatim + purge explicite). CLI `lid-stay-awake on|off|status`. Architecture pmset fork+exec : exit code non-fiable → readback `pmset -g` autoritaire. Cross-boot fail-closed : BOOT CHANGE ≠ PROOF OF RESTORATION (ADR 015).
+
+**Live verify (machine Ben, non-root, 2026-09-14, commit omnibus `c386aa7` — logique identique re-structurée dans cette PR)** :
+```
+$ pmset -g | grep SleepDisabled  → SleepDisabled 0 (baseline)
+$ runclosed lid-stay-awake status    → exit 0, JSON observed:"off", ownedByThisBoot:false, recoveryPending:false
+$ runclosed lid-stay-awake on        → exit 5, message:
+   backend failed: '/usr/bin/pmset' must be run as root... | readback: observed=false, expected=true
+$ runclosed lid-stay-awake status    → exit 0, JSON unchanged (B2 honest refuse,
+                                        pas de fausse réclamation ownership)
+$ runclosed lid-stay-awake off       → exit 3, noChangeRequested (policy no-op guard)
+$ pmset -g | grep SleepDisabled  → SleepDisabled 0 (état inchangé, cycle propre)
+```
+
+**Build 2026-09-16 (environnement dégradé — voir §Environment note)** :
+```
+$ SDKROOT=…/MacOSX.sdk arch -arm64 …/XcodeDefault.xctoolchain/usr/bin/swift build
+   → Build complete! (0 warning)
+```
+
+Nouvelles régressions G2c (30 attendus) :
+
+`LidMutationPolicyTests` (7) :
+```
+testSetOnAllowedWhenPriorIsOff                       ok
+testSetOnRefusedWhenPriorIsOn                        ok   # no-op guard
+testSetOnRefusedOnUnknownPrior                       ok   # B1 invariant
+testSetOffAllowedWhenPriorIsOn                       ok
+testSetOffRefusedWhenPriorIsOff                      ok   # no-op guard
+testSetOffRefusedOnUnknownPrior                      ok   # B1 invariant
+testPolicyIsDeterministic                            ok
+```
+
+`LidMutationServiceTests` (15, avec FakeLidAssertion — dont 6 nouveaux ADR 015) :
+```
+testSetOnRefusedOnUnknownPrior                                ok   # mutator jamais invoqué
+testSetOffRefusedOnUnknownPrior                               ok   # mutator jamais invoqué
+testSetOnSucceedsWhenPriorIsOff                                ok   # B2 readback → ownership claim
+testSetOnOnBackendFailureDoesNotClaimOwnership                 ok   # B2 failure → record vide
+testSetOnRefusedWhenAlreadyOn                                  ok   # no-op guard (policy catches first)
+testSetOffRefusedWhenWeDoNotOwn                                ok   # mutator jamais invoqué (B2)
+testSetOffSucceedsAndReleasesOwnershipWhenWeOwn                ok   # restore releases ownership
+testRestoreIfOwnedNoOpsWhenNothingOwned                        ok
+testRestoreIfOwnedPerformsRestoreWhenOwned                    ok   # mutator exactement 1 appel
+testReconcileStaleBootObservedOffPurges                       ok   # ADR 015: seul chemin de purge
+testReconcileStaleBootObservedOnKeepsRecoveryPending          ok   # ADR 015: conservé, pas d'auto-mutation
+testReconcileStaleBootUnknownKeepsRecoveryPending             ok   # ADR 015: UNKNOWN ≠ OFF
+testReconcileSameBootRecordNoOp                               ok
+testHasStaleRecoveryPendingFlagsStaleRecordOnly               ok
+testSetOffRefusesEvenWithStaleOwnershipRecord                 ok   # stale ≠ ownership sur le nouveau boot
+```
+
+`OwnedLidAssertionStoreTests` (8 — dont 3 rework ADR 015) :
+```
+testRoundTripPreservesOwnership        ok
+testMissingFileReturnsEmptyRecord      ok   # no phantom ownership
+testCorruptFileReturnsEmptyRecord      ok   # B3 strict
+testLoadNeverDiscardsStaleBootRecord   ok   # ADR 015: verbatim, remplace testStaleBootRecordIsDiscarded
+testRepeatedLoadsNeverEraseStaleRecord ok   # ADR 015: boot change seul n'efface jamais
+testPurgeClearsTheRecordExplicitly     ok   # ADR 015: purge = décision explicite
+testAtomicWriteLeavesNoTempFile        ok
+testRecordSchemaVersionIsCarried       ok
+```
+
+**⚠ Environment note (2026-09-16) — workaround toolchain Xcode 27** : Xcode auto-update 26.6 → 27.0 cette nuit, licence non acceptée → `swift`/`xcodebuild`/`install_name_tool` shims refusent (`You have not agreed to the Xcode license agreements`). Workaround utilisé (script `scripts/dev/run-tests-xcode27.sh`) : build via le frontend toolchain direct (`Toolchains/XcodeDefault.xctoolchain/usr/bin/swift build --build-tests` + `SDKROOT` explicite), frameworks XCTest/Testing copiés dans les rpaths du `.build`, puis run via `arch -arm64 …/usr/bin/xctest <bundle>` (le shim seul est licence-gated, pas les frontends). **Résultat : les 55 tests de la branche tournent VERTS malgré l'environnement dégradé** (16 Core + 13 Persistence + 15 MacSystem + 11 App, 0 failures). **Unblock Ben définitif (une ligne) : `sudo xcodebuild -license accept`** puis `arch -arm64 swift test` redevient canonique.
+
+NOT_TESTED (live) — chemin happy-path (on→off complet avec readback success) : **nécessite élévation root** (A14). Reboot-comportement `disablesleep` = UNDOCUMENTED → protocole Phase 4 (opérateur présent) ; le modèle fail-closed ADR 015 est correct dans les deux cas observés.
+
+## G2b — Display mutation Swift (2026-09-14)
+
+`DisplayMutator` protocol + `SLSDisplayMutator` (SkyLight via dlsym) + `DisplayMutationPolicy` (pure) + `DisplayMutationService` (orchestration) + `OwnedDisabledDisplays` (persistence atomique + cross-boot discard). CLI `disable <id>` / `enable <id>` / `restore --owned`. Logique unit-testée avec fakes ; chemin live happy-path = `BLOCKED_HARDWARE` (1 écran XDR).
+
+```
+$ arch -arm64 swift build   → Build complete, 0 warning
+$ arch -arm64 swift test    → Executed 46 tests, with 0 failures   (9 Core + 6 Policy + 5 Lease + 6 Owned + 9 Service + 11 ViewModel)
+$ runclosed disable 1       → exit 3 (refused: last active)
+$ runclosed enable 1        → exit 5 (backend: kCGErrorCannotComplete — no-op sur 1 écran)
+$ runclosed restore --owned → exit 0 (JSON stillOwned: [], owned record empty)
+$ runclosed doctor          → JSON OK (unchangé)
+$ runclosed displays        → JSON OK (unchangé)
+```
+
+Nouvelles régressions (21) :
+
+`DisplayMutationPolicyTests` (6/6) :
+```
+testDisableAllowedOnMultiDisplayTopology ok
+testDisableRefusedOnLastActiveDisplay    ok
+testDisableRefusedOnStaleTargetNotInActiveSet ok
+testDisableOnEmptyActiveSetAlwaysRefused ok
+testEnableAllowsKnownTargets              ok
+testEnableRefusesUnknownTargets          ok
+```
+
+`DisplayMutationServiceTests` (9/9, avec FakeDisplayMutator) :
+```
+testDisableRefusedOnLastActiveDisplay                 ok   # mutator jamais appelé
+testDisableRefusedOnStaleTarget                       ok   # mutator jamais appelé
+testDisableOnSuccessPersistsOwnership                 ok   # owned_displays.json écrit avec [2]
+testDisableOnBackendFailureDoesNotPersistOwnership    ok   # record reste vide
+testEnableRefusesUnknownTarget                        ok   # mutator jamais appelé
+testEnableAcceptsOwnedTargetEvenIfNotCurrentlyActive  ok   # recovery path
+testRestoreOwnedPersistsOnlyStillOwnedIDs             ok   # B3: rewrite depuis outcome
+testRestoreOwnedClearsSuccessfullyReEnabledIDs        ok
+testRestoreOwnedDiscardsStaleBootRecord               ok   # cross-boot discard
+```
+
+`OwnedDisabledDisplaysStoreTests` (6/6) :
+```
+testRoundTripPreservesIDs                  ok
+testMissingFileReturnsEmptyRecord          ok
+testCorruptFileReturnsEmptyRecord          ok   # B3: never assume ownership
+testStaleBootRecordIsDiscarded             ok   # cross-boot discard
+testAtomicWriteLeavesNoTempFile            ok
+testRecordSchemaVersionIsCarried           ok
+```
+
+NOT_TESTED (live) — chemin happy-path disable 2e écran : `BLOCKED_HARDWARE` (1 écran). Le fake mutator couvre exactement les invariants B3 (rewrite depuis outcome, retain FAILED, cross-boot discard, last-active guard, stale-target guard, persistence conditionnée au succès).
+
+## G2b-corrections — Pré-merge correctness fixes (2026-09-15, Phase 1, branche PR B)
+
+Review externe (Ben, 2026-09-14) identifie 3 défauts dans G2b avant merge. Corrigés en Phase 1 sur la branche PR B (`agent/claude/20260915/runclosed-g2b-display`). Build clean, suite augmentée.
+
+```
+$ arch -arm64 swift build   → Build complete, 0 warning
+$ arch -arm64 swift test    → Executed 50 tests, with 0 failures
+                              (9 Core + 7 Lid Policy n/a + 5 Lease + 6 Owned Display
+                               + 6 Owned Lid n/a + 9 Service Display + 9 Service Lid n/a
+                               + 6 Display Policy + 11 ViewModel + 4 G2b-corrections)
+$ runclosed restore --owned → exit 0, JSON {"restored":"all","stillOwned":[]} (machine Ben, 1 écran, record vide)
+$ runclosed displays        → JSON OK (unchangé)
+$ runclosed doctor          → JSON OK (inchangé)
+$ runclosed status          → JSON OK (inchangé)
+```
+
+Note : G2b-corrections branche ne contient PAS G2c (lid stay-awake), donc les tests Lid (7 + 6 + 9 = 22) ne s'appliquent pas ici — ils sont dans PR C. PR B's scope = G2a + G2d-prep + G2b + Phase 1 corrections = 50 tests verts.
+
+Nouvelles régressions (4) :
+
+`DisplayMutationServiceTests` (4/4 ajoutés) :
+```
+testDisablePropagatesDeactivateAction                       ok    # disable → action == .deactivate (régression typo G2b)
+testEnablePropagatesActivateAction                          ok    # enable → action == .activate (régression typo G2b)
+testRestoreOwnedPropagatesActivateAction                    ok    # restore loop → chaque appel est un enable (pas disable)
+testRestoreOwnedReturnsNonEmptyListOnPartial                ok    # service expose stillOwned non-vide → CLI mappe à exit 5
+```
+
+Tests existants **inchangés verts** (les 9 + 6 + 6 d'avant G2c + les 21 de G2b = 42 anciens + 4 nouveaux = 46 attendus ; plus 4 ViewModel supplémentaires = 50).
+
+NOT_TESTED (live) — chemin exit 5 du CLI sur machine Ben : impossible en live (1 écran, `restore --owned` ne peut jamais être partiel puisque `OwnedDisabledDisplays` est vide). La logique est couverte par `testRestoreOwnedReturnsNonEmptyListOnPartial` qui exerce le contrat service-level dont le CLI dépend ; le mapping `stillOwned.isEmpty ? 0 : 5` est trivialement testable par lecture du code.
+
+Defect ledger :
+- `[DEFECT:action-typo-displaymutation]` (where: `DisplayMutation.swift:62,73,85,96,113` — fix ADR 014) — résolu Phase 1
+- `[DEFECT:cli-exit-code-partial-restore]` (where: `main.swift:255` — fix ADR 014) — résolu Phase 1
+- `[DEFECT:doc-drift-restore-owned-stub]` (where: `PROGRESS.md:84` omnibus — fix ADR 014) — résolu sur PR omnibus, propagé ici via §G3 cross-référence
+
 ## A14 — Helper LaunchDaemon, tranche 1 registration/status SANS XPC (2026-09-16, branche dédiée)
 
 `RunClosedHelperSupport` (descriptor + DaemonStatus 1:1 SMAppService + DaemonRegistrar seam + HelperLifecycleService au rapport honnête) + `RunClosedHelper` daemon (start/log/SIGTERM, zéro opération privilégiée) + plist sans MachServices (volontaire). ADR 016 : SMAppService.daemon, PAS SMJobBless ni AuthorizationExecuteWithPrivileges (deprecated) ; API root bornée `setDisableSleep(Bool)` + health/version ; ad-hoc interdit.
