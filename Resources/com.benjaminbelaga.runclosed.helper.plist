@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- A14 root helper daemon (ADR 016 / ADR 017). Lives in the app bundle at
+         Contents/Library/LaunchDaemons/ and is registered via
+         SMAppService.daemon(plistName:). The Label MUST match
+         RunClosedHelperDescriptor.daemonLabel. -->
+    <key>Label</key>
+    <string>com.benjaminbelaga.runclosed.helper</string>
+
+    <!-- BundleProgram — NOT Program. Apple (Updating helper executables from
+         earlier versions of macOS): "replace the Program key with the
+         BundleProgram key and make the path relative to the bundle". The old
+         absolute /Library/LaunchDaemons/... form belonged to the deprecated
+         SMJobBless flow; under SMAppService the binary stays inside the app
+         bundle and nothing ever copies it to /Library/LaunchDaemons. The value
+         MUST match RunClosedHelperDescriptor.bundleProgramRelativePath (a unit
+         test asserts this). -->
+    <key>BundleProgram</key>
+    <string>Contents/MacOS/runclosed-privileged-helper</string>
+
+    <!-- T1 deliberately has NO RunAtLoad, NO KeepAlive and NO MachServices:
+         with no trigger and no listener socket the daemon never runs, so the
+         registration skeleton is qualified with zero privileged surface
+         reachable. T2 adds MachServices; launchd then starts the daemon
+         on demand (no KeepAlive needed). -->
+</dict>
+</plist>

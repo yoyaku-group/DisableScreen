@@ -2,6 +2,7 @@ import Foundation
 import RunClosedCore
 import RunClosedMacSystem
 import RunClosedPersistence
+import RunClosedHelperSupport
 
 // RunClosed CLI (provisional). Dependency-free arg parsing (ADR 003).
 //   runclosed status   --json
@@ -143,6 +144,51 @@ func cmdRun(_ rest: [String]) -> Int32 {
     child.waitUntilExit()
     cleanup()
     return child.terminationStatus
+}
+
+// ── A14 — privileged helper lifecycle (registration foundation, NO XPC) ─────
+
+func emitHelperReport(_ r: HelperLifecycleService.Report, action: String) {
+    var obj: [String: Any] = [
+        "schemaVersion": kSchemaVersion,
+        "bootID": clock.bootID,
+        "action": action,
+        "status": r.status.rawValue,
+        "boundedOperation": r.boundedOperation,
+        "xpcImplemented": r.xpcImplemented,
+    ]
+    if let ok = r.lastOperationSucceeded { obj["lastOperationSucceeded"] = ok }
+    emitJSON(obj)
+}
+
+func cmdHelper(_ rest: [String]) -> Int32 {
+    guard let sub = rest.first else {
+        FileHandler.err("usage: runclosed helper <status|register|login-items|unregister>")
+        return 64
+    }
+    let svc = HelperLifecycleService(registrar: SMAppServiceDaemonRegistrar())
+    switch sub {
+    case "status":
+        emitHelperReport(svc.report(), action: "status")
+        return 0
+    case "register":
+        let r = svc.registerAndReport()
+        emitHelperReport(r, action: "register")
+        return r.lastOperationSucceeded == false ? 5 : 0
+    case "login-items":
+        // Opens System Settings → Login Items & Extensions (the user step of
+        // a requiresApproval daemon). Performs no privileged action.
+        svc.openApprovalSettings()
+        emitHelperReport(svc.report(), action: "login-items")
+        return 0
+    case "unregister":
+        let r = svc.unregisterAndReport()
+        emitHelperReport(r, action: "unregister")
+        return r.lastOperationSucceeded == false ? 5 : 0
+    default:
+        FileHandler.err("usage: runclosed helper <status|register|login-items|unregister>")
+        return 64
+    }
 }
 
 enum FileHandler {
@@ -359,7 +405,7 @@ func cmdRestoreOwned() -> Int32 {
 // ── dispatch ─────────────────────────────────────────────────────────────────
 let args = Array(CommandLine.arguments.dropFirst())
 guard let sub = args.first else {
-    FileHandler.err("usage: runclosed <status|displays|doctor|run|restore|disable|enable|lid-stay-awake> [...]")
+    FileHandler.err("usage: runclosed <status|displays|doctor|run|restore|disable|enable|lid-stay-awake|helper> [...]")
     exit(64)
 }
 let rest = Array(args.dropFirst())
@@ -372,6 +418,7 @@ case "run":      exit(cmdRun(rest))
 case "disable":  exit(cmdDisable(rest))
 case "enable":   exit(cmdEnable(rest))
 case "lid-stay-awake": exit(cmdLidStayAwake(rest))
+case "helper":   exit(cmdHelper(rest))
 case "restore":
     // restore --owned = re-enable every display we previously disabled (B3).
     // restore --lid = closed-lid keep-awake restore (G3 stub, unchanged).

@@ -157,6 +157,7 @@ testAtomicWriteLeavesNoTempFile        ok    # aucun temp sibling après save (r
 
 NOT_TESTED (live) — les 5 tests utilisent FakeClock + URL-injectée (zéro dépendance filesystem live) ; le round-trip end-to-end avec leases réelles est validé par le `runclosed run --idle-only` ci-dessus.
 
+
 ## G2c — Lid stay-awake Swift (2026-09-14, PR #5 ; cross-boot rework 2026-09-16)
 
 `LidMutationPolicy` (pure, Core) + `LidAssertion` protocol + `PMSetLidAssertion` (subprocess wrapper) + `LidMutationService` (orchestration B1+B2 invariants + reconcile cross-boot ADR 015) + `OwnedLidAssertion` (atomic, load verbatim + purge explicite). CLI `lid-stay-awake on|off|status`. Architecture pmset fork+exec : exit code non-fiable → readback `pmset -g` autoritaire. Cross-boot fail-closed : BOOT CHANGE ≠ PROOF OF RESTORATION (ADR 015).
@@ -314,3 +315,67 @@ Defect ledger :
 - `[DEFECT:action-typo-displaymutation]` (where: `DisplayMutation.swift:62,73,85,96,113` — fix ADR 014) — résolu Phase 1
 - `[DEFECT:cli-exit-code-partial-restore]` (where: `main.swift:255` — fix ADR 014) — résolu Phase 1
 - `[DEFECT:doc-drift-restore-owned-stub]` (where: `PROGRESS.md:84` omnibus — fix ADR 014) — résolu sur PR omnibus, propagé ici via §G3 cross-référence
+
+## A14 — Helper LaunchDaemon, tranche 1 registration/status SANS XPC (2026-09-16, branche dédiée)
+
+`RunClosedHelperSupport` (descriptor + DaemonStatus 1:1 SMAppService + DaemonRegistrar seam + HelperLifecycleService au rapport honnête) + `RunClosedHelper` daemon (start/log/SIGTERM, zéro opération privilégiée) + plist sans MachServices (volontaire). ADR 016 : SMAppService.daemon, PAS SMJobBless ni AuthorizationExecuteWithPrivileges (deprecated) ; API root bornée `setDisableSleep(Bool)` + health/version ; ad-hoc interdit.
+
+```
+$ build (workaround Xcode 27, frontend direct + SDKROOT)   → Build complete! (0 warning)
+$ xctest (workaround arch -arm64 + frameworks rpaths):
+  RunClosedHelperSupportTests  Executed 6 tests,  0 failures   # ADR 016 contract
+  RunClosedCoreTests           Executed 9 tests,  0 failures
+  RunClosedAppTests            Executed 11 tests, 0 failures
+  RunClosedPersistenceTests    Executed 5 tests,  0 failures
+  → 31/31 verts
+```
+
+Nouvelles régressions (`HelperLifecycleTests`, FakeRegistrar — 6/6) :
+```
+testRequiresApprovalIsSurfacedNotSwallowed      ok  # état attendu, jamais avalé/normalisé
+testNotFoundIsDistinctFromNotRegistered         ok  # bundle cassé ≠ clean slate
+testRegisterOnlyFromNotRegistered               ok  # pas de re-registration
+testRegisterAndReportNormalPathLeadsToRequiresApproval  ok  # porte approbation utilisateur = chemin normal
+testReportIsHonestAboutBoundedOperationAndXPC   ok  # bounded-op exacte + xpcImplemented:false en clair
+testDescriptorIdentityIsStable                  ok  # plist/binary/label = points fixes partagés
+```
+
+NOT_TESTED (live) → **voir §A14-T1 (2026-09-17)** : la registration réelle est désormais QUALIFIÉE en E2E ; restent l'approbation humaine Login Items → `enabled`, XPC (tranche 2), setDisableSleep root (tranche 2).
+
+## A14-T1 — packaging + BundleProgram + E2E registration réelle (2026-09-17, branche dédiée)
+
+Correctifs de la deep review : plist `Program` absolu → `BundleProgram` relatif (spec Apple « make the path relative to the bundle ») ; contradictions `KeepAlive`/`RunAtLoad` retirées (le daemon ne tourne pas en T1) ; script d'assemblage du vrai `.app` ; deep link d'approbation exposé (`openLoginItemsSettings()`) + CLI `runclosed helper …` ; sémantique OS mesurée + codée (ADR 017/018). Build + tests :
+
+```
+$ arch -arm64 swift build   → Build complete! (0 warning)
+$ arch -arm64 swift test    → 38/38 (9 Core + 11 App + 5 Persistence + 13 Helper)
+$ bash scripts/build-runclosed-app.sh SIGN_IDENTITY="Developer ID Application: YOYAKU (YZYJJPX484)"
+   → RunClosed.app assemblé + signé + `codesign --verify --strict` OK
+```
+
+E2E réel sur le .app signé installé dans /Applications (macOS 26.6, machine Ben) :
+
+```
+$ runclosed-cli helper status     → {"status":"notRegistered"}                 exit 0
+$ runclosed-cli helper register   → {"lastOperationSucceeded":true,
+                                     "status":"requiresApproval"}              exit 0
+$ runclosed-cli helper status     → {"status":"requiresApproval"}              exit 0
+$ runclosed-cli helper unregister → {"lastOperationSucceeded":true,
+                                     "status":"notRegistered"}                 exit 0
+$ runclosed-cli helper status     → {"status":"notRegistered"}                 exit 0
+$ codesign -dv app     → Identifier=com.benjaminbelaga.RunClosed · TeamIdentifier=YZYJJPX484
+$ codesign -dv daemon  → Identifier=runclosed-privileged-helper  · TeamIdentifier=YZYJJPX484
+$ pgrep runclosed-privileged-helper → aucun process (daemon jamais lancé : aucun trigger/MachServices)
+```
+
+pmset : RunClosed n'a émis **aucun pmset** (aucun appel dans les binaires de cette tranche). Le `SleepDisabled=1` observé pendant l'E2E est tenu par l'app quotidienne **DisableScreen** (PID 57018, `~/DisableScreen/disablescreen.log` : « lid stay-awake desired=True rc=0 observed=True », 2026-09-16 21:21) — antérieur de ~17h et indépendant de l'E2E ; non touché.
+
+Découvertes E2E (corrigées + documentées ADR 018) :
+- **Collision de casse APFS** : `runclosed` et `RunClosed` sont le MÊME fichier (l'app était écrasée par le CLI) → CLI embarqué renommé `runclosed-cli`.
+- **macOS 26 — état frais = `notFound`** (pas `notRegistered`) : `registerAndReport()` tente depuis les deux, sinon une machine fraîche ne registrerait jamais.
+- **macOS 26 — `register()` peut THROW "Operation not permitted" (code 1) tout en passant à `requiresApproval`** : pending = succès (le throw seul aurait produit un faux échec CLI).
+- `unregister()` depuis `requiresApproval` → `notRegistered` : teardown propre vérifié.
+
+Nouvelles régressions (+2) : `testRegisterProceedsFromNotFound` · `testRegisterNoopWhenRequiresApproval`.
+
+NOT_TESTED (live, restant) : approbation humaine Login Items → `enabled` (geste opérateur) · XPC (A14-T2) · setDisableSleep live.
