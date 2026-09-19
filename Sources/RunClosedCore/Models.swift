@@ -24,7 +24,7 @@ public enum OperationState: String, Codable, Sendable {
 /// was actually issued; the prior `enabled ? .deactivate : .deactivate` typo
 /// masked the operation entirely. ADR 014.)
 public enum DisplayAction: String, Codable, Sendable {
-    case softwareDim, brightness, activate, deactivate, sleepAll
+    case softwareDim, brightness, activate, deactivate, sleepAll, resolution
 }
 
 /// What a tracked unit of work is doing. Invariant 7: a live process / low CPU
