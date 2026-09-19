@@ -355,3 +355,32 @@ func cmdRestoreOwned() -> Int32 {
     return stillOwned.isEmpty ? 0 : 5
 }
 
+
+// ── dispatch ─────────────────────────────────────────────────────────────────
+let args = Array(CommandLine.arguments.dropFirst())
+guard let sub = args.first else {
+    FileHandler.err("usage: runclosed <status|displays|doctor|run|restore|disable|enable|lid-stay-awake> [...]")
+    exit(64)
+}
+let rest = Array(args.dropFirst())
+
+switch sub {
+case "status":   cmdStatus()
+case "displays": cmdDisplays()
+case "doctor":   cmdDoctor()
+case "run":      exit(cmdRun(rest))
+case "disable":  exit(cmdDisable(rest))
+case "enable":   exit(cmdEnable(rest))
+case "lid-stay-awake": exit(cmdLidStayAwake(rest))
+case "restore":
+    // restore --owned = re-enable every display we previously disabled (B3).
+    // restore --lid = closed-lid keep-awake restore (G3 stub, unchanged).
+    if rest.first == "--owned" {
+        exit(cmdRestoreOwned())
+    }
+    FileHandler.err("restore --owned: implemented in G2b. 'restore --lid' remains a G3 stub. No changes made.")
+    exit(0)
+default:
+    FileHandler.err("unknown command: \(sub)")
+    exit(64)
+}
