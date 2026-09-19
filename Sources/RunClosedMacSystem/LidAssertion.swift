@@ -18,6 +18,33 @@ public protocol LidAssertion: Sendable {
     mutating func setEnabled(_ enabled: Bool) -> OperationResult
 }
 
+/// Readback helper shared by both pmset backends.
+///
+/// Live measurement (2026-09-20, macOS 26.6): a `pmset -a disablesleep 1`
+/// followed by an *immediate* `pmset -g` can still report the OLD value — the
+/// kernel flag propagates a beat after the write returns. Reading once made a
+/// successful write look like a failure (readback=false), so no ownership was
+/// recorded while the flag was actually ON. Bounded retry (5 × 150ms) closes
+/// the propagation window without masking a durable contradiction: a real
+/// refusal (e.g. unprivileged write) still reads back unchanged after 750ms
+/// and is honestly reported as `.failed`.
+enum LidReadback {
+    static let attempts = 5
+    static let delaySeconds: TimeInterval = 0.15
+
+    /// Read `pmset -g` until it reports `expected` or the attempts run out.
+    /// Returns the last observation (nil = unreadable all along).
+    static func waitFor(_ expected: Bool) -> Bool? {
+        var observed: Bool?
+        for attempt in 0..<attempts {
+            observed = PowerReadback.lidStayAwake()
+            if observed == expected { return observed }
+            if attempt < attempts - 1 { Thread.sleep(forTimeInterval: delaySeconds) }
+        }
+        return observed
+    }
+}
+
 // MARK: — Real backend (pmset subprocess)
 
 /// Live backend wrapping `pmset -a disablesleep <0|1>` + readback via
@@ -47,8 +74,9 @@ public struct PMSetLidAssertion: LidAssertion {
             )
         }
         // Readback phase — this is the authoritative truth, regardless of
-        // what rc + pmset output said.
-        let readback = PowerReadback.lidStayAwake()
+        // what rc + pmset output said. Retry bounded: the kernel flag may lag
+        // the write by a beat (measured 2026-09-20).
+        let readback = LidReadback.waitFor(enabled)
         guard let observed = readback else {
             return OperationResult(
                 requestID: UUID().uuidString,
@@ -160,7 +188,7 @@ public struct SudoPMsetLidAssertion: LidAssertion {
                 error: write.output ?? "sudo -n pmset -a disablesleep \(desiredValue) returned rc=\(write.rc)"
             )
         }
-        let readback = PowerReadback.lidStayAwake()
+        let readback = LidReadback.waitFor(enabled)
         guard let observed = readback else {
             return OperationResult(
                 requestID: UUID().uuidString,
