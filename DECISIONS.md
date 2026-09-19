@@ -30,6 +30,8 @@ Décisions d'architecture. Un ADR = une décision. Nom RunClosed **provisoire** 
 - Tests matériels (capot, écran externe MB16AH) derrière `RUNCLOSED_HW_OPTIN=1`, exécution seulement avec Ben présent. Un seul écran (XDR intégré) branché → externe = `BLOCKED_HARDWARE`.
 - Aucun backend capot privé (`coke`) exploré ici (décision post-qualification).
 
+| 019 | **G2d — la surface quotidienne est le popup à toggles dans l'app Swift ; l'app Python `DisableScreen` est retirée (backup réversible). Le capot mute par `sudo -n pmset` (règle sudoers M6 existante, readback autoritaire + retry borné) ; la luminosité externe reste `softwareDim` overlay, la builtin passe par CoreDisplay dlopen depuis `/System/Library/Frameworks/`. Le parsing `pmset -g` est whitespace-run (les TABULATIONS réelles ne matchaient pas l'espace littéral — cause racine du « ça ne marche pas » : le readback mentait `false` sur un flag réellement muté).** | G2d (2026-09-20) : parité complète avec le panneau Python (toggles, luminosité, résolution, login item) sur le moteur Swift testé (G2b/G2c). Le défaut de parsing est la leçon centrale : un readback faux transforme un succès en échec rapporté — l'invariant ADR 009 (l'observation décide) n'est tenu que si le parseur d'observation est correct ; d'où parseur pur + tests de régression + retry borné pour la latence de propagation du flag noyau. |
+
 ## Décision d'organisation du code Swift (post-G2a)
 
 - **Nouveau target `RunClosedPersistence`** (lib, dépend uniquement de `RunClosedCore`) absorbe toute la persistance on-disk des leases. `LeaseStore` y vit en `public` avec un init canonique (path Application Support) + un init URL-injecté pour les tests.
