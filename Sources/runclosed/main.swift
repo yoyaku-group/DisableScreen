@@ -9,7 +9,7 @@ import RunClosedHelperSupport
 //   runclosed displays --json
 //   runclosed doctor   --json
 //   runclosed run [--idle-only] [--max <seconds>] -- <cmd> [args...]
-//   runclosed run --lid -- <cmd>        → refused (exit 3): lid backend unqualified
+//   runclosed run --lid -- <cmd>        → refused (exit 3): CLI lid wrapper not implemented (ADR 007)
 //   runclosed restore --owned           → stub (G3): reports, changes nothing
 
 let clock = SystemClock(bootID: BootID.current())
@@ -57,11 +57,20 @@ func cmdStatus() {
 func cmdDisplays() { emitJSON(displaysJSON()) }
 
 func cmdDoctor() {
+    // Two distinct facts, reported as such (ADR 020): the app's closed-lid
+    // path is qualified live (docs/compatibility/README.md) and mutates
+    // through `sudo -n`; the CLI `run --lid` wrapper is a separate feature
+    // that is not implemented (ADR 007). A `sudo -l` presence probe was
+    // evaluated and rejected — it exits 0 even without NOPASSWD.
     emitJSON([
         "schemaVersion": kSchemaVersion,
         "bootID": clock.bootID,
         "lidStayAwake": PowerReadback.lidStayAwake().map { $0 ? "on" : "off" } ?? "unknown",
-        "lid": ["backend": "unqualified", "note": "closed-lid keep-awake not qualified on this hardware (G3)"],
+        "lid": [
+            "backend": "sudo -n /usr/bin/pmset -a disablesleep (app toggle)",
+            "qualification": "closed-lid keep-awake qualified live 2026-09-20 (docs/compatibility/README.md; needs the passwordless sudoers drop-in — README)",
+            "runLid": "not implemented — `run --lid` exits 3 (ADR 007)",
+        ],
         "idleAssertion": ["backend": "IOPMAssertionCreateWithName", "capability": "supported"],
         "displays": displaysJSON().count,
     ])
@@ -88,10 +97,11 @@ func cmdRun(_ rest: [String]) -> Int32 {
         i += 1
     }
 
-    // ADR 007: closed-lid backend is not qualified → refuse, do NOT launch the
-    // command pretending it is protected.
+    // ADR 007: the CLI lid wrapper is not implemented — refuse honestly, do
+    // NOT launch the command pretending it is protected. The qualified
+    // closed-lid path is the menu-bar app toggle (docs/compatibility).
     if lid {
-        FileHandler.err("run --lid refused: closed-lid keep-awake backend is not qualified on this hardware (G3). Use --idle-only for idle-sleep prevention.")
+        FileHandler.err("run --lid refused: the CLI lid wrapper is not implemented (ADR 007); the qualified closed-lid keep-awake path is the menu-bar app toggle. Use --idle-only for idle-sleep prevention.")
         return 3
     }
     guard !cmd.isEmpty else {

@@ -3,6 +3,17 @@
 All notable changes to RunClosed are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- `runclosed doctor` no longer reports the lid backend as "unqualified": it
+  now states the two facts separately — the app toggle path is qualified live
+  (`docs/compatibility/README.md`) and mutates through
+  `sudo -n /usr/bin/pmset`, while the CLI `run --lid` wrapper is a separate,
+  unimplemented feature (ADR 007). The `run --lid` refusal message says the
+  same instead of blaming the hardware.
+
 ## [0.2.0] - 2026-09-20
 
 ### Added

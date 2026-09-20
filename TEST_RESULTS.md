@@ -410,3 +410,29 @@ $ <capture écran>                    → slider 100%, résolution 3456x2234 @12
 **Cutover** — app Python : `--unregister` (login item), arrêtée, retirée de `/Applications` (zip + `.retired` réversibles) ; alias Desktop → `/Applications/RunClosed.app` ; login item `RunClosed` enregistré (`requiresApproval` — approbation Ben).
 
 NOT_TESTED — chemin 2 écrans (BLOCKED_HARDWARE), approbation Login Items (geste Ben), reboot `disablesleep` (ADR 015 Phase 4).
+
+## G5b — doctor truthfulness : fin de la contradiction qualification capot (2026-09-20)
+
+Défaut détecté pendant la mission notarisation (G5, `PROGRESS.md §G5`) : `doctor` affirmait `lid.backend="unqualified"` (chaîne hardcodée en G2, jamais mise à jour) alors que `docs/compatibility/README.md` enregistre le chemin capot **PASS** depuis la qualification live du 2026-09-20. Fix ADR 020 : deux faits distincts, plus aucune chaîne globale.
+
+```
+$ build/RunClosed.app/Contents/MacOS/runclosed-cli doctor --json
+  "lid" : {
+    "backend" : "sudo -n /usr/bin/pmset -a disablesleep (app toggle)",
+    "qualification" : "closed-lid keep-awake qualified live 2026-09-20 (docs/compatibility/README.md; needs the passwordless sudoers drop-in — README)",
+    "runLid" : "not implemented — `run --lid` exits 3 (ADR 007)"
+  },
+  "lidStayAwake" : "on", "displays" : 1,
+  "idleAssertion" : { "backend" : "IOPMAssertionCreateWithName", "capability" : "supported" }
+
+$ runclosed-cli run --lid -- true
+  stderr: "run --lid refused: the CLI lid wrapper is not implemented (ADR 007); the qualified
+           closed-lid keep-awake path is the menu-bar app toggle. Use --idle-only for
+           idle-sleep prevention."                                   → exit 3
+
+$ runclosed-cli run --idle-only -- sh -c 'exit 7'                    → exit 7 (non-régression)
+
+$ arch -arm64 swift test  → 5 bundles verts, 0 failure (exit 0)
+```
+
+Sonde « règle sudoers présente ? » évaluée puis **rejetée** : `sudo -n -l <cmd>` sort 0 même sans NOPASSWD (mesuré : `sudo -n -l /usr/bin/true` → rc 0) — elle ne discrimine pas, et un probe fragile aurait remplacé une affirmation périmée par une affirmation non fiable (ADR 020).
