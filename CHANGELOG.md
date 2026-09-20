@@ -3,7 +3,7 @@
 All notable changes to RunClosed are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.2.0] - 2026-09-20
 
 ### Added
 
@@ -33,3 +33,6 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - The Python `DisableScreen` app is retired as the daily driver (kept in-tree
   as the audited baseline). The Swift app is the product.
+- Builds are signed with the hardened runtime (`--options runtime
+  --timestamp`) and the 0.2.0 bundle is notarized and stapled, so the released
+  app launches under Gatekeeper without a warning.

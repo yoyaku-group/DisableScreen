@@ -5,15 +5,24 @@
 The Swift app is the daily driver: popup with real toggles, brightness,
 resolution, closed-lid keep-awake (qualified live), login item registration,
 and English/French localization. Ad-hoc or Developer ID signing both work.
+Since 2026-09-20 the release build is also signed with the hardened runtime and
+notarized, and v0.2.0 is the first tagged release.
 
 ## Distribution readiness (direct distribution)
 
 - [x] **Developer ID signing** — `SIGN_IDENTITY` env var on
       `scripts/build-runclosed-app.sh` (verified with a real identity).
-- [ ] **Notarization** — `xcrun notarytool submit build/RunClosed.app --wait`
-      then `xcrun stapler staple`. Needs an Apple Developer Program membership.
-- [ ] **Tagged release** — first `v0.2.0` tag + GitHub release with the
-      signed bundle.
+- [x] **Notarization** — the build script signs with the hardened runtime
+      (`--options runtime --timestamp`). The 0.2.0 bundle was submitted with
+      `xcrun notarytool submit --wait` (Accepted), `xcrun stapler staple`-ed,
+      and passes `spctl -a -vv` as `source=Notarized Developer ID`
+      (2026-09-20). Recipe for the next release:
+      `ditto -c -k --sequesterRsrc --keepParent build/RunClosed.app build/RunClosed.zip`
+      → `xcrun notarytool submit build/RunClosed.zip --keychain-profile <profile> --wait`
+      → `xcrun stapler staple build/RunClosed.app` → `spctl -a -vv build/RunClosed.app`.
+      Needs an Apple Developer Program membership.
+- [x] **Tagged release** — `v0.2.0` tag + GitHub release with the notarized
+      signed bundle (`RunClosed-0.2.0.zip`, 2026-09-20).
 
 ## Open-source hygiene
 

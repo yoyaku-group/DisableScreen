@@ -28,6 +28,14 @@
 #   SIGN_IDENTITY="Developer ID Application: YOYAKU (YZYJJPX484)" \
 #     bash scripts/build-runclosed-app.sh
 #
+# Every slice is signed with the hardened runtime (`--options runtime
+# --timestamp`), which notarization requires; both flags are valid under an
+# ad-hoc identity too. To notarize a Developer ID build:
+#   ditto -c -k --sequesterRsrc --keepParent build/RunClosed.app build/RunClosed.zip
+#   xcrun notarytool submit build/RunClosed.zip --keychain-profile <profile> --wait
+#   xcrun stapler staple build/RunClosed.app
+#   spctl -a -vv build/RunClosed.app
+#
 # Usage: bash scripts/build-runclosed-app.sh
 #        OUT_DIR=build CONFIG=release SIGN_IDENTITY=... bash scripts/...
 set -euo pipefail
@@ -67,8 +75,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleDisplayName</key><string>RunClosed</string>
     <key>CFBundleExecutable</key><string>RunClosed</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1.0</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>0.2.0</string>
+    <key>CFBundleVersion</key><string>2</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSUIElement</key><true/>
     <key>CFBundleDevelopmentRegion</key><string>en</string>
@@ -93,11 +101,11 @@ for lproj in en.lproj fr.lproj; do
     fi
 done
 
-echo "==> signing (identity: $IDENTITY)"
-codesign --force --sign "$IDENTITY" "$APP/Contents/MacOS/runclosed-privileged-helper"
-codesign --force --sign "$IDENTITY" "$APP/Contents/MacOS/runclosed-cli"
-codesign --force --sign "$IDENTITY" "$APP/Contents/MacOS/RunClosed"
-codesign --force --sign "$IDENTITY" "$APP"
+echo "==> signing (identity: $IDENTITY, hardened runtime)"
+codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP/Contents/MacOS/runclosed-privileged-helper"
+codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP/Contents/MacOS/runclosed-cli"
+codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP/Contents/MacOS/RunClosed"
+codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
 
 echo "==> verify signature (strict)"
 codesign --verify --strict --verbose=1 "$APP"
