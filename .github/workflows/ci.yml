@@ -11,8 +11,8 @@ concurrency:
 
 jobs:
   build-and-test:
-    name: Build & test (macOS 14+)
-    runs-on: macos-14
+    name: Build & test (macOS 15, Swift 6)
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -21,6 +21,7 @@ jobs:
         run: |
           xcodebuild -version
           swift --version
+          xcrun --sdk macosx --show-sdk-version
 
       - name: Build
         run: swift build --build-tests
