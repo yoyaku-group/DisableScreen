@@ -1,29 +1,47 @@
 # Roadmap
 
-## App Store readiness
+## Current state (2026-09-20)
 
-Current state: the app runs, auto-launches, is localized (en/fr), and is
-ad-hoc signed. Good enough for personal use on this Mac. Not yet App
-Store-submittable.
+The Swift app is the daily driver: popup with real toggles, brightness,
+resolution, closed-lid keep-awake (qualified live), login item registration,
+and English/French localization. Ad-hoc or Developer ID signing both work.
 
-To ship on the Mac App Store, the following is still required:
+## Distribution readiness (direct distribution)
 
-- [ ] **Developer ID signing** — replace `codesign --sign -` (ad-hoc) with
-      a real Apple Developer ID certificate. Requires an Apple Developer
-      Program membership.
-- [ ] **Notarization** — submit the signed `.app` to Apple's notary
-      service (`xcrun notarytool submit ... --wait`) and staple the ticket
-      (`xcrun stapler staple`). Required for distribution outside the App
-      Store; good hygiene either way.
-- [ ] **Privacy manifest** — add `Contents/Resources/PrivacyInfo.xcprivacy`
-      declaring required-reason API use (for us: `CGDisplay*` /
-      `IOKit` / `pmset` via sudo). Mandatory for App Store submissions
-      since 2024.
-- [ ] **App Sandbox entitlements** — add `Contents/entitlements.plist`
-      with `com.apple.security.app-sandbox = true` and the minimum
-      capabilities we actually need. The current `pmset disablesleep` via
-      sudoers will NOT survive sandboxing — we would need to either drop
-      that feature for the App Store build, or move it behind a helper
-      tool with `SMJobBless`. Decision to make.
-- [ ] **Update `build.sh`** to accept a `SIGN_IDENTITY` env var and
-      switch between ad-hoc (dev) and Developer ID (release) builds.
+- [x] **Developer ID signing** — `SIGN_IDENTITY` env var on
+      `scripts/build-runclosed-app.sh` (verified with a real identity).
+- [ ] **Notarization** — `xcrun notarytool submit build/RunClosed.app --wait`
+      then `xcrun stapler staple`. Needs an Apple Developer Program membership.
+- [ ] **Tagged release** — first `v0.2.0` tag + GitHub release with the
+      signed bundle.
+
+## Open-source hygiene
+
+- [x] CI: build + test + bundle smoke on every push/PR (`.github/workflows/`).
+- [x] Secret scanning (gitleaks) on every push/PR.
+- [x] CONTRIBUTING / SECURITY / CHANGELOG / issue templates.
+- [ ] **Contributor-facing compatibility matrix growth** — the matrix only
+      lists what has been tested; external-display rows need hardware reports
+      from contributors (see `docs/compatibility/README.md`).
+
+## Product backlog
+
+- [ ] **Second-display qualification** — the enable/disable path's happy case
+      needs a machine with 2+ displays; on a single-display machine only the
+      last-display guard is exercised.
+- [ ] **Private-API disclosure** — `SLSConfigureDisplayEnabled` is private
+      SkyLight. Fine for direct distribution, blocked for the App Store by
+      design. If an App Store variant is ever wanted, it must drop that
+      feature or find a public API.
+- [ ] **A14-T2** — privileged-helper XPC endpoint (today: registration
+      skeleton only; the daily app uses `sudo -n pmset` + a documented
+      sudoers rule).
+- [ ] **Reboot behavior of `disablesleep`** — documented as UNDOCUMENTED in
+      ADR 015; the app stays fail-closed either way. A controlled reboot test
+      would let the compatibility matrix state the observed behavior.
+
+## Non-goals
+
+- App Store submission of the private-SkyLight path.
+- Extending the privileged helper without an ADR.
+- Windows/Linux ports.
