@@ -81,7 +81,7 @@ final class PopupPanel: NSPanel {
 
         // — Quit (bottom-most)
         let quit = NSButton(frame: NSMakeRect(14, y + 6, width - 28, 24))
-        quit.title = "Quitter RunClosed"
+        quit.title = L10n.t("Quit RunClosed")
         quit.bezelStyle = .rounded
         quit.font = .systemFont(ofSize: 13)
         quit.target = target
@@ -111,7 +111,7 @@ final class PopupPanel: NSPanel {
         y += hSeparator
 
         // — Leases summary (read-only CLI view)
-        let leases = NSTextField(labelWithString: state.leasesSummary ?? "Sessions actives : aucune")
+        let leases = NSTextField(labelWithString: state.leasesSummary ?? L10n.t("Active sessions: none"))
         leases.frame = NSMakeRect(14, y + 6, width - 28, 14)
         leases.font = .systemFont(ofSize: 11)
         leases.textColor = .secondaryLabelColor
@@ -199,7 +199,7 @@ final class PopupPanel: NSPanel {
         if !card.builtin {
             y -= hExternalButton
             let btn = NSButton(frame: NSMakeRect(14, y + 6, width - 28, 24))
-            btn.title = "Réglages Écran macOS…"
+            btn.title = L10n.t("Open macOS Display Settings…")
             btn.bezelStyle = .rounded
             btn.font = .systemFont(ofSize: 11)
             btn.target = target
@@ -262,13 +262,13 @@ final class PopupPanel: NSPanel {
 
     private static func lidRow(_ state: PopupState, target: AnyObject) -> (NSView, CGFloat) {
         let view = NSView(frame: NSMakeRect(0, 0, width, hLid))
-        let label = NSTextField(labelWithString: "Maintenir éveillé capot fermé")
+        let label = NSTextField(labelWithString: L10n.t("Keep awake with lid closed"))
         label.frame = NSMakeRect(14, 11, width - 80, 14)
         label.font = .systemFont(ofSize: 12)
         view.addSubview(label)
 
         if state.lid == .unknown {
-            let hint = NSTextField(labelWithString: "état inconnu")
+            let hint = NSTextField(labelWithString: L10n.t("unknown state"))
             hint.frame = NSMakeRect(width - 140, 11, 80, 14)
             hint.font = .systemFont(ofSize: 10)
             hint.textColor = .tertiaryLabelColor
@@ -287,7 +287,7 @@ final class PopupPanel: NSPanel {
 
     private static func loginRow(_ state: PopupState, target: AnyObject) -> (NSView, CGFloat) {
         let view = NSView(frame: NSMakeRect(0, 0, width, hLogin))
-        let label = NSTextField(labelWithString: "Ouvrir à l'ouverture de session")
+        let label = NSTextField(labelWithString: L10n.t("Open at login"))
         label.frame = NSMakeRect(14, 11, width - 80, 14)
         label.font = .systemFont(ofSize: 12)
         view.addSubview(label)

@@ -33,24 +33,24 @@ final class SnapshotViewModelTests: XCTestCase {
                                       currentBootID: boot)
         XCTAssertEqual(vm.lidStayAwake, .unknown)
         let text = SnapshotRenderer.render(vm)
-        XCTAssertTrue(text.contains("état inconnu"),
+        XCTAssertTrue(text.contains("state unknown"),
                       "UNKNOWN power must render its own copy, not collapse to off")
-        XCTAssertFalse(text.contains(": désactivée"),
-                       "UNKNOWN power must never be rendered as 'désactivée' (off)")
+        XCTAssertFalse(text.contains("standard sleep posture"),
+                       "UNKNOWN power must never be rendered as OFF")
     }
 
     func testLidOnRendersOn() {
         let vm = SnapshotBuilder.make(now: now, snapshots: [], lidStayAwake: true,
                                       leases: [], currentBootID: boot)
         XCTAssertEqual(vm.lidStayAwake, .on)
-        XCTAssertTrue(SnapshotRenderer.render(vm).contains(": activée"))
+        XCTAssertTrue(SnapshotRenderer.render(vm).contains("keep awake on lid close"))
     }
 
     func testLidOffRendersOff() {
         let vm = SnapshotBuilder.make(now: now, snapshots: [], lidStayAwake: false,
                                       leases: [], currentBootID: boot)
         XCTAssertEqual(vm.lidStayAwake, .off)
-        XCTAssertTrue(SnapshotRenderer.render(vm).contains(": désactivée"))
+        XCTAssertTrue(SnapshotRenderer.render(vm).contains("standard sleep posture"))
     }
 
     // MARK: - Capability honesty: softwareDim never labelled "native"
@@ -80,7 +80,7 @@ final class SnapshotViewModelTests: XCTestCase {
         let vm = SnapshotBuilder.make(now: now, snapshots: [s],
                                       lidStayAwake: false, leases: [],
                                       currentBootID: boot)
-        XCTAssertTrue(SnapshotRenderer.render(vm).contains("état inconnu"))
+        XCTAssertTrue(SnapshotRenderer.render(vm).contains("brightness: unknown"))
     }
 
     // MARK: - Leases filtered by bootID (defence in depth)
@@ -108,7 +108,7 @@ final class SnapshotViewModelTests: XCTestCase {
         let vm = SnapshotBuilder.make(now: now, snapshots: [],
                                       lidStayAwake: false, leases: [],
                                       currentBootID: boot)
-        XCTAssertTrue(SnapshotRenderer.render(vm).contains("Sessions actives : aucune"))
+        XCTAssertTrue(SnapshotRenderer.render(vm).contains("Active sessions: none"))
     }
 
     // MARK: - Display rows
@@ -127,14 +127,14 @@ final class SnapshotViewModelTests: XCTestCase {
                                       lidStayAwake: false, leases: [],
                                       currentBootID: boot)
         XCTAssertTrue(vm.displays.allSatisfy { $0.ambiguous })
-        XCTAssertTrue(SnapshotRenderer.render(vm).contains("ambigü"))
+        XCTAssertTrue(SnapshotRenderer.render(vm).contains("ambiguous"))
     }
 
     func testNoDisplaysRendersEmpty() {
         let vm = SnapshotBuilder.make(now: now, snapshots: [],
                                       lidStayAwake: false, leases: [],
                                       currentBootID: boot)
-        XCTAssertTrue(SnapshotRenderer.render(vm).contains("Écrans : aucun"))
+        XCTAssertTrue(SnapshotRenderer.render(vm).contains("Displays: none"))
     }
 
     // MARK: - Stability: renderer output is stable for stable input

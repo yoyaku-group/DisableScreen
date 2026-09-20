@@ -9,7 +9,7 @@ ProductVersion:		26.6
 BuildVersion:		25G72
 chip: Apple M5 Max
 arm64: 1  proc_translated(shell): 1
-boot_uuid: 7376F9ED-4514-426F-A889-291B2833F63C
+boot_uuid: <boot-uuid-redacted>
 ```
 
 ## Toolchain

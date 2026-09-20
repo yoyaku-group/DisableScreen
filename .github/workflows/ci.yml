@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build & test (macOS 15, Swift 6)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          xcrun --sdk macosx --show-sdk-version
+
+      - name: Build
+        run: swift build --build-tests
+
+      - name: Test
+        run: swift test
+
+      - name: Assemble app bundle (ad-hoc signed)
+        run: bash scripts/build-runclosed-app.sh
+
+      - name: Verify bundle signature
+        run: codesign --verify --strict build/RunClosed.app
+
+      - name: Smoke — CLI answers and usage is honest
+        run: |
+          set -euo pipefail
+          CLI=build/RunClosed.app/Contents/MacOS/runclosed-cli
+          "$CLI" status --json || "$CLI" status
+          "$CLI" lid-stay-awake status
+          # unknown subcommand must exit 64, not 0
+          set +e
+          "$CLI" definitely-not-a-command >/dev/null 2>&1
+          rc=$?
+          set -e
+          test "$rc" -eq 64
