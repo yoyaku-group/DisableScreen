@@ -1,7 +1,13 @@
-/* DisableScreen — French strings */
+/* RunClosed — Français */
 
-"menu.quit" = "Quitter";
-"menu.open_at_login" = "Ouvrir au démarrage";
-"menu.keep_awake_lid_closed" = "Garder allumé clapet fermé";
-"button.open_display_settings" = "Ouvrir les Réglages Écran macOS…";
-"button.configure_ddc" = "Cliquez ici pour configurer DDC...";
+"Quit RunClosed" = "Quitter RunClosed";
+"Refresh" = "Rafraîchir";
+"Open macOS Display Settings" = "Réglages Écran macOS";
+"Open macOS Display Settings…" = "Réglages Écran macOS…";
+"Built-in Display" = "Écran intégré";
+"Display %@" = "Écran %@";
+"Keep awake with lid closed" = "Maintenir éveillé capot fermé";
+"Open at login" = "Ouvrir à l'ouverture de session";
+"unknown state" = "état inconnu";
+"Active sessions: none" = "Sessions actives : aucune";
+"Active sessions (%@): %@" = "Sessions actives (%@) : %@";

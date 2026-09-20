@@ -1,0 +1,53 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. For anything security-sensitive, please use
+        Security Advisories instead of this form.
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "14.6 / 26.6 / …"
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Mac model
+      placeholder: "MacBook Pro M5 Max / Mac mini M2 / …"
+    validations:
+      required: true
+  - type: textarea
+    id: displays
+    attributes:
+      label: Display setup
+      description: How many displays, built-in or external, any adapters?
+      placeholder: "Built-in only / built-in + ASUS MB16AH via USB-C / …"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What did you do, expect, and observe?
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics output
+      description: Paste the output of the two commands below.
+      value: |
+        ```
+        /Applications/RunClosed.app/Contents/MacOS/runclosed-cli doctor
+        /Applications/RunClosed.app/Contents/MacOS/runclosed-cli status
+        ```
+      render: shell
+  - type: input
+    id: version
+    attributes:
+      label: RunClosed version / commit
+      placeholder: "0.1.0 / ce198ad"

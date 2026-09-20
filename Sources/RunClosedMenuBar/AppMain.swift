@@ -177,15 +177,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showContextMenu() {
         let menu = NSMenu()
-        let refresh = NSMenuItem(title: "Rafraîchir", action: #selector(refreshClicked), keyEquivalent: "r")
+        let refresh = NSMenuItem(title: L10n.t("Refresh"), action: #selector(refreshClicked), keyEquivalent: "r")
         refresh.target = self
         menu.addItem(refresh)
         menu.addItem(.separator())
-        let settings = NSMenuItem(title: "Réglages Écran macOS", action: #selector(openDisplaysSettings(_:)), keyEquivalent: "")
+        let settings = NSMenuItem(title: L10n.t("Open macOS Display Settings"), action: #selector(openDisplaysSettings(_:)), keyEquivalent: "")
         settings.target = self
         menu.addItem(settings)
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "Quitter RunClosed", action: #selector(quit(_:)), keyEquivalent: "q")
+        let quit = NSMenuItem(title: L10n.t("Quit RunClosed"), action: #selector(quit(_:)), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
         statusItem.menu = menu
@@ -275,8 +275,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let builtin = snap?.identity.isBuiltin ?? (CGDisplayIsBuiltin(id) != 0)
             let isDisabled = ownedIDs.contains(id) || !activeIDs.contains(id)
             let name = builtin
-                ? "Écran intégré"
-                : (snap?.identity.localizedName ?? "Écran \(id)")
+                ? L10n.t("Built-in Display")
+                : (snap?.identity.localizedName ?? L10n.t("Display %@", String(id)))
             let resolution = isDisabled ? "-" : DisplayModes.currentLabel(displayID: id)
 
             var brightness: Double?
@@ -327,7 +327,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let leases = LeaseStore(clock: clock).load().leases
         let summary: String? = leases.isEmpty
             ? nil
-            : "Sessions actives (\(leases.count)) : " + leases.map(\.owner).joined(separator: ", ")
+            : L10n.t("Active sessions (%@): %@", String(leases.count), leases.map(\.owner).joined(separator: ", "))
 
         return PopupState(
             displays: cards,

@@ -71,10 +71,27 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleVersion</key><string>1</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSUIElement</key><true/>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>en</string>
+        <string>fr</string>
+    </array>
 </dict>
 </plist>
 PLIST
 printf 'APPL????' > "$APP/Contents/PkgInfo"
+
+# Localizations — English string tables are the base; French ships as a
+# translation. English is also the product default (CFBundleDevelopmentRegion),
+# so a language we don't ship falls back to English.
+mkdir -p "$APP/Contents/Resources"
+for lproj in en.lproj fr.lproj; do
+    if [ -f "$lproj/Localizable.strings" ]; then
+        mkdir -p "$APP/Contents/Resources/$lproj"
+        cp "$lproj/Localizable.strings" "$APP/Contents/Resources/$lproj/"
+    fi
+done
 
 echo "==> signing (identity: $IDENTITY)"
 codesign --force --sign "$IDENTITY" "$APP/Contents/MacOS/runclosed-privileged-helper"

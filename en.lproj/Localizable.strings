@@ -1,7 +1,15 @@
-/* DisableScreen — English strings */
+/* RunClosed — English (base language). Keys ARE the English strings; this
+   table exists so the development-region bundle is explicit and so future
+   translators have a complete reference. */
 
-"menu.quit" = "Quit";
-"menu.open_at_login" = "Open at Login";
-"menu.keep_awake_lid_closed" = "Keep awake with lid closed";
-"button.open_display_settings" = "Open macOS Display Settings…";
-"button.configure_ddc" = "Click to configure DDC...";
+"Quit RunClosed" = "Quit RunClosed";
+"Refresh" = "Refresh";
+"Open macOS Display Settings" = "Open macOS Display Settings";
+"Open macOS Display Settings…" = "Open macOS Display Settings…";
+"Built-in Display" = "Built-in Display";
+"Display %@" = "Display %@";
+"Keep awake with lid closed" = "Keep awake with lid closed";
+"Open at login" = "Open at login";
+"unknown state" = "unknown state";
+"Active sessions: none" = "Active sessions: none";
+"Active sessions (%@): %@" = "Active sessions (%@): %@";

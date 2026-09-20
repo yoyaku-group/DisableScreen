@@ -93,7 +93,7 @@ public enum SnapshotBuilder {
             let isAmbiguous = snap.identity.ambiguous || (ambiguityByID[snap.identity.displayID] ?? false)
             let label: String
             if isAmbiguous {
-                label = "\(snap.identity.localizedName) ⚠︎ (ambigü)"
+                label = "\(snap.identity.localizedName) ⚠︎ (ambiguous)"
             } else {
                 label = snap.identity.localizedName
             }
@@ -103,13 +103,13 @@ public enum SnapshotBuilder {
             let brightnessLabel: String
             switch snap.capability.brightness {
             case .supported:
-                brightnessLabel = "luminosité : \(snap.capability.brightnessBackend)"
+                brightnessLabel = "brightness: \(snap.capability.brightnessBackend)"
             case .experimental:
-                brightnessLabel = "luminosité : expérimentale (\(snap.capability.brightnessBackend))"
+                brightnessLabel = "brightness: experimental (\(snap.capability.brightnessBackend))"
             case .unsupported:
-                brightnessLabel = "luminosité : non supportée"
+                brightnessLabel = "brightness: unsupported"
             case .unknown:
-                brightnessLabel = "luminosité : état inconnu"
+                brightnessLabel = "brightness: unknown"
             }
             return SnapshotViewModel.DisplayRow(
                 id: snap.identity.displayID,
@@ -149,31 +149,31 @@ public enum SnapshotRenderer {
         // Lid stay-awake — render UNKNOWN with its own copy, never silently off.
         switch vm.lidStayAwake {
         case .on:
-            lines.append("Capot · désactivation sommeil : activée")
+            lines.append("Lid: sleep disabled (keep awake on lid close)")
         case .off:
-            lines.append("Capot · désactivation sommeil : désactivée")
+            lines.append("Lid: sleep enabled (standard sleep posture)")
         case .unknown:
-            lines.append("Capot · désactivation sommeil : état inconnu (pmset illisible)")
+            lines.append("Lid: state unknown (pmset unreadable)")
         }
 
         if vm.displays.isEmpty {
-            lines.append("Écrans : aucun")
+            lines.append("Displays: none")
         } else {
-            lines.append("Écrans (\(vm.displays.count)) :")
+            lines.append("Displays (\(vm.displays.count)):")
             for d in vm.displays {
                 var line = "  • \(d.label) [id \(d.id), \(d.mode)]"
                 line += " — \(d.brightnessLabel)"
                 if d.canDeactivate {
-                    line += " (désactivable)"
+                    line += " (can deactivate)"
                 }
                 lines.append(line)
             }
         }
 
         if vm.leases.isEmpty {
-            lines.append("Sessions actives : aucune")
+            lines.append("Active sessions: none")
         } else {
-            lines.append("Sessions actives (\(vm.leases.count)) :")
+            lines.append("Active sessions (\(vm.leases.count)):")
             for l in vm.leases {
                 lines.append("  • \(l.owner) — \(l.workSource) — \(l.state)")
             }

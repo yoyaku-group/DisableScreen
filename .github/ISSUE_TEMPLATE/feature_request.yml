@@ -1,0 +1,30 @@
+name: Feature request
+description: Suggest an improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the situation, not the implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+  - type: checkboxes
+    id: invariants
+    attributes:
+      label: Safety check
+      options:
+        - label: This does not require writing system state without a read-back.
+          required: true
+        - label: This does not require a new privileged surface (or I explain why it must).
+          required: true
