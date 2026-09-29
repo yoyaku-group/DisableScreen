@@ -7,6 +7,14 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- The "Keep awake with lid closed" switch could get stuck ON after a reboot:
+  `disablesleep` survives a restart, the ownership record then belonged to
+  the previous boot, and every click to turn it off was refused silently.
+  The popup switch is now treated as an explicit operator command and always
+  applies (the automatic restore-on-quit still only touches a flag the app
+  set on the current boot). A refused toggle now shows a message under the
+  label instead of snapping back silently. The CLI gains
+  `runclosed lid-stay-awake off --operator` for the same case (ADR 021).
 - `runclosed doctor` no longer reports the lid backend as "unqualified": it
   now states the two facts separately — the app toggle path is qualified live
   (`docs/compatibility/README.md`) and mutates through

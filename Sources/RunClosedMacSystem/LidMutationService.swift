@@ -87,12 +87,30 @@ public struct LidMutationService {
 
     // MARK: — Live set
 
+    /// Who asked for the mutation (ADR 021).
+    public enum Initiator: Equatable, Sendable {
+        /// The app/CLI acting on its own behalf (restore-on-quit, scripts,
+        /// agents). B2 applies: never turn OFF what we did not set.
+        case automatic
+        /// A human explicitly flipped the switch (popup toggle, CLI
+        /// `--operator`). The operator IS the authority over this global
+        /// flag, so ownership is not required — only B1 still binds.
+        case operatorCommand
+    }
+
     /// Set the lid stay-awake flag.
     /// - `enabled = true`  : `disablesleep 1`, claim ownership only on success.
-    /// - `enabled = false` : `disablesleep 0` ONLY if we owned the flag on
-    ///                       this boot (B2 — never restore what we didn't set).
+    /// - `enabled = false` : `disablesleep 0` — for `.automatic` ONLY if we
+    ///                       owned the flag on this boot (B2 — never restore
+    ///                       what we didn't set). `.operatorCommand` skips the
+    ///                       ownership gate: a stale cross-boot record or a
+    ///                       flag set by another tool must never leave the
+    ///                       switch stuck ON (ADR 021).
     @discardableResult
-    public mutating func setEnabled(_ enabled: Bool) -> Result<OperationResult, LidMutationError> {
+    public mutating func setEnabled(
+        _ enabled: Bool,
+        initiator: Initiator = .automatic
+    ) -> Result<OperationResult, LidMutationError> {
         // Reconcile any stale cross-boot record first — a mutation attempt is
         // a natural observation point (ADR 015). No-op on the current boot.
         _ = reconcileCrossBoot()
@@ -104,11 +122,13 @@ public struct LidMutationService {
             }
             return .failure(.noChangeRequested(target: enabled))
         }
-        // B2: setting OFF requires ownership ON THIS BOOT. A stale record from
-        // another boot does NOT grant ownership (it is recovery-pending, not
-        // active ownership — reconcileCrossBoot either cleared it after an
+        // B2: an AUTOMATIC OFF requires ownership ON THIS BOOT. A stale record
+        // from another boot does NOT grant ownership (it is recovery-pending,
+        // not active ownership — reconcileCrossBoot either cleared it after an
         // OFF observation or kept it pending; either way not ours to flip).
-        if !enabled {
+        // An operator command resolves recovery-pending by itself: the
+        // verified write below replaces the stale record (ADR 021).
+        if !enabled && initiator == .automatic {
             let rec = store.load()
             let weOwn = rec.bootID == bootID && rec.ownedEnabled
             if !weOwn {
