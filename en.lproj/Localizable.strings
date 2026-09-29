@@ -11,5 +11,6 @@
 "Keep awake with lid closed" = "Keep awake with lid closed";
 "Open at login" = "Open at login";
 "unknown state" = "unknown state";
+"Change failed (see log)" = "Change failed (see log)";
 "Active sessions: none" = "Active sessions: none";
 "Active sessions (%@): %@" = "Active sessions (%@): %@";

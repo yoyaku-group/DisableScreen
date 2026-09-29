@@ -263,17 +263,22 @@ final class PopupPanel: NSPanel {
     private static func lidRow(_ state: PopupState, target: AnyObject) -> (NSView, CGFloat) {
         let view = NSView(frame: NSMakeRect(0, 0, width, hLid))
         let label = NSTextField(labelWithString: L10n.t("Keep awake with lid closed"))
-        label.frame = NSMakeRect(14, 11, width - 80, 14)
         label.font = .systemFont(ofSize: 12)
         view.addSubview(label)
 
-        if state.lid == .unknown {
-            let hint = NSTextField(labelWithString: L10n.t("unknown state"))
-            hint.frame = NSMakeRect(width - 140, 11, 80, 14)
+        // A refused toggle must never snap back silently: the last failure
+        // wins over the generic unknown-state hint.
+        let hintText: String? = state.lidError ?? (state.lid == .unknown ? L10n.t("unknown state") : nil)
+        if let hintText {
+            label.frame = NSMakeRect(14, 18, width - 80, 14)
+            let hint = NSTextField(labelWithString: hintText)
+            hint.frame = NSMakeRect(14, 4, width - 80, 13)
             hint.font = .systemFont(ofSize: 10)
-            hint.textColor = .tertiaryLabelColor
-            hint.alignment = .right
+            hint.textColor = state.lidError != nil ? .systemRed : .tertiaryLabelColor
+            hint.lineBreakMode = .byTruncatingTail
             view.addSubview(hint)
+        } else {
+            label.frame = NSMakeRect(14, 11, width - 80, 14)
         }
 
         let sw = NSSwitch(frame: NSMakeRect(width - 54, 7, 44, 22))

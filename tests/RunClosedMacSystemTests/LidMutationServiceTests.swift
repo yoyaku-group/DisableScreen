@@ -368,6 +368,79 @@ final class LidMutationServiceTests: XCTestCase {
         XCTAssertTrue(rec.ownedEnabled)
     }
 
+    // MARK: — Operator command (ADR 021)
+
+    /// Regression 2026-09-29: flag ON left by a previous boot, record stale →
+    /// the popup switch snapped back to ON forever (`notOwned`). An operator
+    /// OFF must go through and clear the recovery-pending record.
+    func testOperatorOffSucceedsOnStaleRecordAndClearsRecoveryPending() {
+        let url = makeTempURL()
+        let old = OwnedLidAssertion(currentBootID: "boot-OLD", url: url)
+        old.save(.init(bootID: "boot-OLD", ownedEnabled: true, referenceState: "on"))
+
+        let fake = FakeLidAssertion()
+        fake.readbackAfterWrite = false
+        var svc = makeService(prior: true, mutator: fake, storeURL: url, bootID: "boot-NEW")
+        XCTAssertTrue(svc.hasStaleRecoveryPending())
+
+        let r = svc.setEnabled(false, initiator: .operatorCommand)
+        guard case .success(let op) = r else {
+            return XCTFail("expected success, got \(r)")
+        }
+        XCTAssertEqual(op.state, .verified)
+        XCTAssertEqual(fake.calls, [.init(enabled: false)])
+        let rec = OwnedLidAssertion(currentBootID: "boot-NEW", url: url).load()
+        XCTAssertEqual(rec.bootID, "boot-NEW")
+        XCTAssertFalse(rec.ownedEnabled)
+        XCTAssertFalse(svc.hasStaleRecoveryPending(), "verified OFF resolves recovery-pending")
+    }
+
+    /// Flag set by another tool (legacy Python app, manual `sudo pmset`):
+    /// no record at all — the operator can still turn it off.
+    func testOperatorOffSucceedsWithoutAnyOwnershipRecord() {
+        let url = makeTempURL()
+        let fake = FakeLidAssertion()
+        fake.readbackAfterWrite = false
+        var svc = makeService(prior: true, mutator: fake, storeURL: url)
+
+        let r = svc.setEnabled(false, initiator: .operatorCommand)
+        guard case .success = r else {
+            return XCTFail("expected success, got \(r)")
+        }
+        XCTAssertEqual(fake.calls, [.init(enabled: false)])
+    }
+
+    /// The operator bypasses B2 only — B1 (UNKNOWN ≠ OFF) still binds.
+    func testOperatorOffStillRefusedOnUnknownPrior() {
+        let url = makeTempURL()
+        let fake = FakeLidAssertion()
+        var svc = makeService(prior: nil, mutator: fake, storeURL: url)
+
+        let r = svc.setEnabled(false, initiator: .operatorCommand)
+        XCTAssertEqual(r, .failure(.preconditionUnknown))
+        XCTAssertTrue(fake.calls.isEmpty)
+    }
+
+    /// Operator OFF whose readback does not confirm: the stale record is
+    /// kept (ADR 015 — only an observed OFF may clear it).
+    func testOperatorOffUnverifiedKeepsStaleRecord() {
+        let url = makeTempURL()
+        let old = OwnedLidAssertion(currentBootID: "boot-OLD", url: url)
+        old.save(.init(bootID: "boot-OLD", ownedEnabled: true, referenceState: "on"))
+
+        let fake = FakeLidAssertion()
+        fake.readbackAfterWrite = true   // write did not take effect
+        var svc = makeService(prior: true, mutator: fake, storeURL: url, bootID: "boot-NEW")
+
+        let r = svc.setEnabled(false, initiator: .operatorCommand)
+        guard case .failure(.backendFailed) = r else {
+            return XCTFail("expected backendFailed, got \(r)")
+        }
+        let rec = OwnedLidAssertion(currentBootID: "boot-NEW", url: url).load()
+        XCTAssertEqual(rec.bootID, "boot-OLD")
+        XCTAssertTrue(rec.ownedEnabled, "unverified write must not clear the stale record")
+    }
+
     // MARK: — Helpers
 
     private func storeURL(_ url: URL) -> URL { url }

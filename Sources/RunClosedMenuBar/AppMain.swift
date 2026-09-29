@@ -17,8 +17,9 @@ import RunClosedApp
 //   re-checked at the moment of the effect (A04), last-active refused,
 //   owned ids persisted + re-enable attempted at launch (B3).
 // - Lid stay-awake routes through LidMutationService: UNKNOWN prior refuses
-//   (B1), setting OFF requires ownership proven by readback (B2), no
-//   unconditional restore on quit, cross-boot record kept fail-closed (ADR 015).
+//   (B1), the automatic restore on quit requires ownership proven by readback
+//   (B2), cross-boot record kept fail-closed (ADR 015). The popup switch is an
+//   operator command and is honoured even without ownership (ADR 021).
 // - Brightness targets ONE display (invariant 1): builtin → native
 //   CoreDisplay write; external → software dim overlay floored at 0.08.
 // - Reads are off-main (A09); the panel is rebuilt on main from cached state.
@@ -56,6 +57,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Cached lid state — refreshed off-main by the shared status probe.
     private var lidCache: Bool??
     private var lidReady = false
+    /// Last refused/failed lid toggle — cleared on the next success.
+    private var lidError: String?
 
     // MARK: — Lifecycle
 
@@ -334,6 +337,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             lid: lidState,
             lidCanToggle: lidValue != nil,
             lidPending: false,
+            lidError: lidError,
             loginItemEnabled: LoginItemControl.isEnabled(),
             loginItemAvailable: LoginItemControl.isActionable(),
             leasesSummary: summary,
@@ -397,9 +401,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let target = !value
         withBusy {
             var service = self.makeLidService()
-            let result = service.setEnabled(target)
+            // The click IS the operator's decision (ADR 021): a stale
+            // cross-boot record or a flag set by another tool must not
+            // leave the switch stuck ON.
+            let result = service.setEnabled(target, initiator: .operatorCommand)
             self.log(result: result, what: "lid -> \(target)")
+            self.lidError = Self.lidFailureHint(result)
             self.refreshLidCache()
+        }
+    }
+
+    private static func lidFailureHint(_ result: Result<OperationResult, LidMutationError>) -> String? {
+        switch result {
+        case .success:
+            return nil
+        case .failure(.noChangeRequested):
+            return nil   // stale cache: the refresh re-renders the real state
+        case .failure(.preconditionUnknown):
+            return L10n.t("unknown state")
+        case .failure(.notOwned), .failure(.backendFailed):
+            return L10n.t("Change failed (see log)")
         }
     }
 

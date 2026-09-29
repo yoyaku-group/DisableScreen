@@ -221,9 +221,13 @@ func makeLidService() -> LidMutationService {
 
 func cmdLidStayAwake(_ rest: [String]) -> Int32 {
     guard let sub = rest.first else {
-        FileHandler.err("usage: runclosed lid-stay-awake <on|off|status>")
+        FileHandler.err("usage: runclosed lid-stay-awake <on|off [--operator]|status>")
         return 64
     }
+    // `--operator` = a human's explicit decision (ADR 021): skips the B2
+    // ownership gate on `off`. Scripts and agents never pass it.
+    let initiator: LidMutationService.Initiator =
+        rest.dropFirst().contains("--operator") ? .operatorCommand : .automatic
     switch sub {
     case "status":
         // Read-only — no ownership claim, no mutation. Cross-boot stale
@@ -245,14 +249,14 @@ func cmdLidStayAwake(_ rest: [String]) -> Int32 {
         return 0
     case "on":
         var svc = makeLidService()
-        let r = svc.setEnabled(true)
+        let r = svc.setEnabled(true, initiator: initiator)
         return renderLidResult(r, requestedAction: "on")
     case "off":
         var svc = makeLidService()
-        let r = svc.setEnabled(false)
+        let r = svc.setEnabled(false, initiator: initiator)
         return renderLidResult(r, requestedAction: "off")
     default:
-        FileHandler.err("usage: runclosed lid-stay-awake <on|off|status>")
+        FileHandler.err("usage: runclosed lid-stay-awake <on|off [--operator]|status>")
         return 64
     }
 }
@@ -280,7 +284,7 @@ func renderLidResult(_ r: Result<OperationResult, LidMutationError>, requestedAc
             msg = "refused: no-change — flag already at the requested state (\(target ? "on" : "off"))"
             code = 3
         case .notOwned:
-            msg = "refused: B2 invariant — we do not own the disablesleep flag on this boot. Only 'on' followed by 'off' is allowed, never a free 'off'."
+            msg = "refused: B2 invariant — we do not own the disablesleep flag on this boot (set on a previous boot or by another tool). Automatic callers never turn it off; a human can with 'runclosed lid-stay-awake off --operator'."
             code = 3
         case .backendFailed(let m):
             msg = "backend failed: \(m)"

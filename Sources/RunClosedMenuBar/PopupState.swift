@@ -26,6 +26,7 @@ struct PopupState {
     var lid: SnapshotViewModel.PowerState
     var lidCanToggle: Bool               // false while unknown / busy
     var lidPending: Bool                 // mutation in flight → switch disabled
+    var lidError: String?                // last refused/failed toggle, shown under the label
     var loginItemEnabled: Bool
     var loginItemAvailable: Bool
     var leasesSummary: String?           // "2 sessions · claude, codex" or nil

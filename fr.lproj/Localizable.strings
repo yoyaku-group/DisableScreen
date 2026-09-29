@@ -9,5 +9,6 @@
 "Keep awake with lid closed" = "Maintenir éveillé capot fermé";
 "Open at login" = "Ouvrir à l'ouverture de session";
 "unknown state" = "état inconnu";
+"Change failed (see log)" = "Échec du changement (voir le journal)";
 "Active sessions: none" = "Sessions actives : aucune";
 "Active sessions (%@): %@" = "Sessions actives (%@) : %@";
