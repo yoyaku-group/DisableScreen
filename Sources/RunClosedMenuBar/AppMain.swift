@@ -436,7 +436,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let r = service.setEnabled(target, initiator: .operatorCommand)
                 // The operator's explicit choice supersedes a pending
                 // low-battery re-arm.
-                if case .success = r { LowBatteryLatchStore().clearPendingRearm() }
+                LowBatteryLatchStore().operatorCommandFinished(r)
                 return r
             }) else {
                 self.lidError = L10n.t("Busy, try again")

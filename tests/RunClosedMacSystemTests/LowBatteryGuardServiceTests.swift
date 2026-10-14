@@ -157,6 +157,28 @@ final class LowBatteryGuardServiceTests: XCTestCase {
         XCTAssertTrue(rig.lid.calls.isEmpty)
     }
 
+    func testOperatorOffOnAlreadyReleasedFlagCancelsRearm() {
+        // Review pass 3: `lid-stay-awake off` after the guard released the
+        // flag is a no-op (noChangeRequested) but still the operator's intent.
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 8))
+        rig.service.tick()                                    // guard releases
+        var lidService = rig.service.lidService
+        let r = lidService.setEnabled(false, initiator: .operatorCommand)
+        XCTAssertEqual(r, .failure(.noChangeRequested(target: false)))
+        rig.latchStore.operatorCommandFinished(r)
+        XCTAssertFalse(rig.latchStore.load().latch.releasedByGuard)
+        rig.battery.state = Self.reading(false, 50)
+        rig.service.tick()
+        XCTAssertEqual(rig.lid.calls, [false], "no automatic re-arm over the operator's OFF")
+    }
+
+    func testFailedOperatorCommandKeepsPendingRearm() {
+        let rig = makeRig(flag: false, ownedBoot: nil, battery: Self.reading(false, 50))
+        rig.latchStore.save(.init(latch: .init(releasedByGuard: true)))
+        rig.latchStore.operatorCommandFinished(.failure(.backendFailed(message: "x")))
+        XCTAssertTrue(rig.latchStore.load().latch.releasedByGuard)
+    }
+
     func testTryLockReturnsNilWhileAGuardTickHoldsIt() {
         let rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 50))
         let lock = rig.service.lock

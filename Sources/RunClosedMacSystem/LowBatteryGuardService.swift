@@ -177,6 +177,9 @@ public struct LowBatteryGuardService {
                 outcome.shouldNotify = true
                 record.latch = record.latch.recordingRelease()
                 record.releasedBootID = lidService.bootID
+                // Persist the re-arm debt BEFORE asking for sleep: the Mac may
+                // go down right after `sleepnow` returns.
+                latchStore.save(record)
                 attemptSleep(&outcome)
             case .success(let op):
                 // Not refused, not verified: treat as a backend failure.
@@ -244,6 +247,19 @@ public struct LowBatteryGuardService {
 }
 
 extension LowBatteryLatchStore {
+    /// Operator lid command outcome hook (popup switch, CLI). Clears a pending
+    /// re-arm when the command reached the requested state OR found it already
+    /// there (`noChangeRequested`): an explicit OFF on a flag the guard had
+    /// already released is still the operator saying "keep it off".
+    public func operatorCommandFinished(_ result: Result<OperationResult, LidMutationError>) {
+        switch result {
+        case .success, .failure(.noChangeRequested):
+            clearPendingRearm()
+        case .failure:
+            break
+        }
+    }
+
     /// An explicit operator lid command supersedes a pending guard re-arm:
     /// the human's choice wins, the guard must not flip the flag back later.
     /// Callers run it inside the same `LidWriteLock` section as their write.

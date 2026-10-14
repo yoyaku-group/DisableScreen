@@ -256,7 +256,7 @@ func cmdLidStayAwake(_ rest: [String]) -> Int32 {
         // guard must not flip the flag back afterwards.
         let r = LidWriteLock().withLock { () -> Result<OperationResult, LidMutationError> in
             let res = svc.setEnabled(sub == "on", initiator: initiator)
-            if case .success = res { LowBatteryLatchStore().clearPendingRearm() }
+            LowBatteryLatchStore().operatorCommandFinished(res)
             return res
         }
         return renderLidResult(r, requestedAction: sub)

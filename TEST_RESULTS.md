@@ -457,6 +457,10 @@ RunClosedPersistenceTests 24 · RunClosedMacSystemTests 63 · HelperSupport 13 �
 # après la 2e revue (alerte « non protégé », refus notifié une fois, tryWithLock non bloquant)
 RunClosedPersistenceTests 24 · RunClosedMacSystemTests 65 · HelperSupport 13 · Core 58 · App 11
 → 171/171, 0 warning
+
+# après la 3e revue (OFF opérateur no-op annule le réarmement, verrou persisté avant sleepnow)
+RunClosedPersistenceTests 24 · RunClosedMacSystemTests 67 · HelperSupport 13 · Core 58 · App 11
+→ 173/173, 0 warning
 ```
 
 Contrats verrouillés par les tests :
