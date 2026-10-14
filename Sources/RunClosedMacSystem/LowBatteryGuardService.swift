@@ -65,7 +65,10 @@ public enum LowBatteryGuardSettings {
 ///   tick     : evaluate → act → persist the latch from the OUTCOME
 ///     releaseAndSleep : `LidMutationService.setEnabled(false, .automatic)`
 ///                       (B1 + B2 ownership gate unchanged) → verified →
-///                       latch `releasedByGuard` → `pmset sleepnow`
+///                       latch `releasedByGuard` → audit → `pmset sleepnow`;
+///                       for `emergencyStaleOwnership` the initiator is
+///                       `.lowBatteryEmergency` (our own record from a
+///                       previous boot — the service re-checks it)
 ///     rearm           : `setEnabled(true, .automatic)` once back on AC and
 ///                       charge > 15% (hysteresis)
 ///     warn            : nothing here — the caller notifies the operator
@@ -79,19 +82,23 @@ public struct LowBatteryGuardService {
     public var sleeper: any SystemSleeper
     /// Serialises the whole tick with the operator paths (popup, CLI).
     public let lock: LidWriteLock
+    /// Persisted audit line for every guard mutation (ADR 022).
+    public let auditLog: LowBatteryAuditLog
 
     public init(
         lidService: LidMutationService,
         latchStore: LowBatteryLatchStore,
         batteryProvider: @escaping @Sendable () -> BatteryState,
         sleeper: any SystemSleeper,
-        lock: LidWriteLock = LidWriteLock()
+        lock: LidWriteLock = LidWriteLock(),
+        auditLog: LowBatteryAuditLog = LowBatteryAuditLog()
     ) {
         self.lidService = lidService
         self.latchStore = latchStore
         self.batteryProvider = batteryProvider
         self.sleeper = sleeper
         self.lock = lock
+        self.auditLog = auditLog
     }
 
     public struct Evaluation: Equatable, Sendable {
@@ -162,6 +169,9 @@ public struct LowBatteryGuardService {
 
     private mutating func lockedTick() -> TickOutcome {
         let evaluation = evaluate()
+        // Which boot wrote the ownership record, captured before any write
+        // (an emergency release replaces a stale record with this boot's).
+        let recordBootIDBefore = lidService.store.load().bootID
         var outcome = TickOutcome(evaluation: evaluation)
         var record = latchStore.load()
         let before = record
@@ -172,16 +182,21 @@ public struct LowBatteryGuardService {
             break
 
         case .releaseAndSleep:
-            let result = lidService.setEnabled(false, initiator: .automatic)
+            // Emergency ownership of OUR stale record is scoped to this one
+            // branch; `LidMutationService` re-checks that the record is ours.
+            let initiator: LidMutationService.Initiator =
+                evaluation.decision.reason == .emergencyStaleOwnership ? .lowBatteryEmergency : .automatic
+            let result = lidService.setEnabled(false, initiator: initiator)
             switch result {
             case .success(let op) where op.state == .verified:
                 outcome.mutation = .released
                 outcome.shouldNotify = true
                 record.latch = record.latch.recordingRelease()
                 record.releasedBootID = lidService.bootID
-                // Persist the re-arm debt BEFORE asking for sleep: the Mac may
-                // go down right after `sleepnow` returns.
+                // Persist the re-arm debt and the audit line BEFORE asking
+                // for sleep: the Mac may go down right after `sleepnow`.
                 latchStore.save(record)
+                audit(outcome, evaluation: evaluation, recordBootID: recordBootIDBefore)
                 attemptSleep(&outcome)
             case .success(let op):
                 // Not refused, not verified: treat as a backend failure.
@@ -226,7 +241,25 @@ public struct LowBatteryGuardService {
         if record != before {
             latchStore.save(record)
         }
+        // Audit: successful re-arms, and failures once per episode (the
+        // release itself was audited before the sleep request).
+        if let m = outcome.mutation, m != .released, m == .rearmed || outcome.shouldNotify {
+            audit(outcome, evaluation: evaluation, recordBootID: recordBootIDBefore)
+        }
         return outcome
+    }
+
+    private func audit(_ outcome: TickOutcome, evaluation: Evaluation, recordBootID: String) {
+        auditLog.append(.init(
+            ts: ISO8601DateFormatter().string(from: Date()),
+            bootID: lidService.bootID,
+            reason: evaluation.decision.reason.rawValue,
+            outcome: outcome.mutation?.rawValue ?? "none",
+            chargePercent: evaluation.input.chargePercent,
+            minutesRemaining: evaluation.input.minutesRemaining,
+            recordBootID: recordBootID,
+            error: outcome.mutationError,
+            sleepRC: outcome.sleepRC))
     }
 
     /// A persistently failing release (e.g. sudoers rule removed) is retried

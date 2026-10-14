@@ -343,6 +343,30 @@ func lowBatteryThresholdsJSON() -> [String: Any] {
     ]
 }
 
+/// What the guard will do at the critical threshold, in one word.
+func lowBatteryProtection(_ i: LowBatteryPolicy.Input) -> String {
+    guard let flag = i.lidFlag else { return "unknown-flag: alert only (B1)" }
+    guard flag else { return "not-needed: lid stay-awake is off, macOS sleeps on its own" }
+    switch i.ownership {
+    case .ownedThisBoot: return "armed: release + sleep at critical"
+    case .staleRecord: return "armed (emergency): our record is from a previous boot — release + sleep at critical"
+    case .notOwned: return "unprotected: flag set by another tool — alert only"
+    }
+}
+
+/// The one-click remedy when the flag is not owned on this boot.
+func lowBatteryRemedy(_ i: LowBatteryPolicy.Input) -> String? {
+    guard i.lidFlag == true else { return nil }
+    switch i.ownership {
+    case .ownedThisBoot:
+        return nil
+    case .staleRecord:
+        return "recoveryPending: switch \"Keep awake with lid closed\" off then on in the popup (or `runclosed-cli lid-stay-awake off --operator && runclosed-cli lid-stay-awake on`) so RunClosed owns it on this boot; until then only the emergency release protects it."
+    case .notOwned:
+        return "set by another tool: `runclosed-cli lid-stay-awake off --operator` (then `on` if you want RunClosed to own and protect it)."
+    }
+}
+
 let lowBatteryUsage = """
 usage: runclosed low-battery status
        runclosed low-battery simulate <onBattery:true|false|battery|ac> <percent> <minutes|unknown>
@@ -372,6 +396,7 @@ func cmdLowBattery(_ rest: [String]) -> Int32 {
             batteryProvider: { BatteryReadback.read() },
             sleeper: PMSetSleeper())
         let e = svc.evaluate()
+        let rec = OwnedLidAssertion(currentBootID: clock.bootID).load()
         emitJSON([
             "schemaVersion": kSchemaVersion,
             "bootID": clock.bootID,
@@ -381,6 +406,13 @@ func cmdLowBattery(_ rest: [String]) -> Int32 {
             "input": inputJSON(e.input),
             "decision": decisionJSON(e.decision),
             "latch": latchJSON(e.latchBefore),
+            "lidRecord": [
+                "ownedBootID": rec.bootID,
+                "ownedByThisBoot": e.input.ownership == .ownedThisBoot,
+                "recoveryPending": e.input.ownership == .staleRecord,
+            ],
+            "protection": lowBatteryProtection(e.input),
+            "remedy": lowBatteryRemedy(e.input) as Any? ?? NSNull(),
             "thresholds": lowBatteryThresholdsJSON(),
         ])
         return 0
@@ -445,6 +477,7 @@ func cmdLowBattery(_ rest: [String]) -> Int32 {
             "schemaVersion": kSchemaVersion,
             "mode": "simulate (dry-run, pure decision, nothing mutated)",
             "input": inputJSON(input),
+            "protection": lowBatteryProtection(input),
             "decision": decisionJSON(decision),
             "latchBefore": latchJSON(latch),
             "latchAfter": latchJSON(next),

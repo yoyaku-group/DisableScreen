@@ -56,6 +56,20 @@ final class LowBatteryLatchStoreTests: XCTestCase {
         XCTAssertEqual(c.maxInside, 1, "flock must serialise writers (one fd per section)")
     }
 
+    func testAuditLogAppendsWholeLines() {
+        let log = LowBatteryAuditLog(url: tempURL().deletingLastPathComponent()
+            .appendingPathComponent("low_battery_audit.jsonl"))
+        XCTAssertTrue(log.load().isEmpty)
+        for i in 0..<3 {
+            log.append(.init(ts: "t\(i)", bootID: "B", reason: "emergencyStaleOwnership",
+                             outcome: "released", chargePercent: 9 - i, minutesRemaining: nil,
+                             recordBootID: "OLD", error: nil, sleepRC: 0))
+        }
+        let entries = log.load()
+        XCTAssertEqual(entries.map(\.ts), ["t0", "t1", "t2"])
+        XCTAssertEqual(entries.last?.chargePercent, 7)
+    }
+
     func testCorruptFileNeverYieldsPhantomRelease() {
         let url = tempURL()
         try? Data("{not json".utf8).write(to: url)

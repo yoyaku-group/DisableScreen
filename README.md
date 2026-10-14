@@ -22,7 +22,9 @@ as the audited baseline (see [Repository layout](#repository-layout)).
 - **Low-battery guard** — on battery, warns at 20 % and, at 10 % (or ≤ 10 min
   left), turns the lid stay-awake flag off and puts the Mac to sleep so
   hibernation keeps every process; re-enables it on AC above 15 %. Never acts
-  on AC, never touches a flag it does not own (ADR 022). Kill switch:
+  on AC. A flag RunClosed set on a previous boot (it survives restarts) is
+  released as an emergency; a flag set by another tool is never touched
+  (ADR 022). Kill switch:
   `defaults write com.benjaminbelaga.RunClosed lowBatteryGuardEnabled -bool false`.
 - **Open at login** via `SMAppService`.
 - Localized: **English** (base) and **French**.
@@ -100,9 +102,10 @@ flag), so the invariants are the interesting part:
   boot, proven by a persisted record + read-back. A flag owned by another boot
   is kept as `recoveryPending` and never silently flipped (fail-closed).
 - **Low battery wins over keep-awake, ownership still binds.** The guard
-  releases the lid flag only through the same automatic, ownership-gated path
-  as the restore-on-quit; a flag set on another boot or by another tool gets
-  a loud notification, never a mutation.
+  releases the lid flag through the ownership-gated path. The only widening
+  is the critical-battery emergency: RunClosed's own record from a previous
+  boot counts as ownership there (audited). A flag set by another tool gets a
+  loud notification, never a mutation.
 - **Last-display guard.** Disabling the only active display is refused at the
   moment of the effect, not at render time.
 - **One target per command.** A brightness command for display A never touches

@@ -37,7 +37,8 @@ public enum LowBatteryPolicy {
         /// We set it on THIS boot — the `.automatic` path may release it (B2).
         case ownedThisBoot
         /// Our record is from a previous boot (ADR 015 `recoveryPending`):
-        /// not active ownership, so the automatic path refuses to release.
+        /// not active ownership — the automatic path refuses to release it,
+        /// EXCEPT the critical-battery emergency release (ADR 022 decision).
         case staleRecord
         /// No ownership record — another tool or a human set the flag.
         case notOwned
@@ -163,11 +164,15 @@ public enum LowBatteryPolicy {
         case lidFlagOff
         case lidFlagUnknown
         case lowBattery
-        /// Low, flag ON (or unreadable) but NOT owned on this boot: the
-        /// guard will not release it at 10% — the warning must say so.
+        /// Low, flag ON but set by another tool (no RunClosed record) or
+        /// unreadable: the guard will not release it at 10% — say so.
         case lowBatteryUnprotected
         case criticalOwned
-        case criticalStaleOwnership
+        /// Critical on battery, flag ON, RunClosed's own record is from a
+        /// previous boot (the flag survived a reboot — ADR 021): released as
+        /// an emergency. Release is the protective direction; the
+        /// alternative is the 2026-10-14 hard power-off.
+        case emergencyStaleOwnership
         case criticalNotOwned
         case alreadyWarned
     }
@@ -260,7 +265,9 @@ public enum LowBatteryPolicy {
                 return (Decision(action: .none, reason: .alreadyWarned, level: lvl), next)
             }
             next.warnedLow = true
-            let protected = input.lidFlag == true && input.ownership == .ownedThisBoot
+            // Protected = the guard WILL release at 10%: our flag on this boot,
+            // or our own record from a previous boot (emergency path).
+            let protected = input.lidFlag == true && input.ownership != .notOwned
             return (Decision(action: .warn, reason: protected ? .lowBattery : .lowBatteryUnprotected,
                              level: lvl), next)
 
@@ -278,10 +285,15 @@ public enum LowBatteryPolicy {
             case .ownedThisBoot:
                 return (Decision(action: .releaseAndSleep, reason: .criticalOwned, level: lvl), next)
             case .staleRecord:
-                // ADR 015/021: a record from another boot is not ownership;
-                // the automatic path never turns the flag off (B2).
-                return warnCriticalOnce(reason: .criticalStaleOwnership, level: lvl, latch: next)
+                // ADR 022 decision (orchestrator, per Ben's "safe sleep at
+                // 10%", 2026-10-15): our own record from a previous boot +
+                // flag observed ON + critical on battery = emergency
+                // ownership. Scoped to THIS branch only — B2 still binds the
+                // warn path, AC, restore-on-quit and every other caller.
+                return (Decision(action: .releaseAndSleep, reason: .emergencyStaleOwnership, level: lvl), next)
             case .notOwned:
+                // No RunClosed record at all: another tool or a human set it.
+                // Never mutated (B2) — loud alert only.
                 return warnCriticalOnce(reason: .criticalNotOwned, level: lvl, latch: next)
             }
         }
