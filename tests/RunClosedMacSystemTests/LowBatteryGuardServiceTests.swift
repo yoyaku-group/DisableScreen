@@ -53,6 +53,7 @@ final class LowBatteryGuardServiceTests: XCTestCase {
         let battery: BatteryBox
         let lidStore: OwnedLidAssertion
         let latchStore: LowBatteryLatchStore
+        let audit: LowBatteryAuditLog
     }
 
     private static func reading(_ onBattery: Bool?, _ pct: Int?, _ minutes: Int? = nil) -> BatteryState {
@@ -70,6 +71,7 @@ final class LowBatteryGuardServiceTests: XCTestCase {
             lidStore.save(.init(bootID: b, ownedEnabled: true, referenceState: "on"))
         }
         let latchStore = LowBatteryLatchStore(url: dir.appendingPathComponent("low_battery_guard.json"))
+        let audit = LowBatteryAuditLog(url: dir.appendingPathComponent("low_battery_audit.jsonl"))
         let flagBox = FlagBox(flag)
         let lid = FakeLid(flag: flagBox)
         let sleeper = FakeSleeper()
@@ -78,9 +80,10 @@ final class LowBatteryGuardServiceTests: XCTestCase {
                                             priorProvider: { flagBox.value })
         let service = LowBatteryGuardService(lidService: lidService, latchStore: latchStore,
                                              batteryProvider: { batteryBox.state }, sleeper: sleeper,
-                                             lock: LidWriteLock(url: dir.appendingPathComponent("lid.lock")))
+                                             lock: LidWriteLock(url: dir.appendingPathComponent("lid.lock")),
+                                             auditLog: audit)
         return Rig(service: service, lid: lid, sleeper: sleeper, flag: flagBox,
-                   battery: batteryBox, lidStore: lidStore, latchStore: latchStore)
+                   battery: batteryBox, lidStore: lidStore, latchStore: latchStore, audit: audit)
     }
 
     // MARK: — Release path (owned on this boot)
@@ -96,6 +99,7 @@ final class LowBatteryGuardServiceTests: XCTestCase {
         XCTAssertTrue(rig.latchStore.load().latch.releasedByGuard)
         XCTAssertEqual(rig.latchStore.load().releasedBootID, "A")
         XCTAssertFalse(rig.lidStore.load().ownedEnabled, "ownership released from the verified outcome")
+        XCTAssertEqual(rig.audit.load().map(\.outcome), ["released"], "audit line persisted before sleep")
     }
 
     func testSecondTickAfterReleaseDoesNotSleepAgain() {
@@ -194,25 +198,66 @@ final class LowBatteryGuardServiceTests: XCTestCase {
 
     // MARK: — Not owned: warn, never mutate (B2)
 
-    func testStaleRecordNeverMutatesNorSleeps() {
-        // The 2026-10-15 machine state: flag ON, record from the previous boot.
-        var rig = makeRig(flag: true, ownedBoot: "OLD", battery: Self.reading(true, 6))
+    func testOwnStaleRecordEmergencyReleaseThenSleepWithAudit() {
+        // The 2026-10-15 machine state reproduced live: flag ON, record from
+        // the previous boot (recoveryPending). ADR 022 emergency ownership.
+        var rig = makeRig(flag: true, ownedBoot: "OLD", battery: Self.reading(true, 8, 7))
         let out = rig.service.tick()
         XCTAssertEqual(out.evaluation.input.ownership, .staleRecord)
+        XCTAssertEqual(out.evaluation.decision.reason, .emergencyStaleOwnership)
+        XCTAssertEqual(out.mutation, .released)
+        XCTAssertEqual(rig.lid.calls, [false])
+        XCTAssertEqual(rig.sleeper.count, 1)
+        XCTAssertTrue(rig.latchStore.load().latch.releasedByGuard)
+        let rec = rig.lidStore.load()
+        XCTAssertEqual(rec.bootID, "A", "stale record replaced by this boot's verified OFF")
+        XCTAssertFalse(rec.ownedEnabled)
+        let audit = rig.audit.load()
+        XCTAssertEqual(audit.count, 1)
+        XCTAssertEqual(audit.first?.reason, "emergencyStaleOwnership")
+        XCTAssertEqual(audit.first?.outcome, "released")
+        XCTAssertEqual(audit.first?.recordBootID, "OLD")
+        XCTAssertEqual(audit.first?.bootID, "A")
+        XCTAssertEqual(audit.first?.chargePercent, 8)
+    }
+
+    func testOperatorStillWinsAfterEmergencyRelease() {
+        // The operator lock and the operator's choice still win over the
+        // emergency path: an explicit OFF cancels the re-arm it created.
+        var rig = makeRig(flag: true, ownedBoot: "OLD", battery: Self.reading(true, 9))
+        rig.service.tick()                                   // emergency release
+        XCTAssertTrue(rig.latchStore.load().latch.releasedByGuard)
+        let held: Int? = rig.service.lock.withLock { () -> Int? in
+            LidWriteLock(url: rig.service.lock.url).tryWithLock { 1 }
+        }
+        XCTAssertNil(held, "a click during a tick gets 'busy', never interleaves")
+        var lid = rig.service.lidService
+        let r = lid.setEnabled(false, initiator: .operatorCommand)
+        rig.latchStore.operatorCommandFinished(r)
+        rig.battery.state = Self.reading(false, 60)
+        rig.service.tick()
+        XCTAssertEqual(rig.lid.calls, [false], "no re-arm over the operator's OFF")
+    }
+
+    func testOwnStaleRecordOnACNeverMutated() {
+        var rig = makeRig(flag: true, ownedBoot: "OLD", battery: Self.reading(false, 4, 3))
+        let out = rig.service.tick()
+        XCTAssertEqual(out.evaluation.decision.action, .none)
+        XCTAssertTrue(rig.lid.calls.isEmpty)
+        XCTAssertEqual(rig.sleeper.count, 0)
+        XCTAssertTrue(rig.audit.load().isEmpty)
+    }
+
+    func testFlagSetByAnotherToolIsAlertOnly() {
+        // No RunClosed record at all → alert only, never mutated (B2).
+        var rig = makeRig(flag: true, ownedBoot: nil, battery: Self.reading(true, 3))
+        let out = rig.service.tick()
         XCTAssertEqual(out.evaluation.decision.action, .warn)
-        XCTAssertEqual(out.evaluation.decision.reason, .criticalStaleOwnership)
+        XCTAssertEqual(out.evaluation.decision.reason, .criticalNotOwned)
         XCTAssertNil(out.mutation)
         XCTAssertTrue(rig.lid.calls.isEmpty)
         XCTAssertEqual(rig.sleeper.count, 0)
-        XCTAssertTrue(rig.latchStore.load().latch.warnedCritical)
-    }
-
-    func testFlagSetByAnotherToolNeverMutated() {
-        var rig = makeRig(flag: true, ownedBoot: nil, battery: Self.reading(true, 3))
-        let out = rig.service.tick()
-        XCTAssertEqual(out.evaluation.decision.reason, .criticalNotOwned)
-        XCTAssertTrue(rig.lid.calls.isEmpty)
-        XCTAssertEqual(rig.sleeper.count, 0)
+        XCTAssertTrue(rig.audit.load().isEmpty)
     }
 
     // MARK: — AC never acts
@@ -255,6 +300,7 @@ final class LowBatteryGuardServiceTests: XCTestCase {
         XCTAssertEqual(rig.flag.value, true)
         XCTAssertFalse(rig.latchStore.load().latch.releasedByGuard)
         XCTAssertTrue(rig.lidStore.load().ownedEnabled, "re-armed flag is owned on this boot again")
+        XCTAssertEqual(rig.audit.load().map(\.outcome), ["released", "rearmed"])
     }
 
     func testNoRearmOnADrainingCharger() {

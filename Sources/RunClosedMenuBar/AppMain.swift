@@ -548,6 +548,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Failures notify once per discharge episode (service latch).
             guard outcome.shouldNotify else { return }
             switch mutation {
+            case .released where e.decision.reason == .emergencyStaleOwnership:
+                notify(L10n.t("Battery critical: emergency sleep"),
+                       L10n.t("%@%% on battery: lid stay-awake was still on from before the last restart. RunClosed turned it off as an emergency and the Mac is going to sleep (hibernation keeps every process). It comes back on once charging above 15%%.", pct))
             case .released:
                 notify(L10n.t("Battery critical: sleeping now"),
                        L10n.t("%@%% on battery: lid stay-awake turned off and the Mac is going to sleep. It comes back on once charging above 15%%.", pct))
@@ -570,13 +573,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch e.decision.reason {
         case .lowBatteryUnprotected:
             notify(L10n.t("Battery low: lid stay-awake is NOT protected"),
-                   L10n.t("%@%% on battery. Lid stay-awake is on but RunClosed does not own it (turned on before the last restart or by another tool), so it will NOT be turned off at 10%% and the Mac will not sleep by itself. Plug in, or switch \"Keep awake with lid closed\" off then on to re-arm the guard.", pct))
+                   L10n.t("%@%% on battery. Lid stay-awake is on but was turned on by another tool (or its state cannot be read), so RunClosed will NOT turn it off at 10%% and the Mac will not sleep by itself. Plug in, or switch \"Keep awake with lid closed\" off then on so RunClosed owns it.", pct))
         case .lowBattery:
             notify(L10n.t("Battery low: lid stay-awake is on"),
                    L10n.t("%@%% on battery. At 10%%, RunClosed turns lid stay-awake off and puts the Mac to sleep (hibernation keeps every process). Plug in to avoid it.", pct))
-        case .criticalStaleOwnership:
-            notify(L10n.t("Battery critical: plug in now"),
-                   L10n.t("%@%% on battery. Lid stay-awake was turned on before the last restart, so the guard does not own it and will not turn it off. Plug in, or switch \"Keep awake with lid closed\" off then on to re-arm the guard.", pct))
         case .criticalNotOwned:
             notify(L10n.t("Battery critical: plug in now"),
                    L10n.t("%@%% on battery. Lid stay-awake was turned on by another tool, so RunClosed will not turn it off. Plug in, or turn it off yourself.", pct))

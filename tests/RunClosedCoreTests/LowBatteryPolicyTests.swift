@@ -32,7 +32,8 @@ final class LowBatteryPolicyTests: XCTestCase {
     func testLowWarningSaysUnprotectedWhenFlagIsNotOwned() {
         // Review finding: the 20% notice must not promise a sleep that the
         // guard will refuse at 10% (stale record / other tool / unreadable).
-        XCTAssertEqual(step(input(pct: 19, ownership: .staleRecord)).0.reason, .lowBatteryUnprotected)
+        // Our own stale record IS protected now (emergency release, ADR 022).
+        XCTAssertEqual(step(input(pct: 19, ownership: .staleRecord)).0.reason, .lowBattery)
         XCTAssertEqual(step(input(pct: 19, ownership: .notOwned)).0.reason, .lowBatteryUnprotected)
         XCTAssertEqual(step(input(pct: 19, lid: nil)).0.reason, .lowBatteryUnprotected)
         XCTAssertEqual(step(input(pct: 19)).0.reason, .lowBattery)
@@ -108,13 +109,33 @@ final class LowBatteryPolicyTests: XCTestCase {
 
     // MARK: — Ownership (B2) — never mutate what we do not own
 
-    func testCriticalWithStaleRecordWarnsAndNeverReleases() {
-        let (d, l) = step(input(pct: 5, ownership: .staleRecord))
-        XCTAssertEqual(d.action, .warn)
-        XCTAssertEqual(d.reason, .criticalStaleOwnership)
-        XCTAssertTrue(l.warnedCritical)
+    func testCriticalWithOwnStaleRecordIsEmergencyRelease() {
+        // ADR 022 decision: the 2026-10-15 state (flag survived the reboot,
+        // record from boot 8C8825C7, current boot A6CB8DFE) at ≤ 10%.
+        let (d, _) = step(input(pct: 10, ownership: .staleRecord))
+        XCTAssertEqual(d.action, .releaseAndSleep)
+        XCTAssertEqual(d.reason, .emergencyStaleOwnership)
     }
 
+    func testOwnStaleRecordFastDrainIsEmergencyRelease() {
+        let (d, _) = step(input(pct: 14, minutes: 9, ownership: .staleRecord))
+        XCTAssertEqual(d.action, .releaseAndSleep)
+        XCTAssertEqual(d.reason, .emergencyStaleOwnership)
+    }
+
+    func testOwnStaleRecordOnACNeverActs() {
+        let (d, _) = step(input(battery: false, pct: 3, minutes: 2, ownership: .staleRecord))
+        XCTAssertEqual(d.action, .none)
+        XCTAssertEqual(d.reason, .onAC)
+    }
+
+    func testOwnStaleRecordAtLowOnlyWarns() {
+        // Emergency ownership is scoped to the critical branch only.
+        let (d, _) = step(input(pct: 15, ownership: .staleRecord))
+        XCTAssertEqual(d.action, .warn)
+    }
+
+    /// No RunClosed record at all → alert only (B2), even at 1%.
     func testCriticalNotOwnedWarnsAndNeverReleases() {
         let (d, _) = step(input(pct: 5, ownership: .notOwned))
         XCTAssertEqual(d.action, .warn)

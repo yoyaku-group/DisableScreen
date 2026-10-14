@@ -444,4 +444,50 @@ final class LidMutationServiceTests: XCTestCase {
     // MARK: — Helpers
 
     private func storeURL(_ url: URL) -> URL { url }
+
+    // MARK: — ADR 022: low-battery emergency initiator
+
+    /// Our own record from a previous boot + flag observed ON: the
+    /// emergency release is allowed (the flag survived a reboot, ADR 021).
+    func testEmergencyOffAllowedOnOwnStaleRecord() {
+        let url = makeTempURL()
+        OwnedLidAssertion(currentBootID: "boot-OLD", url: url)
+            .save(.init(bootID: "boot-OLD", ownedEnabled: true, referenceState: "on"))
+        let fake = FakeLidAssertion()
+        fake.readbackAfterWrite = false
+        var svc = makeService(prior: true, mutator: fake, storeURL: url, bootID: "boot-NEW")
+        let r = svc.setEnabled(false, initiator: .lowBatteryEmergency)
+        guard case .success(let op) = r else { return XCTFail("expected success, got \(r)") }
+        XCTAssertEqual(op.state, .verified)
+        XCTAssertEqual(fake.calls, [.init(enabled: false)])
+        let rec = OwnedLidAssertion(currentBootID: "boot-NEW", url: url).load()
+        XCTAssertEqual(rec.bootID, "boot-NEW")
+        XCTAssertFalse(rec.ownedEnabled)
+    }
+
+    /// No RunClosed record at all (another tool set the flag): the emergency
+    /// initiator is still refused — B2 holds.
+    func testEmergencyOffRefusedWithoutOwnRecord() {
+        let url = makeTempURL()
+        let fake = FakeLidAssertion()
+        fake.readbackAfterWrite = false
+        var svc = makeService(prior: true, mutator: fake, storeURL: url, bootID: "boot-NEW")
+        let r = svc.setEnabled(false, initiator: .lowBatteryEmergency)
+        XCTAssertEqual(r, .failure(.notOwned))
+        XCTAssertTrue(fake.calls.isEmpty)
+    }
+
+    /// B2 untouched for every other automatic caller: a stale record still
+    /// refuses `.automatic` (restore-on-quit, scripts).
+    func testAutomaticOffStillRefusedOnOwnStaleRecord() {
+        let url = makeTempURL()
+        OwnedLidAssertion(currentBootID: "boot-OLD", url: url)
+            .save(.init(bootID: "boot-OLD", ownedEnabled: true, referenceState: "on"))
+        let fake = FakeLidAssertion()
+        fake.readbackAfterWrite = false
+        var svc = makeService(prior: true, mutator: fake, storeURL: url, bootID: "boot-NEW")
+        let r = svc.setEnabled(false, initiator: .automatic)
+        XCTAssertEqual(r, .failure(.notOwned))
+        XCTAssertTrue(fake.calls.isEmpty)
+    }
 }

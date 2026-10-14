@@ -507,3 +507,32 @@ NB : dans le plan de mission, l'exemple `simulate false 9 8` suppose un premier 
 Bundle : `scripts/build-runclosed-app.sh` (ad-hoc, `OUT_DIR` hors du dépôt), `codesign --verify --strict` OK, 3 binaires et les deux lproj présents. Défaut trouvé sur le bundle : `UserDefaults(suiteName: "com.benjaminbelaga.RunClosed")` lancé depuis le bundle de même identifiant renvoie « does not make sense and will not work ». Corrigé : le domaine standard est lu quand la suite est le bundle principal.
 
 État machine observé au début de la mission (lecture seule, 2026-10-15 ~00:45) : `SleepDisabled 1`, `owned_lid.json` d'un boot précédent, donc `recoveryPending: true`. Avec ADR 022, cet état donne `criticalStaleOwnership`, soit une alerte sans relâchement (décision ouverte, voir ADR 022). Vers 00:58, sur secteur 100 W : 10 % avec `InstantAmperage` -194 mA, soit une décharge sur secteur. Ce cas relève de la sonde Guardian `ac-draining`, pas de cette garde.
+
+## ADR 022 — propriété d'urgence d'un record périmé (2026-10-15, décidée par l'orchestrateur)
+
+Build et tests lancés une seule fois, en `nice -n 19`, après le retour d'un courant de charge positif (pause pendant la décharge sur secteur). Aucune mutation réelle.
+
+```
+$ nice -n 19 arch -arm64 swift test
+RunClosedPersistenceTests 25 · RunClosedMacSystemTests 74 · HelperSupport 13 · Core 63 · App 11
+→ 186/186, 0 warning
+```
+Nouveaux contrats :
+- Record périmé à ≤ 10 % sur batterie, ou ≤ 10 min dans la bande des 20 % → `releaseAndSleep` / `emergencyStaleOwnership`.
+- Record périmé sur secteur → rien. Record périmé à 15 % → alerte seulement (la règle d'urgence ne vaut que dans la branche critique).
+- Aucun record (`notOwned`) → `warn` / `criticalNotOwned`, 0 mutation, 0 ligne d'audit.
+- Service : relâchement d'urgence vérifié, 1 veille. Le record est remplacé par l'OFF du boot courant. 1 ligne d'audit (`reason=emergencyStaleOwnership`, `recordBootID=OLD`, `bootID=A`) écrite avant la veille.
+- `LidMutationService` : `.lowBatteryEmergency` autorisé sur notre record périmé, refusé sans record (`notOwned`). `.automatic` toujours refusé sur un record périmé (B2 inchangé).
+- L'opérateur garde la main : un clic pendant un tick reçoit `busy` (`tryWithLock` renvoie nil), et un OFF opérateur après un relâchement d'urgence annule le réarmement.
+- Journal d'audit : ajout de lignes entières, relecture dans l'ordre.
+
+CLI (lecture seule) :
+```
+$ runclosed low-battery status   → lidRecord {ownedBootID, ownedByThisBoot, recoveryPending}, protection, remedy
+  (état actuel : flag off → "not-needed", remedy null ; aucun fichier créé)
+$ runclosed low-battery simulate battery 9 8 --ownership stale      → releaseAndSleep / emergencyStaleOwnership | armed (emergency)
+$ runclosed low-battery simulate ac 5 3 --ownership stale           → none / onAC
+$ runclosed low-battery simulate battery 9 8 --ownership not-owned  → warn / criticalNotOwned | unprotected
+$ runclosed low-battery simulate battery 18 unknown --ownership stale → warn / lowBattery
+```
+Preuve live (orchestrateur, 2026-10-15) : record 8C8825C7, boot A6CB8DFE, `recoveryPending: true`. Relâchement opérateur effectué, SleepDisabled 0 vérifié. Batterie à 9 % **sur secteur**.

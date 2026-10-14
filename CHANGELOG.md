@@ -14,8 +14,10 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   below 20 %) it turns the flag off and runs `pmset sleepnow`. With
   `hibernatemode 3` the machine hibernates instead of dying, and every
   process survives. The flag comes back on automatically once on AC and above
-  15 %. The guard never acts on AC, and it never touches a flag it did not set
-  on the current boot: it sends a critical notification instead. Kill switch:
+  15 %. The guard never acts on AC. A flag RunClosed itself set on a previous
+  boot (the flag survives restarts) is released as an emergency at the
+  critical threshold, with an audit line in `low_battery_audit.jsonl`; a flag
+  set by another tool is never touched, only a critical notification. Kill switch:
   `defaults write com.benjaminbelaga.RunClosed lowBatteryGuardEnabled -bool false`.
   Guard ticks, the popup switch and `runclosed lid-stay-awake on|off` are
   serialised by a cross-process file lock, so an operator command always wins
@@ -24,6 +26,7 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   protected instead of promising a sleep. The re-arm also waits while the
   battery still discharges on AC (adapter too weak for the load).
 - `runclosed low-battery status` (live battery readback + guard decision,
+  ownership record / `recoveryPending`, protection level and one-click remedy;
   read-only) and `runclosed low-battery simulate <onBattery> <percent>
   <minutes>` (pure dry-run decision, never mutates).
 - `scripts/hardware/low-battery-qualification.sh`: opt-in, read-only witness

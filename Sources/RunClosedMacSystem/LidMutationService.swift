@@ -96,6 +96,13 @@ public struct LidMutationService {
         /// `--operator`). The operator IS the authority over this global
         /// flag, so ownership is not required — only B1 still binds.
         case operatorCommand
+        /// Critical-battery emergency release by the low-battery guard
+        /// (ADR 022). Turning OFF is allowed when we own the flag on this
+        /// boot OR when OUR OWN record from a previous boot still claims it
+        /// (the flag survived a reboot — ADR 021). No record at all (another
+        /// tool set it) is still refused `notOwned`. The service checks this
+        /// itself rather than trusting the caller.
+        case lowBatteryEmergency
     }
 
     /// Set the lid stay-awake flag.
@@ -128,10 +135,12 @@ public struct LidMutationService {
         // OFF observation or kept it pending; either way not ours to flip).
         // An operator command resolves recovery-pending by itself: the
         // verified write below replaces the stale record (ADR 021).
-        if !enabled && initiator == .automatic {
+        if !enabled && initiator != .operatorCommand {
             let rec = store.load()
             let weOwn = rec.bootID == bootID && rec.ownedEnabled
-            if !weOwn {
+            let ourStaleRecord = rec.ownedEnabled && rec.bootID != bootID
+            let allowed = weOwn || (initiator == .lowBatteryEmergency && ourStaleRecord)
+            if !allowed {
                 return .failure(.notOwned)
             }
         }
