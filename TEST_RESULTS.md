@@ -453,6 +453,10 @@ RunClosedAppTests.xctest           11 tests, 0 failures
 # après corrections de la revue ai-review-gate (verrou LidWriteLock, sleep unique sur échec, décodage tolérant)
 RunClosedPersistenceTests 24 · RunClosedMacSystemTests 63 · HelperSupport 13 · Core 57 · App 11
 → 168/168, 0 warning
+
+# après la 2e revue (alerte « non protégé », refus notifié une fois, tryWithLock non bloquant)
+RunClosedPersistenceTests 24 · RunClosedMacSystemTests 65 · HelperSupport 13 · Core 58 · App 11
+→ 171/171, 0 warning
 ```
 
 Contrats verrouillés par les tests :

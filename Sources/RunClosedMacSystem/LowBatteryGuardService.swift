@@ -122,6 +122,9 @@ public struct LowBatteryGuardService {
         public var sleepAttempted: Bool = false
         public var sleepRC: Int32?
         public var sleepOutput: String?
+        /// Whether the caller should notify about `mutation`. Failures are
+        /// notified once per discharge episode, never every 30 s.
+        public var shouldNotify: Bool = false
     }
 
     /// Read-only evaluation: no mutation, no persistence write. Used by
@@ -171,6 +174,7 @@ public struct LowBatteryGuardService {
             switch result {
             case .success(let op) where op.state == .verified:
                 outcome.mutation = .released
+                outcome.shouldNotify = true
                 record.latch = record.latch.recordingRelease()
                 record.releasedBootID = lidService.bootID
                 attemptSleep(&outcome)
@@ -187,9 +191,11 @@ public struct LowBatteryGuardService {
                 attemptSleepOnceAfterFailure(&outcome, record: &record)
             case .failure(let error):
                 // B1/B2/no-op refusal (e.g. ownership changed between the
-                // evaluation and the write): no sleep, the caller warns.
+                // evaluation and the write): no sleep; warn once per episode.
                 outcome.mutation = .releaseRefused
                 outcome.mutationError = String(describing: error)
+                outcome.shouldNotify = !record.latch.warnedCritical
+                record.latch.warnedCritical = true
             }
 
         case .rearm:
@@ -197,6 +203,7 @@ public struct LowBatteryGuardService {
             switch result {
             case .success(let op) where op.state == .verified:
                 outcome.mutation = .rearmed
+                outcome.shouldNotify = true
                 record.latch = record.latch.recordingRearm()
             case .failure(.noChangeRequested(target: true)):
                 outcome.mutation = .rearmAlreadyOn
@@ -224,6 +231,7 @@ public struct LowBatteryGuardService {
                                               record: inout LowBatteryLatchStore.Record) {
         guard !record.latch.failedReleaseSleepTried else { return }
         record.latch.failedReleaseSleepTried = true
+        outcome.shouldNotify = true
         attemptSleep(&outcome)
     }
 

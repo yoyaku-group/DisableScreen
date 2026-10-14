@@ -29,6 +29,15 @@ final class LowBatteryPolicyTests: XCTestCase {
         XCTAssertTrue(l.warnedLow)
     }
 
+    func testLowWarningSaysUnprotectedWhenFlagIsNotOwned() {
+        // Review finding: the 20% notice must not promise a sleep that the
+        // guard will refuse at 10% (stale record / other tool / unreadable).
+        XCTAssertEqual(step(input(pct: 19, ownership: .staleRecord)).0.reason, .lowBatteryUnprotected)
+        XCTAssertEqual(step(input(pct: 19, ownership: .notOwned)).0.reason, .lowBatteryUnprotected)
+        XCTAssertEqual(step(input(pct: 19, lid: nil)).0.reason, .lowBatteryUnprotected)
+        XCTAssertEqual(step(input(pct: 19)).0.reason, .lowBattery)
+    }
+
     func testNoActionAboveWarnThreshold() {
         let (d, _) = step(input(pct: 21))
         XCTAssertEqual(d.action, .none)

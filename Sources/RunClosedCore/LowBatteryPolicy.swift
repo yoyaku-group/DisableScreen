@@ -145,6 +145,9 @@ public enum LowBatteryPolicy {
         case lidFlagOff
         case lidFlagUnknown
         case lowBattery
+        /// Low, flag ON (or unreadable) but NOT owned on this boot: the
+        /// guard will not release it at 10% — the warning must say so.
+        case lowBatteryUnprotected
         case criticalOwned
         case criticalStaleOwnership
         case criticalNotOwned
@@ -236,7 +239,9 @@ public enum LowBatteryPolicy {
                 return (Decision(action: .none, reason: .alreadyWarned, level: lvl), next)
             }
             next.warnedLow = true
-            return (Decision(action: .warn, reason: .lowBattery, level: lvl), next)
+            let protected = input.lidFlag == true && input.ownership == .ownedThisBoot
+            return (Decision(action: .warn, reason: protected ? .lowBattery : .lowBatteryUnprotected,
+                             level: lvl), next)
 
         case .critical:
             guard let flag = input.lidFlag else {

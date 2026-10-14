@@ -19,7 +19,9 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `defaults write com.benjaminbelaga.RunClosed lowBatteryGuardEnabled -bool false`.
   Guard ticks, the popup switch and `runclosed lid-stay-awake on|off` are
   serialised by a cross-process file lock, so an operator command always wins
-  over an automatic re-arm.
+  over an automatic re-arm. When the flag was not set by RunClosed on the
+  current boot, the 20 % notice says explicitly that the Mac is NOT
+  protected instead of promising a sleep.
 - `runclosed low-battery status` (live battery readback + guard decision,
   read-only) and `runclosed low-battery simulate <onBattery> <percent>
   <minutes>` (pure dry-run decision, never mutates).

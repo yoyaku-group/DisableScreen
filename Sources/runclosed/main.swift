@@ -314,7 +314,8 @@ func batteryJSON(_ b: BatteryState) -> [String: Any] {
 
 func latchJSON(_ l: LowBatteryPolicy.Latch) -> [String: Any] {
     ["warnedLow": l.warnedLow, "warnedCritical": l.warnedCritical,
-     "releasedByGuard": l.releasedByGuard]
+     "releasedByGuard": l.releasedByGuard,
+     "failedReleaseSleepTried": l.failedReleaseSleepTried]
 }
 
 func decisionJSON(_ d: LowBatteryPolicy.Decision) -> [String: Any] {
