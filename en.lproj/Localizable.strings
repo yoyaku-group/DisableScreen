@@ -14,3 +14,17 @@
 "Change failed (see log)" = "Change failed (see log)";
 "Active sessions: none" = "Active sessions: none";
 "Active sessions (%@): %@" = "Active sessions (%@): %@";
+
+/* Low-battery guard (ADR 022) */
+"Battery critical: sleeping now" = "Battery critical: sleeping now";
+"%@%% on battery: lid stay-awake turned off and the Mac is going to sleep. It comes back on once charging above 15%%." = "%@%% on battery: lid stay-awake turned off and the Mac is going to sleep. It comes back on once charging above 15%%.";
+"Battery critical: plug in now" = "Battery critical: plug in now";
+"%@%% on battery and lid stay-awake could not be turned off (%@). Sleep was attempted anyway." = "%@%% on battery and lid stay-awake could not be turned off (%@). Sleep was attempted anyway.";
+"%@%% on battery. The low-battery guard was refused (%@) and the Mac will not sleep by itself." = "%@%% on battery. The low-battery guard was refused (%@) and the Mac will not sleep by itself.";
+"Lid stay-awake restored" = "Lid stay-awake restored";
+"Back on power above 15%: keep awake with lid closed is on again." = "Back on power above 15%: keep awake with lid closed is on again.";
+"Battery low: lid stay-awake is on" = "Battery low: lid stay-awake is on";
+"%@%% on battery. At 10%%, RunClosed turns lid stay-awake off and puts the Mac to sleep (hibernation keeps every process). Plug in to avoid it." = "%@%% on battery. At 10%%, RunClosed turns lid stay-awake off and puts the Mac to sleep (hibernation keeps every process). Plug in to avoid it.";
+"%@%% on battery. Lid stay-awake was turned on before the last restart, so the guard does not own it and will not turn it off. Plug in, or switch \"Keep awake with lid closed\" off then on to re-arm the guard." = "%@%% on battery. Lid stay-awake was turned on before the last restart, so the guard does not own it and will not turn it off. Plug in, or switch \"Keep awake with lid closed\" off then on to re-arm the guard.";
+"%@%% on battery. Lid stay-awake was turned on by another tool, so RunClosed will not turn it off. Plug in, or turn it off yourself." = "%@%% on battery. Lid stay-awake was turned on by another tool, so RunClosed will not turn it off. Plug in, or turn it off yourself.";
+"%@%% on battery and the lid stay-awake state cannot be read. Plug in now." = "%@%% on battery and the lid stay-awake state cannot be read. Plug in now.";

@@ -138,3 +138,20 @@ Statuts stricts : **DONE** (fait + vérifié) · **FAILED** · **NOT_TESTED** ·
 - DONE — **Live (build Developer ID installé /Applications, backup de l'ancien bundle conservé)** : état réel stale (boot `49B2…` → boot `8C88…`, `observed: on`, `recoveryPending: true`) ; clic popup OFF → `lid -> false: state=verified readback=true`, `SleepDisabled 0`, `recoveryPending: false` ; aller-retour ON (`1`) → OFF (`0`) vérifié ; `lid-stay-awake off --operator` sur flag déjà OFF → exit 3 no-change (parsing du flag OK, aucune mutation).
 - [DISCOVERY] Phase 4 ADR 015, observation réelle : sur macOS 26.6 (M5 Max), `pmset -a disablesleep 1` **survit au reboot** (posé 25/09 13:03, reboot 17:33, toujours `SleepDisabled 1` le 29/09). Le modèle fail-closed d'ADR 015 était donc le bon ; ce qui manquait était le chemin opérateur.
 - ADR 021 (DECISIONS.md).
+
+## ADR 022 — Garde batterie faible (2026-10-15)
+
+Cause prouvée (2026-10-14 21:58) : `SleepDisabled 1` posé par RunClosed bloquait la veille de secours de macOS. Sur batterie avec ~50 agents, la charge est passée de 41 % à 1 %, puis coupure sèche, alors que `hibernatemode 3` aurait préservé tous les processus. Seuils fixés par Ben le 2026-10-15.
+
+- DONE — `RunClosedCore/LowBatteryPolicy.swift` : politique pure `none | warn | releaseAndSleep | rearm` + raison + niveau. Alerte à 20 %. Critique à 10 % ou à ≤ 10 min dans la bande des 20 %. Jamais d'action sur secteur ni sur une source inconnue. Flag non possédé (`staleRecord` / `notOwned`) ou illisible : alerte, aucune mutation. Hystérésis de réarmement : secteur **et** > 15 %. Verrou anti-flap.
+- DONE — `RunClosedMacSystem/BatteryReadback.swift` : IOKit public (`IOPSCopyPowerSourcesInfo` / `IOPSGetPowerSourceDescription`), parseur pur tri-état ; un desktop sans batterie retombe sur le type de source.
+- DONE — `RunClosedMacSystem/LowBatteryGuardService.swift` : `evaluate()` (lecture seule) et `tick()`. Le relâchement passe par `LidMutationService.setEnabled(false, .automatic)` (B1+B2), puis `pmset sleepnow`. Réarmement par `setEnabled(true, .automatic)`. Verrou écrit depuis le résultat. Coupe-circuit `lowBatteryGuardEnabled`.
+- DONE — `RunClosedPersistence/LowBatteryLatchStore.swift` : `low_battery_guard.json` atomique ; fichier corrompu → verrou par défaut (aucun réarmement fantôme).
+- DONE — app menu-bar : minuterie 30 s (premier tick à 5 s), file série, jamais en parallèle d'un toggle. Notifications `UNUserNotificationCenter` (EN/FR), icône batterie dans la barre en alerte. Un toggle opérateur annule le réarmement dû.
+- DONE — CLI `runclosed low-battery status` (relevé réel, lecture seule, n'écrit aucun fichier — vérifié : pas de `low_battery_guard.json` créé) et `simulate` (décision pure).
+- DONE — tests : **54 nouveaux** (27 politique, 12 relevé, 12 service, 3 persistance). Suite globale **165/165**, 0 warning.
+- DONE — bundle `.app` assemblé (ad-hoc, hors `/Applications`) ; CLI embarquée vérifiée (`simulate true 9 8` → `releaseAndSleep`). Défaut trouvé sur le bundle et corrigé : `UserDefaults(suiteName: <id du bundle>)` est rejeté par Foundation, donc l'app lit le domaine standard.
+- NOT_TESTED — notifications réelles et minuterie dans l'app installée : l'app n'a pas été lancée, pour ne pas perturber l'instance notarisée ni son LoginItem.
+- BLOCKED_HARDWARE — qualification réelle (vidange jusqu'à 10 %, veille, réveil, réarmement au-dessus de 15 %) : `RUNCLOSED_HW_OPTIN=1 scripts/hardware/low-battery-qualification.sh`, avec Ben présent. Le script refuse de tourner sans opt-in (exit 3, vérifié).
+- NOT_DONE — installation `/Applications` : nécessite une build signée Developer ID et notarisée (procédure G5), plus la qualification. Décision Ben.
+- OPEN (Ben) — après un reboot, le flag survit et le record devient `staleRecord`, donc la garde ne fait qu'alerter tant que le switch n'est pas re-basculé (état réel observé le 2026-10-15 00:4x). Option : propriété d'urgence pour « record périmé + flag observé ON » (voir ADR 022).
