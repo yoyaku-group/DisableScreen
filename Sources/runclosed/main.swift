@@ -11,6 +11,8 @@ import RunClosedHelperSupport
 //   runclosed run [--idle-only] [--max <seconds>] -- <cmd> [args...]
 //   runclosed run --lid -- <cmd>        → refused (exit 3): CLI lid wrapper not implemented (ADR 007)
 //   runclosed restore --owned           → stub (G3): reports, changes nothing
+//   runclosed low-battery status        → battery readback + guard decision (read-only, ADR 022)
+//   runclosed low-battery simulate <onBattery> <pct> <minutes> → pure decision (never mutates)
 
 let clock = SystemClock(bootID: BootID.current())
 
@@ -247,14 +249,13 @@ func cmdLidStayAwake(_ rest: [String]) -> Int32 {
             "ownedReferenceState": owned.referenceState,
         ])
         return 0
-    case "on":
+    case "on", "off":
         var svc = makeLidService()
-        let r = svc.setEnabled(true, initiator: initiator)
-        return renderLidResult(r, requestedAction: "on")
-    case "off":
-        var svc = makeLidService()
-        let r = svc.setEnabled(false, initiator: initiator)
-        return renderLidResult(r, requestedAction: "off")
+        let r = svc.setEnabled(sub == "on", initiator: initiator)
+        // An explicit lid command supersedes a pending low-battery re-arm
+        // (ADR 022): the guard must not flip the flag back afterwards.
+        if case .success = r { LowBatteryLatchStore().clearPendingRearm() }
+        return renderLidResult(r, requestedAction: sub)
     default:
         FileHandler.err("usage: runclosed lid-stay-awake <on|off [--operator]|status>")
         return 64
@@ -292,6 +293,157 @@ func renderLidResult(_ r: Result<OperationResult, LidMutationError>, requestedAc
         }
         FileHandler.err(msg)
         return code
+    }
+}
+
+// ── ADR 022 — low-battery guard (read-only CLI surface) ─────────────────────
+
+func batteryJSON(_ b: BatteryState) -> [String: Any] {
+    [
+        "onBattery": b.onBattery as Any? ?? NSNull(),
+        "chargePercent": b.chargePercent as Any? ?? NSNull(),
+        "minutesRemaining": b.minutesRemaining as Any? ?? NSNull(),
+        "isCharging": b.isCharging as Any? ?? NSNull(),
+        "batteryPresent": b.batteryPresent,
+    ]
+}
+
+func latchJSON(_ l: LowBatteryPolicy.Latch) -> [String: Any] {
+    ["warnedLow": l.warnedLow, "warnedCritical": l.warnedCritical,
+     "releasedByGuard": l.releasedByGuard]
+}
+
+func decisionJSON(_ d: LowBatteryPolicy.Decision) -> [String: Any] {
+    ["action": d.action.rawValue, "reason": d.reason.rawValue, "level": d.level.rawValue]
+}
+
+func inputJSON(_ i: LowBatteryPolicy.Input) -> [String: Any] {
+    [
+        "onBattery": i.onBattery as Any? ?? NSNull(),
+        "chargePercent": i.chargePercent as Any? ?? NSNull(),
+        "minutesRemaining": i.minutesRemaining as Any? ?? NSNull(),
+        "lidFlag": i.lidFlag.map { $0 ? "on" : "off" } ?? "unknown",
+        "ownership": i.ownership.rawValue,
+    ]
+}
+
+func lowBatteryThresholdsJSON() -> [String: Any] {
+    [
+        "warnPercent": LowBatteryPolicy.warnPercent,
+        "criticalPercent": LowBatteryPolicy.criticalPercent,
+        "criticalMinutes": LowBatteryPolicy.criticalMinutes,
+        "rearmPercent": LowBatteryPolicy.rearmPercent,
+    ]
+}
+
+let lowBatteryUsage = """
+usage: runclosed low-battery status
+       runclosed low-battery simulate <onBattery:true|false|battery|ac> <percent> <minutes|unknown>
+                 [--lid on|off|unknown] [--ownership owned|stale|not-owned] [--released]
+"""
+
+func parseOnBattery(_ s: String) -> Bool? {
+    switch s.lowercased() {
+    case "true", "battery", "1", "yes": return true
+    case "false", "ac", "0", "no": return false
+    default: return nil
+    }
+}
+
+func cmdLowBattery(_ rest: [String]) -> Int32 {
+    guard let sub = rest.first else {
+        FileHandler.err(lowBatteryUsage)
+        return 64
+    }
+    switch sub {
+    case "status":
+        // Real readback + decision, READ-ONLY: evaluate() never mutates and
+        // never writes the latch. Nothing here calls pmset write or sleepnow.
+        let svc = LowBatteryGuardService(
+            lidService: makeLidService(),
+            latchStore: LowBatteryLatchStore(),
+            batteryProvider: { BatteryReadback.read() },
+            sleeper: PMSetSleeper())
+        let e = svc.evaluate()
+        emitJSON([
+            "schemaVersion": kSchemaVersion,
+            "bootID": clock.bootID,
+            "mode": "status (read-only)",
+            "guardEnabled": LowBatteryGuardSettings.isEnabled(),
+            "battery": batteryJSON(e.battery),
+            "input": inputJSON(e.input),
+            "decision": decisionJSON(e.decision),
+            "latch": latchJSON(e.latchBefore),
+            "thresholds": lowBatteryThresholdsJSON(),
+        ])
+        return 0
+    case "simulate":
+        // Pure decision on injected values — no readback, no mutation, no
+        // persistence. Defaults model the 2026-10-14 incident: flag ON and
+        // owned on this boot, fresh latch.
+        let args = Array(rest.dropFirst())
+        guard args.count >= 3,
+              let onBattery = parseOnBattery(args[0]),
+              let percent = Int(args[1]), (0...100).contains(percent) else {
+            FileHandler.err(lowBatteryUsage)
+            return 64
+        }
+        let minutes: Int?
+        switch args[2].lowercased() {
+        case "unknown", "-", "nil": minutes = nil
+        default:
+            guard let m = Int(args[2]) else { FileHandler.err(lowBatteryUsage); return 64 }
+            minutes = m > 0 ? m : nil   // same rule as the readback: ≤0 = estimating
+        }
+        var lidFlag: Bool? = true
+        var ownership: LowBatteryPolicy.LidOwnership = .ownedThisBoot
+        var latch = LowBatteryPolicy.Latch()
+        var i = 3
+        while i < args.count {
+            switch args[i] {
+            case "--lid":
+                i += 1
+                guard i < args.count else { FileHandler.err(lowBatteryUsage); return 64 }
+                switch args[i] {
+                case "on": lidFlag = true
+                case "off": lidFlag = false
+                case "unknown": lidFlag = nil
+                default: FileHandler.err(lowBatteryUsage); return 64
+                }
+            case "--ownership":
+                i += 1
+                guard i < args.count else { FileHandler.err(lowBatteryUsage); return 64 }
+                switch args[i] {
+                case "owned": ownership = .ownedThisBoot
+                case "stale": ownership = .staleRecord
+                case "not-owned": ownership = .notOwned
+                default: FileHandler.err(lowBatteryUsage); return 64
+                }
+            case "--released":
+                latch.releasedByGuard = true
+            default:
+                FileHandler.err(lowBatteryUsage)
+                return 64
+            }
+            i += 1
+        }
+        let input = LowBatteryPolicy.Input(
+            onBattery: onBattery, chargePercent: percent, minutesRemaining: minutes,
+            lidFlag: lidFlag, ownership: ownership)
+        let (decision, next) = LowBatteryPolicy.step(input, latch: latch)
+        emitJSON([
+            "schemaVersion": kSchemaVersion,
+            "mode": "simulate (dry-run, pure decision, nothing mutated)",
+            "input": inputJSON(input),
+            "decision": decisionJSON(decision),
+            "latchBefore": latchJSON(latch),
+            "latchAfter": latchJSON(next),
+            "thresholds": lowBatteryThresholdsJSON(),
+        ])
+        return 0
+    default:
+        FileHandler.err(lowBatteryUsage)
+        return 64
     }
 }
 
@@ -448,7 +600,7 @@ func cmdLoginItem(_ rest: [String]) -> Int32 {
 // ── dispatch ─────────────────────────────────────────────────────────────────
 let args = Array(CommandLine.arguments.dropFirst())
 guard let sub = args.first else {
-    FileHandler.err("usage: runclosed <status|displays|doctor|run|restore|disable|enable|lid-stay-awake|login-item|helper> [...]")
+    FileHandler.err("usage: runclosed <status|displays|doctor|run|restore|disable|enable|lid-stay-awake|login-item|helper|low-battery> [...]")
     exit(64)
 }
 let rest = Array(args.dropFirst())
@@ -463,6 +615,7 @@ case "enable":   exit(cmdEnable(rest))
 case "lid-stay-awake": exit(cmdLidStayAwake(rest))
 case "login-item": exit(cmdLoginItem(rest))
 case "helper":   exit(cmdHelper(rest))
+case "low-battery": exit(cmdLowBattery(rest))
 case "restore":
     // restore --owned = re-enable every display we previously disabled (B3).
     // restore --lid = closed-lid keep-awake restore (G3 stub, unchanged).

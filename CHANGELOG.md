@@ -5,6 +5,24 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Low-battery guard (ADR 022). The lid stay-awake flag (`pmset
+  disablesleep 1`) also blocks macOS's emergency sleep, so a Mac left on
+  battery with a heavy workload could drain to 0 % and power off hard. On
+  battery, RunClosed now warns at 20 %. At 10 % (or ≤ 10 minutes left once
+  below 20 %) it turns the flag off and runs `pmset sleepnow`. With
+  `hibernatemode 3` the machine hibernates instead of dying, and every
+  process survives. The flag comes back on automatically once on AC and above
+  15 %. The guard never acts on AC, and it never touches a flag it did not set
+  on the current boot: it sends a critical notification instead. Kill switch:
+  `defaults write com.benjaminbelaga.RunClosed lowBatteryGuardEnabled -bool false`.
+- `runclosed low-battery status` (live battery readback + guard decision,
+  read-only) and `runclosed low-battery simulate <onBattery> <percent>
+  <minutes>` (pure dry-run decision, never mutates).
+- `scripts/hardware/low-battery-qualification.sh`: opt-in, read-only witness
+  for the hardware qualification run with the operator present.
+
 ### Fixed
 
 - The "Keep awake with lid closed" switch could get stuck ON after a reboot:

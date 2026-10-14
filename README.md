@@ -19,6 +19,11 @@ as the audited baseline (see [Repository layout](#repository-layout)).
   read-back that verifies the mode actually changed.
 - **Keep awake with lid closed** — flips the `pmset disablesleep` flag with an
   ownership model (see [Safety model](#safety-model)).
+- **Low-battery guard** — on battery, warns at 20 % and, at 10 % (or ≤ 10 min
+  left), turns the lid stay-awake flag off and puts the Mac to sleep so
+  hibernation keeps every process; re-enables it on AC above 15 %. Never acts
+  on AC, never touches a flag it does not own (ADR 022). Kill switch:
+  `defaults write com.benjaminbelaga.RunClosed lowBatteryGuardEnabled -bool false`.
 - **Open at login** via `SMAppService`.
 - Localized: **English** (base) and **French**.
 
@@ -94,6 +99,10 @@ flag), so the invariants are the interesting part:
 - **Ownership.** The lid flag is restored on quit only when we set it on this
   boot, proven by a persisted record + read-back. A flag owned by another boot
   is kept as `recoveryPending` and never silently flipped (fail-closed).
+- **Low battery wins over keep-awake, ownership still binds.** The guard
+  releases the lid flag only through the same automatic, ownership-gated path
+  as the restore-on-quit; a flag set on another boot or by another tool gets
+  a loud notification, never a mutation.
 - **Last-display guard.** Disabling the only active display is refused at the
   moment of the effect, not at render time.
 - **One target per command.** A brightness command for display A never touches
@@ -110,7 +119,8 @@ Sources/
   RunClosedMenuBar/      # the menu-bar app (AppKit)
   RunClosedHelper*/      # privileged LaunchDaemon skeleton (registration only)
   runclosed/             # CLI: status, displays, doctor, run, disable/enable,
-                         #      lid-stay-awake, restore, login-item, helper
+                         #      lid-stay-awake, restore, login-item, helper,
+                         #      low-battery (status / simulate, read-only)
 tests/                   # Swift test suites
 main.py, launcher.m,     # legacy Python app (audited baseline, kept in-tree)
 build.sh, test_e2e.py

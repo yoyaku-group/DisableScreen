@@ -20,3 +20,10 @@ Chaque ligne où `main.py` / `launcher.m` change un état hors du process. Base 
 - **M2 viole l'invariant 3** (« une erreur ne devient jamais un succès ») → résultat typé + readback (A05).
 - **M1** doit revalider la topologie au moment de l'effet (invariant 4, A04).
 - M3/M4/M5 : `brightness` doit choisir **un** backend explicite par cible (ADR : `softwareDim` pour externe, `native` pour intégré), jamais cumuler overlay + write matériel.
+
+## Addendum Swift — garde batterie faible (ADR 022, 2026-10-15)
+
+| # | Fichier:fonction | Cible | Permission | Effet | Code retour vérifié ? | Readback ? | Persistance | Récupération |
+|---|---|---|---|---|---|---|---|---|
+| M9 | `LowBatteryGuardService.tick` → `LidMutationService.setEnabled(false/true, .automatic)` | flag `disablesleep` (même primitive que M6) | root (`sudo -n`, règle M6) | global + persistant | rc + **readback autoritaire** | oui (`pmset -g`, retry borné) | record `owned_lid.json` + verrou `low_battery_guard.json` | réarmement automatique sur secteur > 15 % ; B2 : jamais sur un flag non possédé |
+| M10 | `PMSetSleeper.sleepNow` → `/usr/bin/pmset sleepnow` | système (veille) | user (console) | global, **transitoire** | rc | non (le réveil est l'observation) | aucune | réveil normal ; `hibernatemode 3` conserve la RAM sur disque |

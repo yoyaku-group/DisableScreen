@@ -1,4 +1,5 @@
 import AppKit
+import UserNotifications
 import RunClosedCore
 import RunClosedMacSystem
 import RunClosedPersistence
@@ -23,6 +24,15 @@ import RunClosedApp
 // - Brightness targets ONE display (invariant 1): builtin → native
 //   CoreDisplay write; external → software dim overlay floored at 0.08.
 // - Reads are off-main (A09); the panel is rebuilt on main from cached state.
+//
+// - Low-battery guard (ADR 022): every 30 s, off-main, LowBatteryGuardService
+//   evaluates battery + lid flag + ownership. Warn at 20%; at 10% (or ≤10 min
+//   left inside the warn band) on battery it releases a flag WE own on this
+//   boot through the same `.automatic` path (B1+B2) and runs `pmset sleepnow`
+//   so `hibernatemode 3` preserves every process. Never acts on AC. A flag we
+//   do not own is never mutated — the operator gets a loud notification.
+//   Kill switch: `defaults write com.benjaminbelaga.RunClosed
+//   lowBatteryGuardEnabled -bool false`.
 //
 // The menu stays available on right-click for the CLI-parity surfaces
 // (leases detail, refresh) — the popup is the primary surface.
@@ -60,6 +70,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Last refused/failed lid toggle — cleared on the next success.
     private var lidError: String?
 
+    /// Low-battery guard (ADR 022): timer + serial queue so two ticks never
+    /// overlap, and the alert state that drives the status icon.
+    private var guardTimer: Timer?
+    private let guardQueue = DispatchQueue(label: "com.benjaminbelaga.RunClosed.lowBatteryGuard", qos: .utility)
+    private var guardTickInFlight = false
+    private var batteryAlert = false
+    static let lowBatteryTickInterval: TimeInterval = 30
+
     // MARK: — Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -80,6 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshLidCache() }
         }
+        startLowBatteryGuard()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -173,7 +192,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateStatusIcon() {
         let disabledCount = OwnedDisabledDisplays(currentBootID: clock.bootID).load().ids.count
-        let symbol = disabledCount > 0 ? "display.slash" : "laptopcomputer"
+        var symbol = disabledCount > 0 ? "display.slash" : "laptopcomputer"
+        // Low battery with lid stay-awake ON: make it visible in the bar.
+        if batteryAlert, NSImage(systemSymbolName: "battery.25percent", accessibilityDescription: nil) != nil {
+            symbol = "battery.25percent"
+        }
         statusItem.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
         statusItem.button?.image?.isTemplate = true
     }
@@ -406,6 +429,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // leave the switch stuck ON.
             let result = service.setEnabled(target, initiator: .operatorCommand)
             self.log(result: result, what: "lid -> \(target)")
+            // The operator's explicit choice supersedes a pending low-battery
+            // re-arm (ADR 022).
+            if case .success = result { LowBatteryLatchStore().clearPendingRearm() }
             self.lidError = Self.lidFailureHint(result)
             self.refreshLidCache()
         }
@@ -439,6 +465,128 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func quit(_ sender: Any?) {
         NSApplication.shared.terminate(nil)
+    }
+
+    // MARK: — Low-battery guard (ADR 022)
+
+    private func startLowBatteryGuard() {
+        if Bundle.main.bundleIdentifier != nil {
+            UNUserNotificationCenter.current()
+                .requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        }
+        // First tick shortly after launch (a Mac that boots on a low battery
+        // must not wait a full interval), then every 30 s.
+        Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.runLowBatteryTick() }
+        }
+        guardTimer = Timer.scheduledTimer(withTimeInterval: Self.lowBatteryTickInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.runLowBatteryTick() }
+        }
+    }
+
+    private func runLowBatteryTick() {
+        guard LowBatteryGuardSettings.isEnabled() else {
+            if batteryAlert { batteryAlert = false; updateStatusIcon() }
+            return
+        }
+        // Never race an operator toggle on the same flag/record.
+        guard !busy, !guardTickInFlight else { return }
+        guardTickInFlight = true
+        let bootID = clock.bootID
+        guardQueue.async { [weak self, bootID] in
+            var service = LowBatteryGuardService(
+                lidService: LidMutationService(
+                    bootID: bootID,
+                    mutator: LidAssertions.live(),
+                    store: OwnedLidAssertion(currentBootID: bootID),
+                    priorProvider: { PowerReadback.lidStayAwake() }),
+                latchStore: LowBatteryLatchStore(),
+                batteryProvider: { BatteryReadback.read() },
+                sleeper: PMSetSleeper())
+            let outcome = service.tick()
+            DispatchQueue.main.async {
+                self?.handleLowBattery(outcome)
+            }
+        }
+    }
+
+    private func handleLowBattery(_ outcome: LowBatteryGuardService.TickOutcome) {
+        guardTickInFlight = false
+        let e = outcome.evaluation
+        let pct = e.input.chargePercent.map(String.init) ?? "?"
+
+        let alert = (e.decision.level == .low || e.decision.level == .critical)
+            && e.input.lidFlag != false
+        if alert != batteryAlert {
+            batteryAlert = alert
+            updateStatusIcon()
+        }
+        if e.decision.action != .none || outcome.mutation != nil {
+            FileHandle.standardError.write(Data(
+                ("[RunClosed] low-battery: level=\(e.decision.level.rawValue) action=\(e.decision.action.rawValue) "
+                 + "reason=\(e.decision.reason.rawValue) pct=\(pct) min=\(e.input.minutesRemaining.map(String.init) ?? "?") "
+                 + "ownership=\(e.input.ownership.rawValue) mutation=\(outcome.mutation?.rawValue ?? "-") "
+                 + "error=\(outcome.mutationError ?? "-") sleep=\(outcome.sleepAttempted ? String(outcome.sleepRC ?? -1) : "-")\n").utf8))
+        }
+
+        if let mutation = outcome.mutation {
+            switch mutation {
+            case .released:
+                notify(L10n.t("Battery critical: sleeping now"),
+                       L10n.t("%@%% on battery: lid stay-awake turned off and the Mac is going to sleep. It comes back on once charging above 15%%.", pct))
+            case .releaseFailed:
+                notify(L10n.t("Battery critical: plug in now"),
+                       L10n.t("%@%% on battery and lid stay-awake could not be turned off (%@). Sleep was attempted anyway.", pct, outcome.mutationError ?? "-"))
+            case .releaseRefused:
+                notify(L10n.t("Battery critical: plug in now"),
+                       L10n.t("%@%% on battery. The low-battery guard was refused (%@) and the Mac will not sleep by itself.", pct, outcome.mutationError ?? "-"))
+            case .rearmed:
+                notify(L10n.t("Lid stay-awake restored"),
+                       L10n.t("Back on power above 15%: keep awake with lid closed is on again."))
+            case .rearmAlreadyOn, .rearmFailed:
+                break   // logged above; retried on the next tick
+            }
+            if outcome.mutation == .released || outcome.mutation == .rearmed {
+                refreshLidCache()
+            }
+            return
+        }
+
+        guard e.decision.action == .warn else { return }
+        switch e.decision.reason {
+        case .lowBattery:
+            notify(L10n.t("Battery low: lid stay-awake is on"),
+                   L10n.t("%@%% on battery. At 10%%, RunClosed turns lid stay-awake off and puts the Mac to sleep (hibernation keeps every process). Plug in to avoid it.", pct))
+        case .criticalStaleOwnership:
+            notify(L10n.t("Battery critical: plug in now"),
+                   L10n.t("%@%% on battery. Lid stay-awake was turned on before the last restart, so the guard does not own it and will not turn it off. Plug in, or switch \"Keep awake with lid closed\" off then on to re-arm the guard.", pct))
+        case .criticalNotOwned:
+            notify(L10n.t("Battery critical: plug in now"),
+                   L10n.t("%@%% on battery. Lid stay-awake was turned on by another tool, so RunClosed will not turn it off. Plug in, or turn it off yourself.", pct))
+        case .lidFlagUnknown:
+            notify(L10n.t("Battery critical: plug in now"),
+                   L10n.t("%@%% on battery and the lid stay-awake state cannot be read. Plug in now.", pct))
+        default:
+            break
+        }
+    }
+
+    /// User notification, with a stderr trace. Unbundled dev runs (no bundle
+    /// identifier) cannot use UNUserNotificationCenter — beep instead.
+    private func notify(_ title: String, _ body: String) {
+        FileHandle.standardError.write(Data("[RunClosed] notify: \(title) — \(body)\n".utf8))
+        guard Bundle.main.bundleIdentifier != nil else {
+            NSSound.beep()
+            return
+        }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        let request = UNNotificationRequest(
+            identifier: "runclosed.low-battery.\(UUID().uuidString)",
+            content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
     }
 
     // MARK: — Helpers

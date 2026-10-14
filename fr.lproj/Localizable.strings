@@ -12,3 +12,17 @@
 "Change failed (see log)" = "Échec du changement (voir le journal)";
 "Active sessions: none" = "Sessions actives : aucune";
 "Active sessions (%@): %@" = "Sessions actives (%@) : %@";
+
+/* Garde batterie faible (ADR 022) */
+"Battery critical: sleeping now" = "Batterie critique : mise en veille";
+"%@%% on battery: lid stay-awake turned off and the Mac is going to sleep. It comes back on once charging above 15%%." = "%@ %% sur batterie : le maintien éveillé capot fermé est coupé et le Mac se met en veille. Il sera réactivé une fois en charge au-dessus de 15 %%.";
+"Battery critical: plug in now" = "Batterie critique : branchez le chargeur";
+"%@%% on battery and lid stay-awake could not be turned off (%@). Sleep was attempted anyway." = "%@ %% sur batterie et le maintien éveillé n'a pas pu être coupé (%@). La mise en veille a quand même été tentée.";
+"%@%% on battery. The low-battery guard was refused (%@) and the Mac will not sleep by itself." = "%@ %% sur batterie. La garde batterie a été refusée (%@) et le Mac ne se mettra pas en veille tout seul.";
+"Lid stay-awake restored" = "Maintien éveillé rétabli";
+"Back on power above 15%: keep awake with lid closed is on again." = "Sur secteur au-dessus de 15 % : le maintien éveillé capot fermé est réactivé.";
+"Battery low: lid stay-awake is on" = "Batterie faible : maintien éveillé actif";
+"%@%% on battery. At 10%%, RunClosed turns lid stay-awake off and puts the Mac to sleep (hibernation keeps every process). Plug in to avoid it." = "%@ %% sur batterie. À 10 %%, RunClosed coupe le maintien éveillé et met le Mac en veille (l'hibernation conserve tous les processus). Branchez le chargeur pour l'éviter.";
+"%@%% on battery. Lid stay-awake was turned on before the last restart, so the guard does not own it and will not turn it off. Plug in, or switch \"Keep awake with lid closed\" off then on to re-arm the guard." = "%@ %% sur batterie. Le maintien éveillé a été activé avant le dernier redémarrage : la garde n'en est pas propriétaire et ne le coupera pas. Branchez le chargeur, ou basculez « Maintenir éveillé capot fermé » sur off puis on pour réarmer la garde.";
+"%@%% on battery. Lid stay-awake was turned on by another tool, so RunClosed will not turn it off. Plug in, or turn it off yourself." = "%@ %% sur batterie. Le maintien éveillé a été activé par un autre outil : RunClosed ne le coupera pas. Branchez le chargeur, ou coupez-le vous-même.";
+"%@%% on battery and the lid stay-awake state cannot be read. Plug in now." = "%@ %% sur batterie et l'état du maintien éveillé est illisible. Branchez le chargeur.";

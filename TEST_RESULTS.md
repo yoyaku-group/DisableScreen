@@ -436,3 +436,52 @@ $ arch -arm64 swift test  → 5 bundles verts, 0 failure (exit 0)
 ```
 
 Sonde « règle sudoers présente ? » évaluée puis **rejetée** : `sudo -n -l <cmd>` sort 0 même sans NOPASSWD (mesuré : `sudo -n -l /usr/bin/true` → rc 0) — elle ne discrimine pas, et un probe fragile aurait remplacé une affirmation périmée par une affirmation non fiable (ADR 020).
+
+## ADR 022 — garde batterie faible (2026-10-15)
+
+Aucune mutation réelle : ni `pmset -a disablesleep`, ni `pmset sleepnow` n'ont été exécutés. Le chemin d'action est couvert par des faux backends (`FakeLid` + `FakeSleeper`), avec des relevés injectés et des stores en fichiers temporaires.
+
+```
+$ arch -arm64 swift test            # Swift 6.3.3, macOS 26.6, M5 Max
+RunClosedPersistenceTests.xctest   22 tests, 0 failures   (+3 LowBatteryLatchStoreTests)
+RunClosedMacSystemTests.xctest     62 tests, 0 failures   (+12 BatteryReadbackTests, +12 LowBatteryGuardServiceTests)
+RunClosedHelperSupportTests.xctest 13 tests, 0 failures
+RunClosedCoreTests.xctest          57 tests, 0 failures   (+27 LowBatteryPolicyTests)
+RunClosedAppTests.xctest           11 tests, 0 failures
+→ 165/165 (111 avant ADR 022), 0 warning
+```
+
+Contrats verrouillés par les tests :
+- Seuils : 20 % → `warn`, 21 % → rien, 10 % → `releaseAndSleep`, 11 % → `warn`, 15 % + 10 min → critique, 15 % + 11 min → `warn`, 80 % + 3 min → rien (estimation bruitée).
+- Secteur à 1/5/10/20 % → jamais d'action ; source inconnue ou charge inconnue → jamais d'action.
+- B2 : record périmé ou flag posé par un autre outil → `warn`, 0 appel au backend, 0 veille. Flag illisible → `warn` (B1). Flag OFF → rien.
+- Anti-flap : alerte unique par épisode, réinitialisée seulement sur secteur > 20 %. Après relâchement, aucune seconde veille.
+- Hystérésis : secteur à 12 % et 15 % → maintenu ; 16 % → `rearm` vérifié, propriété reprise. Sur batterie à 90 % → pas de réarmement. Échec du réarmement → verrou conservé pour le tick suivant. Commande opérateur → dette effacée.
+- `evaluate()` (chemin de `status`) : 0 mutation, 0 écriture de verrou. Échec backend sur un flag possédé → veille tentée, verrou de relâchement non posé.
+- Parseur IOKit : batterie, secteur, `Time to Empty` à -1/0/absent → inconnu, capacité brute en mAh → %, `NSNumber`, max à 0, état « Off Line » → inconnu (jamais « secteur »), desktop sans batterie, relevé live sans crash.
+
+CLI (binaire debug puis CLI embarquée dans le bundle assemblé), en lecture seule :
+```
+$ runclosed low-battery status
+  battery {onBattery:false, chargePercent:14, isCharging:true, minutesRemaining:null}
+  input {lidFlag:"off", ownership:"notOwned"} → decision {action:"none", level:"ac", reason:"onAC"}
+  guardEnabled:true ; aucun fichier low_battery_guard.json créé (status n'écrit rien)
+$ runclosed low-battery simulate true 9 8                         → releaseAndSleep / criticalOwned
+$ runclosed low-battery simulate battery 9 8 --ownership stale    → warn / criticalStaleOwnership
+$ runclosed low-battery simulate battery 9 8 --ownership not-owned→ warn / criticalNotOwned
+$ runclosed low-battery simulate false 9 8                        → none / onAC
+$ runclosed low-battery simulate true 20 unknown                  → warn / lowBattery
+$ runclosed low-battery simulate ac 16 0 --lid off --released     → rearm / rearmAfterRecovery
+$ runclosed low-battery simulate ac 15 0 --lid off --released     → none / rearmHeldBelowThreshold
+$ runclosed low-battery simulate true 80 3                        → none / chargeOK
+$ runclosed low-battery simulate true 15 10                       → releaseAndSleep / criticalOwned
+$ runclosed low-battery simulate true 5 2 --lid unknown           → warn / lidFlagUnknown
+$ runclosed low-battery simulate maybe 9 8                        → usage, exit 64
+$ scripts/hardware/low-battery-qualification.sh                   → BLOCKED_HARDWARE, exit 3 (sans opt-in)
+```
+
+NB : dans le plan de mission, l'exemple `simulate false 9 8` suppose un premier argument « sur secteur ? ». Le contrat retenu est `<onBattery>`, donc l'incident se rejoue avec `simulate true 9 8` (ou `battery 9 8`). Avec `false`, la garde ne fait rien sur secteur, ce qui est le comportement voulu.
+
+Bundle : `scripts/build-runclosed-app.sh` (ad-hoc, `OUT_DIR` hors du dépôt), `codesign --verify --strict` OK, 3 binaires et les deux lproj présents. Défaut trouvé sur le bundle : `UserDefaults(suiteName: "com.benjaminbelaga.RunClosed")` lancé depuis le bundle de même identifiant renvoie « does not make sense and will not work ». Corrigé : le domaine standard est lu quand la suite est le bundle principal.
+
+État machine observé au début de la mission (lecture seule, 2026-10-15 ~00:45) : `SleepDisabled 1`, `owned_lid.json` d'un boot précédent, donc `recoveryPending: true`. Avec ADR 022, cet état donne `criticalStaleOwnership`, soit une alerte sans relâchement (décision ouverte, voir ADR 022). Vers 00:58, sur secteur 100 W : 10 % avec `InstantAmperage` -194 mA, soit une décharge sur secteur. Ce cas relève de la sonde Guardian `ac-draining`, pas de cette garde.
