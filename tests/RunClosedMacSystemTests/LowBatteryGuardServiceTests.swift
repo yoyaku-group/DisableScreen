@@ -77,7 +77,8 @@ final class LowBatteryGuardServiceTests: XCTestCase {
         let lidService = LidMutationService(bootID: "A", mutator: lid, store: lidStore,
                                             priorProvider: { flagBox.value })
         let service = LowBatteryGuardService(lidService: lidService, latchStore: latchStore,
-                                             batteryProvider: { batteryBox.state }, sleeper: sleeper)
+                                             batteryProvider: { batteryBox.state }, sleeper: sleeper,
+                                             lock: LidWriteLock(url: dir.appendingPathComponent("lid.lock")))
         return Rig(service: service, lid: lid, sleeper: sleeper, flag: flagBox,
                    battery: batteryBox, lidStore: lidStore, latchStore: latchStore)
     }
@@ -114,6 +115,24 @@ final class LowBatteryGuardServiceTests: XCTestCase {
         XCTAssertEqual(out.mutationError, "sudo: a password is required")
         XCTAssertEqual(rig.sleeper.count, 1, "best-effort sleep while we own the flag")
         XCTAssertFalse(rig.latchStore.load().latch.releasedByGuard, "no verified release, no latch")
+    }
+
+    func testPersistentReleaseFailureSleepsOnlyOncePerEpisode() {
+        // Review finding: a sudoers rule removed after the flag was set must
+        // not turn into a sleep + notification loop every 30 s.
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 6))
+        rig.lid.failWrites = true
+        let first = rig.service.tick()
+        let second = rig.service.tick()
+        XCTAssertEqual(rig.lid.calls, [false, false], "the release itself is retried")
+        XCTAssertEqual(rig.sleeper.count, 1)
+        XCTAssertTrue(first.sleepAttempted)
+        XCTAssertFalse(second.sleepAttempted)
+        XCTAssertEqual(second.mutation, .releaseFailed)
+        // Back on AC above the warn band: a new episode may try again.
+        rig.battery.state = Self.reading(false, 30)
+        rig.service.tick()
+        XCTAssertFalse(rig.latchStore.load().latch.failedReleaseSleepTried)
     }
 
     // MARK: — Not owned: warn, never mutate (B2)

@@ -17,6 +17,9 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   15 %. The guard never acts on AC, and it never touches a flag it did not set
   on the current boot: it sends a critical notification instead. Kill switch:
   `defaults write com.benjaminbelaga.RunClosed lowBatteryGuardEnabled -bool false`.
+  Guard ticks, the popup switch and `runclosed lid-stay-awake on|off` are
+  serialised by a cross-process file lock, so an operator command always wins
+  over an automatic re-arm.
 - `runclosed low-battery status` (live battery readback + guard decision,
   read-only) and `runclosed low-battery simulate <onBattery> <percent>
   <minutes>` (pure dry-run decision, never mutates).

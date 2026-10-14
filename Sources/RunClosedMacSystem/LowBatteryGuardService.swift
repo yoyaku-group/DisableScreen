@@ -77,17 +77,21 @@ public struct LowBatteryGuardService {
     public let latchStore: LowBatteryLatchStore
     public let batteryProvider: @Sendable () -> BatteryState
     public var sleeper: any SystemSleeper
+    /// Serialises the whole tick with the operator paths (popup, CLI).
+    public let lock: LidWriteLock
 
     public init(
         lidService: LidMutationService,
         latchStore: LowBatteryLatchStore,
         batteryProvider: @escaping @Sendable () -> BatteryState,
-        sleeper: any SystemSleeper
+        sleeper: any SystemSleeper,
+        lock: LidWriteLock = LidWriteLock()
     ) {
         self.lidService = lidService
         self.latchStore = latchStore
         self.batteryProvider = batteryProvider
         self.sleeper = sleeper
+        self.lock = lock
     }
 
     public struct Evaluation: Equatable, Sendable {
@@ -143,8 +147,15 @@ public struct LowBatteryGuardService {
     }
 
     /// One guard tick (the menu-bar app calls it every 30 s, off-main).
+    /// Read → decide → act → save runs entirely under `LidWriteLock`, so an
+    /// operator command can neither interleave with a mutation in flight nor
+    /// have its latch change overwritten by a stale save.
     @discardableResult
     public mutating func tick() -> TickOutcome {
+        return lock.withLock { lockedTick() }
+    }
+
+    private mutating func lockedTick() -> TickOutcome {
         let evaluation = evaluate()
         var outcome = TickOutcome(evaluation: evaluation)
         var record = latchStore.load()
@@ -167,13 +178,13 @@ public struct LowBatteryGuardService {
                 // Not refused, not verified: treat as a backend failure.
                 outcome.mutation = .releaseFailed
                 outcome.mutationError = op.error ?? "release not verified (state=\(op.state.rawValue))"
-                attemptSleep(&outcome)
+                attemptSleepOnceAfterFailure(&outcome, record: &record)
             case .failure(.backendFailed(let message)):
                 // We own the flag and the battery is critical: still try
                 // the sleep (best effort, it is not a persistent mutation).
                 outcome.mutation = .releaseFailed
                 outcome.mutationError = message
-                attemptSleep(&outcome)
+                attemptSleepOnceAfterFailure(&outcome, record: &record)
             case .failure(let error):
                 // B1/B2/no-op refusal (e.g. ownership changed between the
                 // evaluation and the write): no sleep, the caller warns.
@@ -206,6 +217,16 @@ public struct LowBatteryGuardService {
         return outcome
     }
 
+    /// A persistently failing release (e.g. sudoers rule removed) is retried
+    /// every tick, but the best-effort sleep + its notification happen once
+    /// per discharge episode — never a sleep/notify loop every 30 s.
+    private func attemptSleepOnceAfterFailure(_ outcome: inout TickOutcome,
+                                              record: inout LowBatteryLatchStore.Record) {
+        guard !record.latch.failedReleaseSleepTried else { return }
+        record.latch.failedReleaseSleepTried = true
+        attemptSleep(&outcome)
+    }
+
     private func attemptSleep(_ outcome: inout TickOutcome) {
         let r = sleeper.sleepNow()
         outcome.sleepAttempted = true
@@ -217,6 +238,7 @@ public struct LowBatteryGuardService {
 extension LowBatteryLatchStore {
     /// An explicit operator lid command supersedes a pending guard re-arm:
     /// the human's choice wins, the guard must not flip the flag back later.
+    /// Callers run it inside the same `LidWriteLock` section as their write.
     public func clearPendingRearm() {
         var rec = load()
         guard rec.latch.releasedByGuard else { return }

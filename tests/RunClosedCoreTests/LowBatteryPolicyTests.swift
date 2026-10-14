@@ -176,6 +176,9 @@ final class LowBatteryPolicyTests: XCTestCase {
         let (_, reset) = step(input(battery: false, pct: 21), warned)
         XCTAssertFalse(reset.warnedLow)
         XCTAssertFalse(reset.warnedCritical)
+        let failed = P.Latch(failedReleaseSleepTried: true)
+        XCTAssertTrue(step(input(battery: false, pct: 18), failed).1.failedReleaseSleepTried)
+        XCTAssertFalse(step(input(battery: false, pct: 21), failed).1.failedReleaseSleepTried)
         // On battery the latch never resets.
         let (_, onBattery) = step(input(battery: true, pct: 60), warned)
         XCTAssertTrue(onBattery.warnedLow)
