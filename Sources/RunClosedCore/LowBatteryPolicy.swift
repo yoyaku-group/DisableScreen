@@ -76,12 +76,31 @@ public enum LowBatteryPolicy {
         public var warnedCritical: Bool
         /// The guard released the flag and still owes the re-arm.
         public var releasedByGuard: Bool
+        /// A release failed on an owned flag and the best-effort sleep was
+        /// already tried this episode: later ticks keep retrying the release
+        /// but do not re-run `sleepnow` / re-notify every 30 s.
+        public var failedReleaseSleepTried: Bool
 
         public init(warnedLow: Bool = false, warnedCritical: Bool = false,
-                    releasedByGuard: Bool = false) {
+                    releasedByGuard: Bool = false, failedReleaseSleepTried: Bool = false) {
             self.warnedLow = warnedLow
             self.warnedCritical = warnedCritical
             self.releasedByGuard = releasedByGuard
+            self.failedReleaseSleepTried = failedReleaseSleepTried
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case warnedLow, warnedCritical, releasedByGuard, failedReleaseSleepTried
+        }
+
+        /// Tolerant decoding: a key added by a later version is optional, so
+        /// an older file never decodes as "corrupt" and loses `releasedByGuard`.
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            warnedLow = try c.decodeIfPresent(Bool.self, forKey: .warnedLow) ?? false
+            warnedCritical = try c.decodeIfPresent(Bool.self, forKey: .warnedCritical) ?? false
+            releasedByGuard = try c.decodeIfPresent(Bool.self, forKey: .releasedByGuard) ?? false
+            failedReleaseSleepTried = try c.decodeIfPresent(Bool.self, forKey: .failedReleaseSleepTried) ?? false
         }
 
         /// Write-from-outcome (B3): set only after a readback-verified release.
@@ -189,6 +208,7 @@ public enum LowBatteryPolicy {
             if let pct = input.chargePercent, pct > warnPercent {
                 next.warnedLow = false
                 next.warnedCritical = false
+                next.failedReleaseSleepTried = false
             }
             if latch.releasedByGuard, !next.releasedByGuard {
                 return (Decision(action: .none, reason: .rearmObservedOn, level: lvl), next)

@@ -427,11 +427,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // The click IS the operator's decision (ADR 021): a stale
             // cross-boot record or a flag set by another tool must not
             // leave the switch stuck ON.
-            let result = service.setEnabled(target, initiator: .operatorCommand)
+            // Same lock as the low-battery guard tick (ADR 022): the click
+            // waits for a guard mutation in flight instead of racing it, and
+            // its latch clear cannot be overwritten by a stale tick save.
+            let result = LidWriteLock().withLock { () -> Result<OperationResult, LidMutationError> in
+                let r = service.setEnabled(target, initiator: .operatorCommand)
+                // The operator's explicit choice supersedes a pending
+                // low-battery re-arm.
+                if case .success = r { LowBatteryLatchStore().clearPendingRearm() }
+                return r
+            }
             self.log(result: result, what: "lid -> \(target)")
-            // The operator's explicit choice supersedes a pending low-battery
-            // re-arm (ADR 022).
-            if case .success = result { LowBatteryLatchStore().clearPendingRearm() }
             self.lidError = Self.lidFailureHint(result)
             self.refreshLidCache()
         }
@@ -534,7 +540,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .released:
                 notify(L10n.t("Battery critical: sleeping now"),
                        L10n.t("%@%% on battery: lid stay-awake turned off and the Mac is going to sleep. It comes back on once charging above 15%%.", pct))
-            case .releaseFailed:
+            case .releaseFailed where outcome.sleepAttempted:
                 notify(L10n.t("Battery critical: plug in now"),
                        L10n.t("%@%% on battery and lid stay-awake could not be turned off (%@). Sleep was attempted anyway.", pct, outcome.mutationError ?? "-"))
             case .releaseRefused:
@@ -543,8 +549,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .rearmed:
                 notify(L10n.t("Lid stay-awake restored"),
                        L10n.t("Back on power above 15%: keep awake with lid closed is on again."))
-            case .rearmAlreadyOn, .rearmFailed:
-                break   // logged above; retried on the next tick
+            case .releaseFailed, .rearmAlreadyOn, .rearmFailed:
+                break   // logged above; retried on the next tick (notified once)
             }
             if outcome.mutation == .released || outcome.mutation == .rearmed {
                 refreshLidCache()

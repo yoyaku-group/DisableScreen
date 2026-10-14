@@ -251,10 +251,14 @@ func cmdLidStayAwake(_ rest: [String]) -> Int32 {
         return 0
     case "on", "off":
         var svc = makeLidService()
-        let r = svc.setEnabled(sub == "on", initiator: initiator)
-        // An explicit lid command supersedes a pending low-battery re-arm
-        // (ADR 022): the guard must not flip the flag back afterwards.
-        if case .success = r { LowBatteryLatchStore().clearPendingRearm() }
+        // Serialised with the app's low-battery guard tick (ADR 022). An
+        // explicit lid command supersedes a pending low-battery re-arm: the
+        // guard must not flip the flag back afterwards.
+        let r = LidWriteLock().withLock { () -> Result<OperationResult, LidMutationError> in
+            let res = svc.setEnabled(sub == "on", initiator: initiator)
+            if case .success = res { LowBatteryLatchStore().clearPendingRearm() }
+            return res
+        }
         return renderLidResult(r, requestedAction: sub)
     default:
         FileHandler.err("usage: runclosed lid-stay-awake <on|off [--operator]|status>")

@@ -449,6 +449,10 @@ RunClosedHelperSupportTests.xctest 13 tests, 0 failures
 RunClosedCoreTests.xctest          57 tests, 0 failures   (+27 LowBatteryPolicyTests)
 RunClosedAppTests.xctest           11 tests, 0 failures
 → 165/165 (111 avant ADR 022), 0 warning
+
+# après corrections de la revue ai-review-gate (verrou LidWriteLock, sleep unique sur échec, décodage tolérant)
+RunClosedPersistenceTests 24 · RunClosedMacSystemTests 63 · HelperSupport 13 · Core 57 · App 11
+→ 168/168, 0 warning
 ```
 
 Contrats verrouillés par les tests :
@@ -457,6 +461,7 @@ Contrats verrouillés par les tests :
 - B2 : record périmé ou flag posé par un autre outil → `warn`, 0 appel au backend, 0 veille. Flag illisible → `warn` (B1). Flag OFF → rien.
 - Anti-flap : alerte unique par épisode, réinitialisée seulement sur secteur > 20 %. Après relâchement, aucune seconde veille.
 - Hystérésis : secteur à 12 % et 15 % → maintenu ; 16 % → `rearm` vérifié, propriété reprise. Sur batterie à 90 % → pas de réarmement. Échec du réarmement → verrou conservé pour le tick suivant. Commande opérateur → dette effacée.
+- Revue : un relâchement qui échoue en boucle ne relance la veille qu'une fois par épisode, réinitialisé sur secteur > 20 %. Un fichier de verrou antérieur, sans la nouvelle clé, garde `releasedByGuard`. `LidWriteLock` : 8 sections concurrentes, au plus une à l'intérieur.
 - `evaluate()` (chemin de `status`) : 0 mutation, 0 écriture de verrou. Échec backend sur un flag possédé → veille tentée, verrou de relâchement non posé.
 - Parseur IOKit : batterie, secteur, `Time to Empty` à -1/0/absent → inconnu, capacité brute en mAh → %, `NSNumber`, max à 0, état « Off Line » → inconnu (jamais « secteur »), desktop sans batterie, relevé live sans crash.
 
