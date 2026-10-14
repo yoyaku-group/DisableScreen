@@ -257,6 +257,16 @@ final class LowBatteryGuardServiceTests: XCTestCase {
         XCTAssertTrue(rig.lidStore.load().ownedEnabled, "re-armed flag is owned on this boot again")
     }
 
+    func testNoRearmOnADrainingCharger() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 9))
+        rig.service.tick()
+        rig.battery.state = BatteryState(onBattery: false, chargePercent: 30, minutesRemaining: nil,
+                                         isCharging: true, batteryPresent: true, currentMilliamps: -194)
+        let out = rig.service.tick()
+        XCTAssertEqual(out.evaluation.decision.reason, .rearmHeldACDraining)
+        XCTAssertEqual(rig.lid.calls, [false])
+    }
+
     func testRearmFailureKeepsLatchForRetry() {
         var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 8))
         rig.service.tick()

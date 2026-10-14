@@ -142,7 +142,9 @@ public struct LowBatteryGuardService {
             chargePercent: battery.chargePercent,
             minutesRemaining: battery.minutesRemaining,
             lidFlag: flag,
-            ownership: ownership)
+            ownership: ownership,
+            acDraining: LowBatteryPolicy.Input.acDraining(
+                onBattery: battery.onBattery, currentMilliamps: battery.currentMilliamps))
         let latch = latchStore.load().latch
         let (decision, next) = LowBatteryPolicy.step(input, latch: latch)
         return Evaluation(battery: battery, input: input, decision: decision,

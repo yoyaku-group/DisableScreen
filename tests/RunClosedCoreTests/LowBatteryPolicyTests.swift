@@ -209,6 +209,27 @@ final class LowBatteryPolicyTests: XCTestCase {
         XCTAssertTrue(l.releasedByGuard, "cleared only from the verified outcome")
     }
 
+    func testRearmHeldWhileACIsDraining() {
+        // Review pass 4: a 100 W adapter too weak for the fleet (-194 mA on
+        // AC, 2026-10-15) must not get disablesleep re-enabled.
+        var i = input(battery: false, pct: 40, lid: false)
+        i.acDraining = true
+        let (d, l) = step(i, P.Latch(releasedByGuard: true))
+        XCTAssertEqual(d.action, .none)
+        XCTAssertEqual(d.reason, .rearmHeldACDraining)
+        XCTAssertTrue(l.releasedByGuard)
+        i.acDraining = false
+        XCTAssertEqual(step(i, P.Latch(releasedByGuard: true)).0.action, .rearm)
+    }
+
+    func testACDrainingHelper() {
+        XCTAssertEqual(P.Input.acDraining(onBattery: false, currentMilliamps: -194), true)
+        XCTAssertEqual(P.Input.acDraining(onBattery: false, currentMilliamps: -20), false, "noise margin")
+        XCTAssertEqual(P.Input.acDraining(onBattery: false, currentMilliamps: 3000), false)
+        XCTAssertNil(P.Input.acDraining(onBattery: true, currentMilliamps: -2000))
+        XCTAssertNil(P.Input.acDraining(onBattery: false, currentMilliamps: nil))
+    }
+
     func testNoRearmOnBatteryEvenWhenCharged() {
         let (d, _) = step(input(battery: true, pct: 90, lid: false), P.Latch(releasedByGuard: true))
         XCTAssertEqual(d.action, .none)

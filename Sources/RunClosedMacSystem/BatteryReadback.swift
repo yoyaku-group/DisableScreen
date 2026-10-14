@@ -11,16 +11,19 @@ public struct BatteryState: Equatable, Sendable {
     /// Minutes to empty; `nil` while macOS is still estimating (-1) or on AC.
     public var minutesRemaining: Int?
     public var isCharging: Bool?
+    /// Battery current in mA (negative = discharging), `nil` if not reported.
+    public var currentMilliamps: Int?
     /// Whether an internal battery was found at all (desktop Macs: false).
     public var batteryPresent: Bool
 
     public init(onBattery: Bool?, chargePercent: Int?, minutesRemaining: Int?,
-                isCharging: Bool?, batteryPresent: Bool) {
+                isCharging: Bool?, batteryPresent: Bool, currentMilliamps: Int? = nil) {
         self.onBattery = onBattery
         self.chargePercent = chargePercent
         self.minutesRemaining = minutesRemaining
         self.isCharging = isCharging
         self.batteryPresent = batteryPresent
+        self.currentMilliamps = currentMilliamps
     }
 
     public static let unknown = BatteryState(
@@ -64,6 +67,7 @@ public enum BatteryReadback {
     static let maxCapacityKey = "Max Capacity"          // kIOPSMaxCapacityKey
     static let timeToEmptyKey = "Time to Empty"         // kIOPSTimeToEmptyKey
     static let isChargingKey = "Is Charging"            // kIOPSIsChargingKey
+    static let currentKey = "Current"                   // kIOPSCurrentKey (mA, < 0 discharging)
 
     /// Pure parser — unit-tested with injected dictionaries.
     ///
@@ -102,7 +106,8 @@ public enum BatteryReadback {
             chargePercent: percent,
             minutesRemaining: minutes,
             isCharging: desc[isChargingKey] as? Bool,
-            batteryPresent: true)
+            batteryPresent: true,
+            currentMilliamps: intValue(desc[currentKey]))
     }
 
     static func onBattery(fromState state: String?) -> Bool? {

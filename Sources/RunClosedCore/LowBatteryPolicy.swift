@@ -24,6 +24,10 @@ public enum LowBatteryPolicy {
     /// Hysteresis: a flag the guard released is re-enabled only on AC AND
     /// strictly above this charge.
     public static let rearmPercent = 15
+    /// Battery current (mA) below which "on AC" still means draining: the
+    /// adapter is too weak for the load (2026-10-14/15: 100 W, -194 mA).
+    /// A small margin ignores sensor noise around 0 when charging is paused.
+    public static let acDrainingMilliamps = -50
 
     // MARK: — Inputs
 
@@ -58,14 +62,25 @@ public enum LowBatteryPolicy {
         /// Observed `disablesleep` (`pmset -g`); `nil` = unknown (B1).
         public var lidFlag: Bool?
         public var ownership: LidOwnership
+        /// On AC but the battery still discharges (weak adapter). `nil` =
+        /// current not reported. Only gates the re-arm; AC never releases.
+        public var acDraining: Bool?
 
         public init(onBattery: Bool?, chargePercent: Int?, minutesRemaining: Int?,
-                    lidFlag: Bool?, ownership: LidOwnership) {
+                    lidFlag: Bool?, ownership: LidOwnership, acDraining: Bool? = nil) {
             self.onBattery = onBattery
             self.chargePercent = chargePercent
             self.minutesRemaining = minutesRemaining
             self.lidFlag = lidFlag
             self.ownership = ownership
+            self.acDraining = acDraining
+        }
+
+        /// Pure helper: draining on AC iff on AC with a current below the
+        /// margin; unknown when either reading is missing.
+        public static func acDraining(onBattery: Bool?, currentMilliamps: Int?) -> Bool? {
+            guard onBattery == false, let ma = currentMilliamps else { return nil }
+            return ma < LowBatteryPolicy.acDrainingMilliamps
         }
     }
 
@@ -139,6 +154,9 @@ public enum LowBatteryPolicy {
         case powerSourceUnknown
         case onAC
         case rearmHeldBelowThreshold
+        /// On AC above 15% but the battery still drains: re-enabling the
+        /// flag would recreate the drain-to-zero incident.
+        case rearmHeldACDraining
         case rearmAfterRecovery
         case rearmObservedOn
         case chargeOK
@@ -219,6 +237,9 @@ public enum LowBatteryPolicy {
             if next.releasedByGuard {
                 guard let pct = input.chargePercent, pct > rearmPercent else {
                     return (Decision(action: .none, reason: .rearmHeldBelowThreshold, level: lvl), next)
+                }
+                if input.acDraining == true {
+                    return (Decision(action: .none, reason: .rearmHeldACDraining, level: lvl), next)
                 }
                 return (Decision(action: .rearm, reason: .rearmAfterRecovery, level: lvl), next)
             }
