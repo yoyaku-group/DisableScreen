@@ -25,6 +25,18 @@ public struct LidWriteLock: Sendable {
         self.url = url
     }
 
+    /// Non-blocking variant for the main thread (popup click): `nil` when
+    /// another writer holds the lock — the caller shows "busy, retry" instead
+    /// of freezing the menu-bar UI behind a guard tick.
+    public func tryWithLock<T>(_ body: () throws -> T) rethrows -> T? {
+        let fd = open(url.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { return try body() }
+        defer { close(fd) }
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { return nil }
+        defer { flock(fd, LOCK_UN) }
+        return try body()
+    }
+
     public func withLock<T>(_ body: () throws -> T) rethrows -> T {
         let fd = open(url.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
         guard fd >= 0 else { return try body() }

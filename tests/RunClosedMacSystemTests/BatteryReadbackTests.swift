@@ -43,6 +43,14 @@ final class BatteryReadbackTests: XCTestCase {
         XCTAssertEqual(s.isCharging, true)
     }
 
+    func testCurrentIsParsed() {
+        var d = battery(state: "AC Power", current: 10, timeToEmpty: 0, charging: true)
+        d["Current"] = -194
+        let s = BatteryReadback.parse(providingType: "AC Power", sources: [d])
+        XCTAssertEqual(s.currentMilliamps, -194)
+        XCTAssertNil(BatteryReadback.parse(providingType: "AC Power", sources: [battery()]).currentMilliamps)
+    }
+
     func testEstimatingTimeToEmptyIsUnknown() {
         let s = BatteryReadback.parse(providingType: "Battery Power",
                                       sources: [battery(timeToEmpty: -1)])

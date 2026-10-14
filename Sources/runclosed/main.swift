@@ -256,7 +256,7 @@ func cmdLidStayAwake(_ rest: [String]) -> Int32 {
         // guard must not flip the flag back afterwards.
         let r = LidWriteLock().withLock { () -> Result<OperationResult, LidMutationError> in
             let res = svc.setEnabled(sub == "on", initiator: initiator)
-            if case .success = res { LowBatteryLatchStore().clearPendingRearm() }
+            LowBatteryLatchStore().operatorCommandFinished(res)
             return res
         }
         return renderLidResult(r, requestedAction: sub)
@@ -308,13 +308,15 @@ func batteryJSON(_ b: BatteryState) -> [String: Any] {
         "chargePercent": b.chargePercent as Any? ?? NSNull(),
         "minutesRemaining": b.minutesRemaining as Any? ?? NSNull(),
         "isCharging": b.isCharging as Any? ?? NSNull(),
+        "currentMilliamps": b.currentMilliamps as Any? ?? NSNull(),
         "batteryPresent": b.batteryPresent,
     ]
 }
 
 func latchJSON(_ l: LowBatteryPolicy.Latch) -> [String: Any] {
     ["warnedLow": l.warnedLow, "warnedCritical": l.warnedCritical,
-     "releasedByGuard": l.releasedByGuard]
+     "releasedByGuard": l.releasedByGuard,
+     "failedReleaseSleepTried": l.failedReleaseSleepTried]
 }
 
 func decisionJSON(_ d: LowBatteryPolicy.Decision) -> [String: Any] {
@@ -328,6 +330,7 @@ func inputJSON(_ i: LowBatteryPolicy.Input) -> [String: Any] {
         "minutesRemaining": i.minutesRemaining as Any? ?? NSNull(),
         "lidFlag": i.lidFlag.map { $0 ? "on" : "off" } ?? "unknown",
         "ownership": i.ownership.rawValue,
+        "acDraining": i.acDraining as Any? ?? NSNull(),
     ]
 }
 
@@ -343,7 +346,7 @@ func lowBatteryThresholdsJSON() -> [String: Any] {
 let lowBatteryUsage = """
 usage: runclosed low-battery status
        runclosed low-battery simulate <onBattery:true|false|battery|ac> <percent> <minutes|unknown>
-                 [--lid on|off|unknown] [--ownership owned|stale|not-owned] [--released]
+                 [--lid on|off|unknown] [--ownership owned|stale|not-owned] [--released] [--ac-draining]
 """
 
 func parseOnBattery(_ s: String) -> Bool? {
@@ -402,6 +405,7 @@ func cmdLowBattery(_ rest: [String]) -> Int32 {
         var lidFlag: Bool? = true
         var ownership: LowBatteryPolicy.LidOwnership = .ownedThisBoot
         var latch = LowBatteryPolicy.Latch()
+        var acDraining: Bool? = nil
         var i = 3
         while i < args.count {
             switch args[i] {
@@ -425,6 +429,8 @@ func cmdLowBattery(_ rest: [String]) -> Int32 {
                 }
             case "--released":
                 latch.releasedByGuard = true
+            case "--ac-draining":
+                acDraining = true
             default:
                 FileHandler.err(lowBatteryUsage)
                 return 64
@@ -433,7 +439,7 @@ func cmdLowBattery(_ rest: [String]) -> Int32 {
         }
         let input = LowBatteryPolicy.Input(
             onBattery: onBattery, chargePercent: percent, minutesRemaining: minutes,
-            lidFlag: lidFlag, ownership: ownership)
+            lidFlag: lidFlag, ownership: ownership, acDraining: acDraining)
         let (decision, next) = LowBatteryPolicy.step(input, latch: latch)
         emitJSON([
             "schemaVersion": kSchemaVersion,

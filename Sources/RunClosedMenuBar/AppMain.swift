@@ -430,12 +430,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Same lock as the low-battery guard tick (ADR 022): the click
             // waits for a guard mutation in flight instead of racing it, and
             // its latch clear cannot be overwritten by a stale tick save.
-            let result = LidWriteLock().withLock { () -> Result<OperationResult, LidMutationError> in
+            // Non-blocking on main: if a guard tick (or the CLI) holds the
+            // lock, say "busy" instead of freezing the menu bar.
+            guard let result = LidWriteLock().tryWithLock({ () -> Result<OperationResult, LidMutationError> in
                 let r = service.setEnabled(target, initiator: .operatorCommand)
                 // The operator's explicit choice supersedes a pending
                 // low-battery re-arm.
-                if case .success = r { LowBatteryLatchStore().clearPendingRearm() }
+                LowBatteryLatchStore().operatorCommandFinished(r)
                 return r
+            }) else {
+                self.lidError = L10n.t("Busy, try again")
+                self.refreshLidCache()
+                return
             }
             self.log(result: result, what: "lid -> \(target)")
             self.lidError = Self.lidFailureHint(result)
@@ -536,11 +542,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if let mutation = outcome.mutation {
+            if outcome.mutation == .released || outcome.mutation == .rearmed {
+                refreshLidCache()
+            }
+            // Failures notify once per discharge episode (service latch).
+            guard outcome.shouldNotify else { return }
             switch mutation {
             case .released:
                 notify(L10n.t("Battery critical: sleeping now"),
                        L10n.t("%@%% on battery: lid stay-awake turned off and the Mac is going to sleep. It comes back on once charging above 15%%.", pct))
-            case .releaseFailed where outcome.sleepAttempted:
+            case .releaseFailed:
                 notify(L10n.t("Battery critical: plug in now"),
                        L10n.t("%@%% on battery and lid stay-awake could not be turned off (%@). Sleep was attempted anyway.", pct, outcome.mutationError ?? "-"))
             case .releaseRefused:
@@ -549,17 +560,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .rearmed:
                 notify(L10n.t("Lid stay-awake restored"),
                        L10n.t("Back on power above 15%: keep awake with lid closed is on again."))
-            case .releaseFailed, .rearmAlreadyOn, .rearmFailed:
-                break   // logged above; retried on the next tick (notified once)
-            }
-            if outcome.mutation == .released || outcome.mutation == .rearmed {
-                refreshLidCache()
+            case .rearmAlreadyOn, .rearmFailed:
+                break   // logged above; retried on the next tick
             }
             return
         }
 
         guard e.decision.action == .warn else { return }
         switch e.decision.reason {
+        case .lowBatteryUnprotected:
+            notify(L10n.t("Battery low: lid stay-awake is NOT protected"),
+                   L10n.t("%@%% on battery. Lid stay-awake is on but RunClosed does not own it (turned on before the last restart or by another tool), so it will NOT be turned off at 10%% and the Mac will not sleep by itself. Plug in, or switch \"Keep awake with lid closed\" off then on to re-arm the guard.", pct))
         case .lowBattery:
             notify(L10n.t("Battery low: lid stay-awake is on"),
                    L10n.t("%@%% on battery. At 10%%, RunClosed turns lid stay-awake off and puts the Mac to sleep (hibernation keeps every process). Plug in to avoid it.", pct))

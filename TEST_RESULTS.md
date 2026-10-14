@@ -453,6 +453,23 @@ RunClosedAppTests.xctest           11 tests, 0 failures
 # après corrections de la revue ai-review-gate (verrou LidWriteLock, sleep unique sur échec, décodage tolérant)
 RunClosedPersistenceTests 24 · RunClosedMacSystemTests 63 · HelperSupport 13 · Core 57 · App 11
 → 168/168, 0 warning
+
+# après la 2e revue (alerte « non protégé », refus notifié une fois, tryWithLock non bloquant)
+RunClosedPersistenceTests 24 · RunClosedMacSystemTests 65 · HelperSupport 13 · Core 58 · App 11
+→ 171/171, 0 warning
+
+# après la 3e revue (OFF opérateur no-op annule le réarmement, verrou persisté avant sleepnow)
+RunClosedPersistenceTests 24 · RunClosedMacSystemTests 67 · HelperSupport 13 · Core 58 · App 11
+→ 173/173, 0 warning
+
+# après la 4e revue (réarmement retenu si le secteur se décharge)
+RunClosedPersistenceTests 24 · RunClosedMacSystemTests 69 · HelperSupport 13 · Core 60 · App 11
+→ 177/177, 0 warning
+
+$ runclosed low-battery status      # relevé réel ~01:15
+  battery {onBattery:false, chargePercent:9, isCharging:true, currentMilliamps:-444}
+  input.acDraining: true → decision none/onAC (aucun réarmement dû)
+$ runclosed low-battery simulate ac 40 0 --lid off --released --ac-draining → none / rearmHeldACDraining
 ```
 
 Contrats verrouillés par les tests :

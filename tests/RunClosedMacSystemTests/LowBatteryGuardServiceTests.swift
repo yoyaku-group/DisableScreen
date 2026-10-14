@@ -135,6 +135,63 @@ final class LowBatteryGuardServiceTests: XCTestCase {
         XCTAssertFalse(rig.latchStore.load().latch.failedReleaseSleepTried)
     }
 
+    func testRefusedReleaseNotifiesOncePerEpisode() {
+        // Review finding: a refusal that repeats every tick (here the flag is
+        // turned off by someone else between evaluation and write →
+        // noChangeRequested) must not post a critical notification every 30 s.
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 7))
+        final class Reads: @unchecked Sendable { var n = 0 }
+        let reads = Reads()
+        // 1st read (evaluate) sees ON; the write-time read sees OFF.
+        rig.service.lidService = LidMutationService(
+            bootID: "A", mutator: rig.lid, store: rig.lidStore,
+            priorProvider: { reads.n += 1; return reads.n == 1 })
+        let first = rig.service.tick()
+        XCTAssertEqual(first.mutation, .releaseRefused)
+        XCTAssertTrue(first.shouldNotify)
+        reads.n = 0
+        let second = rig.service.tick()
+        XCTAssertEqual(second.mutation, .releaseRefused)
+        XCTAssertFalse(second.shouldNotify, "no critical notification every 30 s")
+        XCTAssertEqual(rig.sleeper.count, 0, "a refusal never sleeps")
+        XCTAssertTrue(rig.lid.calls.isEmpty)
+    }
+
+    func testOperatorOffOnAlreadyReleasedFlagCancelsRearm() {
+        // Review pass 3: `lid-stay-awake off` after the guard released the
+        // flag is a no-op (noChangeRequested) but still the operator's intent.
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 8))
+        rig.service.tick()                                    // guard releases
+        var lidService = rig.service.lidService
+        let r = lidService.setEnabled(false, initiator: .operatorCommand)
+        XCTAssertEqual(r, .failure(.noChangeRequested(target: false)))
+        rig.latchStore.operatorCommandFinished(r)
+        XCTAssertFalse(rig.latchStore.load().latch.releasedByGuard)
+        rig.battery.state = Self.reading(false, 50)
+        rig.service.tick()
+        XCTAssertEqual(rig.lid.calls, [false], "no automatic re-arm over the operator's OFF")
+    }
+
+    func testFailedOperatorCommandKeepsPendingRearm() {
+        let rig = makeRig(flag: false, ownedBoot: nil, battery: Self.reading(false, 50))
+        rig.latchStore.save(.init(latch: .init(releasedByGuard: true)))
+        rig.latchStore.operatorCommandFinished(.failure(.backendFailed(message: "x")))
+        XCTAssertTrue(rig.latchStore.load().latch.releasedByGuard)
+    }
+
+    func testTryLockReturnsNilWhileAGuardTickHoldsIt() {
+        let rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 50))
+        let lock = rig.service.lock
+        let other = LidWriteLock(url: lock.url)
+        var ranInside = false
+        let inner: Int? = lock.withLock { () -> Int? in
+            other.tryWithLock { () -> Int in ranInside = true; return 1 }
+        }
+        XCTAssertNil(inner, "popup click while held → busy, not a frozen main thread")
+        XCTAssertFalse(ranInside)
+        XCTAssertEqual(other.tryWithLock { 2 }, 2)
+    }
+
     // MARK: — Not owned: warn, never mutate (B2)
 
     func testStaleRecordNeverMutatesNorSleeps() {
@@ -198,6 +255,16 @@ final class LowBatteryGuardServiceTests: XCTestCase {
         XCTAssertEqual(rig.flag.value, true)
         XCTAssertFalse(rig.latchStore.load().latch.releasedByGuard)
         XCTAssertTrue(rig.lidStore.load().ownedEnabled, "re-armed flag is owned on this boot again")
+    }
+
+    func testNoRearmOnADrainingCharger() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 9))
+        rig.service.tick()
+        rig.battery.state = BatteryState(onBattery: false, chargePercent: 30, minutesRemaining: nil,
+                                         isCharging: true, batteryPresent: true, currentMilliamps: -194)
+        let out = rig.service.tick()
+        XCTAssertEqual(out.evaluation.decision.reason, .rearmHeldACDraining)
+        XCTAssertEqual(rig.lid.calls, [false])
     }
 
     func testRearmFailureKeepsLatchForRetry() {

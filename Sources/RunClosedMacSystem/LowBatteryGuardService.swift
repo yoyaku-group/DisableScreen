@@ -122,6 +122,9 @@ public struct LowBatteryGuardService {
         public var sleepAttempted: Bool = false
         public var sleepRC: Int32?
         public var sleepOutput: String?
+        /// Whether the caller should notify about `mutation`. Failures are
+        /// notified once per discharge episode, never every 30 s.
+        public var shouldNotify: Bool = false
     }
 
     /// Read-only evaluation: no mutation, no persistence write. Used by
@@ -139,7 +142,9 @@ public struct LowBatteryGuardService {
             chargePercent: battery.chargePercent,
             minutesRemaining: battery.minutesRemaining,
             lidFlag: flag,
-            ownership: ownership)
+            ownership: ownership,
+            acDraining: LowBatteryPolicy.Input.acDraining(
+                onBattery: battery.onBattery, currentMilliamps: battery.currentMilliamps))
         let latch = latchStore.load().latch
         let (decision, next) = LowBatteryPolicy.step(input, latch: latch)
         return Evaluation(battery: battery, input: input, decision: decision,
@@ -171,8 +176,12 @@ public struct LowBatteryGuardService {
             switch result {
             case .success(let op) where op.state == .verified:
                 outcome.mutation = .released
+                outcome.shouldNotify = true
                 record.latch = record.latch.recordingRelease()
                 record.releasedBootID = lidService.bootID
+                // Persist the re-arm debt BEFORE asking for sleep: the Mac may
+                // go down right after `sleepnow` returns.
+                latchStore.save(record)
                 attemptSleep(&outcome)
             case .success(let op):
                 // Not refused, not verified: treat as a backend failure.
@@ -187,9 +196,11 @@ public struct LowBatteryGuardService {
                 attemptSleepOnceAfterFailure(&outcome, record: &record)
             case .failure(let error):
                 // B1/B2/no-op refusal (e.g. ownership changed between the
-                // evaluation and the write): no sleep, the caller warns.
+                // evaluation and the write): no sleep; warn once per episode.
                 outcome.mutation = .releaseRefused
                 outcome.mutationError = String(describing: error)
+                outcome.shouldNotify = !record.latch.warnedCritical
+                record.latch.warnedCritical = true
             }
 
         case .rearm:
@@ -197,6 +208,7 @@ public struct LowBatteryGuardService {
             switch result {
             case .success(let op) where op.state == .verified:
                 outcome.mutation = .rearmed
+                outcome.shouldNotify = true
                 record.latch = record.latch.recordingRearm()
             case .failure(.noChangeRequested(target: true)):
                 outcome.mutation = .rearmAlreadyOn
@@ -224,6 +236,7 @@ public struct LowBatteryGuardService {
                                               record: inout LowBatteryLatchStore.Record) {
         guard !record.latch.failedReleaseSleepTried else { return }
         record.latch.failedReleaseSleepTried = true
+        outcome.shouldNotify = true
         attemptSleep(&outcome)
     }
 
@@ -236,6 +249,19 @@ public struct LowBatteryGuardService {
 }
 
 extension LowBatteryLatchStore {
+    /// Operator lid command outcome hook (popup switch, CLI). Clears a pending
+    /// re-arm when the command reached the requested state OR found it already
+    /// there (`noChangeRequested`): an explicit OFF on a flag the guard had
+    /// already released is still the operator saying "keep it off".
+    public func operatorCommandFinished(_ result: Result<OperationResult, LidMutationError>) {
+        switch result {
+        case .success, .failure(.noChangeRequested):
+            clearPendingRearm()
+        case .failure:
+            break
+        }
+    }
+
     /// An explicit operator lid command supersedes a pending guard re-arm:
     /// the human's choice wins, the guard must not flip the flag back later.
     /// Callers run it inside the same `LidWriteLock` section as their write.
