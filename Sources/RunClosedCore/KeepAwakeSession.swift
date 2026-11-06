@@ -23,6 +23,11 @@ public enum SessionPauseReason: String, Codable, Sendable, Equatable {
     /// The low-battery guard released the flag (ADR 022). The session survives
     /// so the operator's deadline is not lost to a battery episode.
     case lowBattery
+    /// A reason this version does not know (written by a later version).
+    /// The session stays PAUSED with its deadline: reading it as "running"
+    /// would show a countdown while the flag is off, and reading the whole
+    /// file as damaged would drop a live deadline (ADR 023).
+    case unrecognized
 }
 
 /// A keep-awake session: the record that gives `disablesleep` an end time.
@@ -93,6 +98,9 @@ public struct KeepAwakeSession: Codable, Sendable, Equatable, Identifiable {
         endsAtWall = try c.decodeIfPresent(Date.self, forKey: .endsAtWall)
         endsAtContinuous = try c.decodeIfPresent(UInt64.self, forKey: .endsAtContinuous)
         bootID = try c.decode(String.self, forKey: .bootID)
-        pausedReason = try c.decodeIfPresent(SessionPauseReason.self, forKey: .pausedReason)
+        // Decoded as a plain string: an unknown value keeps the session paused
+        // (`.unrecognized`) instead of failing the whole record.
+        pausedReason = try c.decodeIfPresent(String.self, forKey: .pausedReason)
+            .map { SessionPauseReason(rawValue: $0) ?? .unrecognized }
     }
 }

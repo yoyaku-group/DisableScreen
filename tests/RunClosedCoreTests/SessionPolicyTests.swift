@@ -366,4 +366,55 @@ final class SessionPolicyTests: XCTestCase {
         XCTAssertEqual(SessionPolicy.addingContinuous(nearTop, seconds: 3600), UInt64.max)
         XCTAssertEqual(SessionPolicy.addingContinuous(1_000, seconds: 1), 1_000 + 1_000_000_000)
     }
+
+    // MARK: — Review round 3
+
+    /// Switching ON over a battery-paused timed session resumes it with its
+    /// deadline instead of replacing it with an indefinite one.
+    func testSwitchOnResumesAPausedTimedSession() {
+        let paused = SessionPolicy.pause(timed(7200), reason: .lowBattery)
+        let next = SessionPolicy.recordAfterSwitchOn(existing: paused, now: now(wallOffset: 600, continuousSeconds: 1_600))
+        XCTAssertEqual(next.id, paused.id)
+        XCTAssertEqual(next.endsAtWall, paused.endsAtWall)
+        XCTAssertEqual(next.endsAtContinuous, paused.endsAtContinuous)
+        XCTAssertNil(next.pausedReason)
+    }
+
+    func testSwitchOnKeepsARunningTimedSession() {
+        let running = timed(7200)
+        XCTAssertEqual(SessionPolicy.recordAfterSwitchOn(existing: running, now: now()), running)
+    }
+
+    func testSwitchOnReplacesADueOrForeignOrMissingSessionWithAnIndefiniteOne() {
+        let due = SessionPolicy.pause(timed(60), reason: .lowBattery)
+        let foreign = SessionPolicy.pause(timed(7200, bootID: Boot.b), reason: .lowBattery)
+        let current = now(wallOffset: 120, continuousSeconds: 1_120)
+        for existing in [due, foreign, nil, KeepAwakeSession(startedAt: Self.epoch, bootID: Boot.a)] {
+            let next = SessionPolicy.recordAfterSwitchOn(existing: existing, now: current)
+            XCTAssertTrue(next.isIndefinite)
+            XCTAssertFalse(next.isPaused)
+            XCTAssertEqual(next.bootID, Boot.a)
+            XCTAssertEqual(next.startedAt, current.wall)
+            if let existing { XCTAssertNotEqual(next.id, existing.id) }
+        }
+    }
+
+    func testStartArgumentsParse() {
+        XCTAssertEqual(SessionDuration.parseStartArguments(["--for", "2h"]), .success(.timed(7200)))
+        XCTAssertEqual(SessionDuration.parseStartArguments(["--indefinite"]), .success(.indefinite))
+    }
+
+    /// `--for` with `--indefinite` is refused: neither reading is safe to guess.
+    func testStartArgumentsRefuseBothModes() {
+        XCTAssertEqual(SessionDuration.parseStartArguments(["--for", "2h", "--indefinite"]), .failure(.usage))
+        XCTAssertEqual(SessionDuration.parseStartArguments(["--indefinite", "--for", "2h"]), .failure(.usage))
+    }
+
+    func testStartArgumentsRefuseUsageErrorsAndTheCap() {
+        XCTAssertEqual(SessionDuration.parseStartArguments([]), .failure(.usage))
+        XCTAssertEqual(SessionDuration.parseStartArguments(["--for"]), .failure(.usage))
+        XCTAssertEqual(SessionDuration.parseStartArguments(["--for", "soon"]), .failure(.usage))
+        XCTAssertEqual(SessionDuration.parseStartArguments(["--bogus"]), .failure(.usage))
+        XCTAssertEqual(SessionDuration.parseStartArguments(["--for", "200h"]), .failure(.overCap))
+    }
 }

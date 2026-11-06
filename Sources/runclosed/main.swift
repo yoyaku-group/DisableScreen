@@ -618,37 +618,19 @@ func cmdSession(_ rest: [String]) -> Int32 {
         return 0
 
     case "start":
-        var duration: TimeInterval?
-        var indefinite = false
-        var i = 0
-        while i < args.count {
-            switch args[i] {
-            case "--for":
-                i += 1
-                guard i < args.count, let parsed = SessionDuration.parse(args[i]) else {
-                    FileHandler.err(sessionUsage)
-                    return 64
-                }
-                // Reject an over-cap duration HERE, before any lock or write:
-                // a usage error must not queue behind the guard tick.
-                guard SessionDuration.isAcceptable(parsed) else {
-                    FileHandler.err("refused: a session is capped at 7 days")
-                    return 64
-                }
-                duration = parsed
-            case "--indefinite":
-                indefinite = true
-            default:
-                FileHandler.err(sessionUsage)
-                return 64
-            }
-            i += 1
-        }
-        guard indefinite || duration != nil else {
+        // Refused HERE, before any lock or write: a usage error must not
+        // queue behind the guard tick, and must never start a session.
+        let duration: TimeInterval?
+        switch SessionDuration.parseStartArguments(args) {
+        case .success(.timed(let seconds)): duration = seconds
+        case .success(.indefinite): duration = nil
+        case .failure(.overCap):
+            FileHandler.err("refused: a session is capped at 7 days")
+            return 64
+        case .failure(.usage):
             FileHandler.err(sessionUsage)
             return 64
         }
-        if indefinite { duration = nil }
         // Same lock as `lid-stay-awake on|off`: the session writes the record
         // and the flag, so it must not interleave with a guard tick.
         var svc = makeSessionService()

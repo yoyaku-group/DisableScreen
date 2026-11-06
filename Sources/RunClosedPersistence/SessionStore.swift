@@ -12,18 +12,24 @@ import RunClosedCore
 /// record (`clear()`). The reverse order (flag first, record second) would
 /// leave an awake machine with no deadline — the failure this ADR removes.
 ///
-/// Format on disk (`~/Library/Application Support/RunClosed/session.json`):
+/// Format on disk (`~/Library/Application Support/RunClosed/session.json`),
+/// ISO-8601 dates, absent optionals omitted:
 /// ```
 /// {
 ///   "schemaVersion": 1,
-///   "id": "<uuid>",
-///   "startedAt": <Date>,
-///   "endsAtWall": <Date|null>,
-///   "endsAtContinuous": <uint64|null>,
-///   "bootID": "<boot session uuid>",
-///   "pausedReason": "lowBattery" | null
+///   "session": {
+///     "schemaVersion": 1,
+///     "id": "<uuid>",
+///     "startedAt": "<ISO-8601>",
+///     "endsAtWall": "<ISO-8601>",
+///     "endsAtContinuous": <uint64>,
+///     "bootID": "<boot session uuid>",
+///     "pausedReason": "lowBattery"
+///   }
 /// }
 /// ```
+/// `load()` also reads a bare session object. An unknown `pausedReason`
+/// stays paused; a truncated or unreadable file still loads as "no session".
 public struct SessionStore {
     public let url: URL
 
@@ -98,8 +104,6 @@ public struct SessionStore {
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(Record(session: session)) else { return false }
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
-                                                 withIntermediateDirectories: true)
         do {
             try data.write(to: url, options: .atomic)
             return true

@@ -125,8 +125,9 @@ final class SessionStoreTests: XCTestCase {
     }
 
     func testWriteIsReadableAsPlainJSON() throws {
-        // The CLI prints this file; keeping it a flat JSON object with
-        // ISO-8601 dates is part of the contract.
+        // The CLI prints this file; keeping it plain JSON (a
+        // `{schemaVersion, session}` wrapper) with ISO-8601 dates is part of
+        // the contract.
         let url = tempURL()
         SessionStore(url: url).save(sample())
         let obj = try JSONSerialization.jsonObject(with: try Data(contentsOf: url)) as? [String: Any]
@@ -140,5 +141,36 @@ final class SessionStoreTests: XCTestCase {
         let store = SessionStore()
         XCTAssertTrue(store.url.path.hasSuffix("/Library/Application Support/RunClosed/session.json"),
                       store.url.path)
+    }
+
+    /// A pause reason written by a later version keeps the session PAUSED with
+    /// its deadline; it must not read as "no session" nor as running.
+    func testUnknownPauseReasonStaysPaused() {
+        let url = tempURL()
+        let json = """
+        {"schemaVersion": 1,
+         "session": {"schemaVersion": 1,
+                     "id": "6F9619FF-8B86-D011-B42D-00C04FC964FF",
+                     "startedAt": "2027-01-01T10:00:00Z",
+                     "endsAtWall": "2027-01-01T12:00:00Z",
+                     "endsAtContinuous": 999,
+                     "bootID": "boot-A",
+                     "pausedReason": "thermal"}}
+        """
+        try? Data(json.utf8).write(to: url)
+        let loaded = SessionStore(url: url).load()
+        XCTAssertNotNil(loaded)
+        XCTAssertEqual(loaded?.pausedReason, .unrecognized)
+        XCTAssertEqual(loaded?.isPaused, true)
+        XCTAssertEqual(loaded?.endsAtContinuous, 999)
+    }
+
+    /// `save` does not create a missing parent: the URL init's contract.
+    func testSaveIntoAMissingDirectoryFails() {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("runclosed-missing-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("session.json")
+        XCTAssertFalse(SessionStore(url: url).save(sample()))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.deletingLastPathComponent().path))
     }
 }

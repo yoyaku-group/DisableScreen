@@ -297,13 +297,22 @@ public struct SessionService {
 
     /// Quit teardown (ADR 023 §5): the session ends with the flag it backed.
     /// It runs only when a session is on disk AND the flag reads off after the
-    /// restore. With no session the quit path is exactly ADR 022's, so a
-    /// pending re-arm owed to the plain switch survives the quit by design.
+    /// restore.
+    ///
+    /// An INDEFINITE session is the plain switch, which ADR 022 governs: quit
+    /// clears its record only, so a pending re-arm owed to the switch survives
+    /// the quit exactly as it did before sessions existed. A TIMED session (or
+    /// an unreadable record) ends through `finishSession()`, which also voids
+    /// its re-arm debt.
     ///
     /// Callers run it inside `LidWriteLock`; it takes no lock itself.
     public func finishOnQuit(flagReadsOff: Bool) {
         guard store.exists, flagReadsOff else { return }
-        finishSession()
+        if let session = store.load(), session.isIndefinite {
+            store.clear()
+        } else {
+            finishSession()
+        }
     }
 
     /// Seam for the release path: it decides whether the record survives (a

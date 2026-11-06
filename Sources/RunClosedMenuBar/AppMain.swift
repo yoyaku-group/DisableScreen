@@ -523,9 +523,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let formatter = DateFormatter()
             formatter.setLocalizedDateFormatFromTemplate("HH:mm")
             let until = formatter.string(from: ends)
-            if session.pausedReason != nil {
+            if session.pausedReason == .lowBattery {
                 // The guard released the flag: say so, the Mac can sleep now.
                 label = L10n.t("Paused (low battery) · until %@", until)
+            } else if session.pausedReason != nil {
+                label = L10n.t("Paused · until %@", until)
             } else {
                 label = L10n.t("Until %@ · %@", until, Self.localizedRemaining(session, now: now))
             }
@@ -613,14 +615,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // ADR 023: the plain switch IS an indefinite session. Turning
                 // it OFF ends that session (and any timed one the switch was
                 // backing); turning it ON records an indefinite session so
-                // every surface reports one shape.
+                // every surface reports one shape, except that a live timed
+                // session (e.g. paused by the battery guard) resumes with its
+                // deadline instead of losing it.
+                let switchedOn: () -> Void = {
+                    let now = SessionPolicy.Now(
+                        wall: Date(),
+                        continuousNanoseconds: SystemContinuousClock(bootID: self.clock.bootID)
+                            .nowContinuousNanoseconds,
+                        bootID: self.clock.bootID)
+                    sessionStore.save(SessionPolicy.recordAfterSwitchOn(
+                        existing: sessionStore.load(), now: now))
+                }
                 switch r {
                 case .success where target:
-                    sessionStore.save(KeepAwakeSession(startedAt: Date(), bootID: self.clock.bootID))
+                    switchedOn()
                 case .success:
                     sessionStore.clear()
                 case .failure(.noChangeRequested(let requested)) where requested:
-                    sessionStore.save(KeepAwakeSession(startedAt: Date(), bootID: self.clock.bootID))
+                    switchedOn()
                 case .failure(.noChangeRequested):
                     sessionStore.clear()
                 case .failure:

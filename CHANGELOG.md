@@ -26,9 +26,13 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   session cannot flip the flag back on at the next launch. A session is capped
   at 7 days. A battery-paused session shows "Paused (low battery)" and stays
   paused when extended; only the guard's re-arm turns the flag back on. The
-  plain switch keeps its ADR 022 re-arm after a reboot.
+  plain switch keeps its ADR 022 re-arm after a reboot and across a quit.
+  Turning the switch on over a live timed session (for example one paused by
+  the battery guard) resumes it with its deadline instead of replacing it.
+  A pause reason written by a later version keeps the session paused.
 - `runclosed session start --for <2h|90m|1h30m> | start --indefinite | extend
-  [30m] | end | status [--json]`. Mutating subcommands take the same lock as
+  [30m] | end | status [--json]`. `--for` together with `--indefinite` is a
+  usage error. Mutating subcommands take the same lock as
   `lid-stay-awake on|off`; exit codes stay 0 / 3 (refused by policy) / 5
   (backend failure) / 64 (usage). The session record lives in
   `~/Library/Application Support/RunClosed/session.json`, so a future launchd

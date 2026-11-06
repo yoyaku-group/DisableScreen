@@ -42,6 +42,7 @@
 "A session is already running" = "Une session est déjà en cours";
 "That is longer than 7 days" = "C'est plus de 7 jours";
 "Paused (low battery) · until %@" = "En pause (batterie faible) · jusqu'à %@";
+"Paused · until %@" = "En pause · jusqu'à %@";
 "No session is running" = "Aucune session en cours";
 "This session has no end time" = "Cette session n'a pas d'heure de fin";
 "Until %@ · %@" = "Jusqu'à %@ · %@";

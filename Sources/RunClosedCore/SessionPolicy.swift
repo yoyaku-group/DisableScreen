@@ -203,6 +203,21 @@ public enum SessionPolicy {
         return session.isOnBoot(now.bootID) && !isDue(session, now: now)
     }
 
+    /// The record to keep when the operator turns the plain switch ON.
+    ///
+    /// A live timed session on this boot (typically one the low-battery guard
+    /// paused) is RESUMED with its deadline: the switch must not silently turn
+    /// "until 14:30" into "until I remember". Anything else (no record, an
+    /// indefinite one, a due session, one from another boot) becomes a fresh
+    /// indefinite session, the plain switch's shape.
+    public static func recordAfterSwitchOn(existing: KeepAwakeSession?, now: Now) -> KeepAwakeSession {
+        if let session = existing, !session.isIndefinite,
+           session.isOnBoot(now.bootID), !isDue(session, now: now) {
+            return resume(session)
+        }
+        return KeepAwakeSession(startedAt: now.wall, bootID: now.bootID)
+    }
+
     // MARK: — Presentation
 
     /// `"2 h 41 left"` / `"8 min left"` / `"< 1 min left"`, nil for an
@@ -268,6 +283,51 @@ public enum SessionDuration {
     }
 
     /// `nil` = not parseable (the caller exits 64 with the usage line).
+    /// What `runclosed session start` was asked to do.
+    public enum StartArguments: Equatable, Sendable {
+        case timed(TimeInterval)
+        case indefinite
+    }
+
+    /// Why `session start` arguments were refused. Both exit 64, before any
+    /// lock or write.
+    public enum StartArgumentError: Error, Equatable, Sendable {
+        /// Unknown flag, missing or unreadable value, or neither/both of
+        /// `--for` and `--indefinite`.
+        case usage
+        /// `--for` longer than `maximum`.
+        case overCap
+    }
+
+    /// Parse `session start` arguments. Pure, so the refusals are tested
+    /// without a binary that could touch the real flag. `--for` together with
+    /// `--indefinite` is a usage error: guessing which one the caller meant
+    /// would start a session they did not ask for.
+    public static func parseStartArguments(_ args: [String]) -> Result<StartArguments, StartArgumentError> {
+        var duration: TimeInterval?
+        var indefinite = false
+        var i = 0
+        while i < args.count {
+            switch args[i] {
+            case "--for":
+                i += 1
+                guard i < args.count, let parsed = parse(args[i]) else { return .failure(.usage) }
+                guard isAcceptable(parsed) else { return .failure(.overCap) }
+                duration = parsed
+            case "--indefinite":
+                indefinite = true
+            default:
+                return .failure(.usage)
+            }
+            i += 1
+        }
+        switch (duration, indefinite) {
+        case (let d?, false): return .success(.timed(d))
+        case (nil, true): return .success(.indefinite)
+        default: return .failure(.usage)
+        }
+    }
+
     public static func parse(_ text: String) -> TimeInterval? {
         let trimmed = text.trimmingCharacters(in: .whitespaces).lowercased()
         guard !trimmed.isEmpty else { return nil }

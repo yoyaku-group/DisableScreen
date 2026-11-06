@@ -44,6 +44,7 @@
 "A session is already running" = "A session is already running";
 "That is longer than 7 days" = "That is longer than 7 days";
 "Paused (low battery) · until %@" = "Paused (low battery) · until %@";
+"Paused · until %@" = "Paused · until %@";
 "No session is running" = "No session is running";
 "This session has no end time" = "This session has no end time";
 "Until %@ · %@" = "Until %@ · %@";

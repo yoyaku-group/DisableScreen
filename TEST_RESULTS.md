@@ -546,12 +546,12 @@ $ arch -arm64 swift build --build-tests
 Build complete! (0 warning)
 
 $ arch -arm64 swift test
-RunClosedPersistenceTests  36 · RunClosedMacSystemTests 124 · HelperSupport 13
-RunClosedCoreTests         96 · RunClosedAppTests        11
-→ 280/280, 0 échec
+RunClosedPersistenceTests  38 · RunClosedMacSystemTests 126 · HelperSupport 13
+RunClosedCoreTests        102 · RunClosedAppTests        11
+→ 290/290, 0 échec
 ```
 
-Dont **94 nouveaux** : 33 `SessionPolicyTests`, 11 `SessionStoreTests`, 32 `SessionServiceTests`, 13 `SessionGuardTickTests`, 5 dans `LidMutationServiceTests` (initiateur `.sessionRecovery`).
+Dont **104 nouveaux** : 39 `SessionPolicyTests`, 13 `SessionStoreTests`, 34 `SessionServiceTests`, 13 `SessionGuardTickTests`, 5 dans `LidMutationServiceTests` (initiateur `.sessionRecovery`).
 
 Relecture, tour 1 (11 tests ajoutés) :
 - Quit pendant une session mise en pause par la garde batterie : la dette de réarmement est effacée, une étape batterie suivante sur secteur à 80 % ne réarme pas. Sans session, le quit laisse la dette intacte (ADR 022 inchangé).
@@ -570,12 +570,20 @@ $ runclosed-cli session extend 8d                   → exit 64 (usage)
 $ runclosed-cli definitely-not-a-command            → exit 64
 ```
 
+Relecture, tour 3 (`ai-review-gate`, 0 CRITICAL, 3 WARN corrigés, 10 tests ajoutés) :
+- Quit avec l'interrupteur simple (session indéfinie) mis en pause par la garde : record effacé, dette de réarmement conservée (ADR 022) ; record illisible au quit : record et dette effacés.
+- Interrupteur rallumé sur une session minutée en pause : même id, même échéance, pause levée ; session due, d'un autre boot, indéfinie ou absente : nouvelle session indéfinie.
+- `pausedReason` inconnu (`"thermal"`) : la session se charge, reste en pause, garde son échéance.
+- `save()` dans un dossier absent : `false`, aucun dossier créé.
+- Arguments de `session start` (fonction pure, sans binaire) : `--for` + `--indefinite` dans les deux ordres → usage ; aucun argument, valeur manquante ou illisible, option inconnue → usage ; `--for 200h` → plafond.
+- `session start --for … --indefinite` n'a pas été lancé sur la machine : un binaire périmé aurait démarré une session réelle. Le refus est couvert par le test pur ci-dessus.
+
 Contrats verrouillés :
 - Échéance continue sur le même boot ; une veille de 6 h dans une session de 1 h rend la session due (ce que `systemUptime` manquerait) ; non due avant l'échéance ; `remaining` à 0 une fois due.
 - Échéance murale inter-boot ; le compteur continu d'un boot précédent est ignoré et ne peut pas terminer la session immédiatement (comparaison naïve sinon).
 - Session indéfinie jamais due, jamais de libellé de temps restant, jamais extensible.
 - Refus de démarrer une session minutée quand le flag est observé ON et que l'ownership est `notOwned` ou `staleRecord` ; démarrage indéfini non bloqué (ADR 021 gouverne déjà ce cas) ; refus d'une seconde session ; une session déjà due est remplacée ; durée nulle ou négative refusée.
-- Extension depuis maintenant (pas depuis l'ancienne échéance) ; elle ranime une session due et efface une pause ; no-op sur une session indéfinie et sur un pas négatif.
+- Extension depuis maintenant (pas depuis l'ancienne échéance) ; elle ranime une session due et garde une pause batterie (seul le réarmement de la garde la lève) ; no-op sur une session indéfinie et sur un pas négatif.
 - Pause/reprise : l'échéance et l'identité ne bougent pas.
 - `allowsRearm` : vrai pour une session vivante du même boot, faux si due ou d'un autre boot, vrai s'il n'y a aucune session (ADR 022 intact).
 - Libellés : `2 h 41 left`, `8 min left`, `1 h left`, `< 1 min left` ; `Until … · …` avec fuseau et locale injectés.

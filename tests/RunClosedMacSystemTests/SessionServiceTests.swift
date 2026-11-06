@@ -459,6 +459,31 @@ final class SessionServiceTests: XCTestCase {
         rig.sessionStore.save(KeepAwakeSession(startedAt: epoch, bootID: "A"))
         XCTAssertTrue(rig.service.allowsRearm())
     }
+
+    // MARK: — Review round 3
+
+    /// The plain switch (indefinite session) paused by the battery guard, then
+    /// quit: ADR 022 keeps the re-arm debt, only the record goes.
+    func testQuitWithAnIndefiniteSessionKeepsThePendingRearm() {
+        var rig = makeRig(flag: false, ownedBoot: nil)
+        _ = rig.service.start(for: nil)
+        _ = rig.service.pauseForBattery()
+        rig.flag.value = false
+        rig.latchStore.save(.init(latch: .init(releasedByGuard: true)))
+        rig.service.finishOnQuit(flagReadsOff: true)
+        XCTAssertNil(rig.sessionStore.load())
+        XCTAssertTrue(rig.latchStore.load().latch.releasedByGuard)
+    }
+
+    /// An unreadable record on quit is treated as a timed session: both go.
+    func testQuitWithAnUnreadableRecordClearsItAndTheRearm() {
+        let rig = makeRig(flag: false, ownedBoot: nil)
+        try? Data("{not json".utf8).write(to: rig.sessionStore.url)
+        rig.latchStore.save(.init(latch: .init(releasedByGuard: true)))
+        rig.service.finishOnQuit(flagReadsOff: true)
+        XCTAssertFalse(rig.sessionStore.exists)
+        XCTAssertFalse(rig.latchStore.load().latch.releasedByGuard)
+    }
 }
 
 private extension Result {
