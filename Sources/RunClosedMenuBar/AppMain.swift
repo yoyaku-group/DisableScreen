@@ -132,12 +132,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 store: OwnedLidAssertion(currentBootID: bootID),
                 priorProvider: { PowerReadback.lidStayAwake() })
             _ = lidService.restoreIfOwned()
-            // The session ends with the flag it was backing: a record left
-            // behind would be a deadline nothing enforces.
-            let store = SessionStore()
-            if store.exists, lidService.priorProvider() == false {
-                store.clear()
-            }
+            // ADR 023: the session ends with the flag it was backing — a
+            // record left behind would be a deadline nothing enforces. Go
+            // through the SAME finish path as End and expiry, so the pending
+            // low-battery re-arm is cleared too: a session paused by the
+            // guard leaves the latch armed, and re-arming the flag on the
+            // next launch on AC would resurrect a session that is gone.
+            //
+            // Only when a session exists: with no session on disk, quitting
+            // must behave exactly as it did before this ADR (ADR 022's
+            // re-arm debt survives a quit by design).
+            SessionService.live(bootID: bootID)
+                .finishOnQuit(flagReadsOff: lidService.priorProvider() == false)
         }
     }
 
@@ -711,6 +717,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return L10n.t("No session is running")
         case .indefiniteSession:
             return L10n.t("This session has no end time")
+        case .durationTooLong:
+            return L10n.t("That is longer than 7 days")
         case .nonPositiveDuration:
             return L10n.t("Change failed (see log)")
         case .preconditionUnknown:

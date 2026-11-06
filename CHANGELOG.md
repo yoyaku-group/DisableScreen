@@ -21,7 +21,10 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the session instead of ending it, and the guard only re-arms the flag while
   the session is still valid. Expiry runs inside the existing guard tick, in
   the same cross-process lock section, and a wake notification triggers a tick
-  so an overnight deadline is honoured on wake.
+  so an overnight deadline is honoured on wake. Quitting ends the session
+  through the same path as End and expiry, so a re-arm owed to a paused
+  session cannot flip the flag back on at the next launch. A session is capped
+  at 7 days.
 - `runclosed session start --for <2h|90m|1h30m> | start --indefinite | extend
   [30m] | end | status [--json]`. Mutating subcommands take the same lock as
   `lid-stay-awake on|off`; exit codes stay 0 / 3 (refused by policy) / 5

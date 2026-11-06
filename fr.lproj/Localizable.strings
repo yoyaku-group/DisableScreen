@@ -43,6 +43,7 @@
 "The keep-awake session reached its end time and lid stay-awake was turned off." = "La session de maintien éveillé a atteint son heure de fin et le maintien éveillé capot fermé a été coupé.";
 "Lid stay-awake is on but not owned by RunClosed — switch it off then on first" = "Le maintien éveillé est actif mais n'appartient pas à RunClosed : coupez-le puis réactivez-le d'abord";
 "A session is already running" = "Une session est déjà en cours";
+"That is longer than 7 days" = "C'est plus de 7 jours";
 "No session is running" = "Aucune session en cours";
 "This session has no end time" = "Cette session n'a pas d'heure de fin";
 "Until %@ · %@" = "Jusqu'à %@ · %@";

@@ -45,6 +45,7 @@
 "The keep-awake session reached its end time and lid stay-awake was turned off." = "The keep-awake session reached its end time and lid stay-awake was turned off.";
 "Lid stay-awake is on but not owned by RunClosed — switch it off then on first" = "Lid stay-awake is on but not owned by RunClosed — switch it off then on first";
 "A session is already running" = "A session is already running";
+"That is longer than 7 days" = "That is longer than 7 days";
 "No session is running" = "No session is running";
 "This session has no end time" = "This session has no end time";
 "Until %@ · %@" = "Until %@ · %@";

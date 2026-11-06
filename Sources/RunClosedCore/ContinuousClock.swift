@@ -36,11 +36,18 @@ public struct SystemContinuousClock: ContinuousClock {
         let numer = UInt64(ContinuousClockTimebase.numer)
         let denom = UInt64(ContinuousClockTimebase.denom)
         guard denom != 0 else { return ticks }
-        // Split to avoid overflowing UInt64 on a long-lived machine: the
-        // seconds part is exact, the remainder is converted on its own.
+        // Split so the multiplication cannot overflow on a long-lived machine:
+        // the whole seconds are exact, the remainder is converted on its own.
+        // The reporting variants keep an absurd timebase from trapping — a
+        // saturated reading is a wrong deadline, a trap is a crashed app.
         let seconds = ticks / denom
         let remainder = ticks % denom
-        return seconds * numer + (remainder * numer) / denom
+        let (whole, wholeOverflowed) = seconds.multipliedReportingOverflow(by: numer)
+        guard !wholeOverflowed else { return UInt64.max }
+        let (part, partOverflowed) = (remainder * numer).dividedReportingOverflow(by: denom)
+        guard !partOverflowed else { return UInt64.max }
+        let (total, totalOverflowed) = whole.addingReportingOverflow(part)
+        return totalOverflowed ? UInt64.max : total
     }
 }
 
@@ -59,9 +66,23 @@ public enum ContinuousClockTimebase {
         Double(ns) / 1_000_000_000
     }
 
+    /// Upper bound on the conversion: `UInt64.max` nanoseconds is ~584 years,
+    /// far past any session, and this keeps the multiplication below in range.
+    public static let maxConvertibleNanoseconds = UInt64.max
+
     /// Convenience for pure policy: seconds → nanoseconds.
+    ///
+    /// Clamped on purpose. `UInt64(Double)` TRAPS on a negative, NaN or
+    /// out-of-range value, so an absurd `--for` argument would crash the CLI
+    /// instead of exiting 64. Non-finite input yields 0, and anything past the
+    /// representable range saturates — a policy bug then produces a very late
+    /// deadline rather than a trap.
     public static func nanoseconds(fromSeconds s: Double) -> UInt64 {
-        guard s > 0 else { return 0 }
-        return UInt64((s * 1_000_000_000).rounded())
+        guard s.isFinite, s > 0 else { return 0 }
+        let scaled = (s * 1_000_000_000).rounded()
+        guard scaled.isFinite, scaled < Double(maxConvertibleNanoseconds) else {
+            return maxConvertibleNanoseconds
+        }
+        return UInt64(scaled)
     }
 }

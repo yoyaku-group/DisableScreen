@@ -347,4 +347,72 @@ final class SessionServiceTests: XCTestCase {
         let rig = makeRig(flag: false, ownedBoot: nil)
         XCTAssertTrue(rig.service.allowsRearm())
     }
+
+    // MARK: — Quit teardown and the duration cap (review round 1)
+
+    /// Regression: a session paused by the battery guard, then the app quits.
+    /// The quit teardown must clear the guard's pending re-arm too, or the
+    /// next launch on AC would flip the flag back ON for a session that no
+    /// longer exists (ADR 023 §4).
+    func testQuitTeardownClearsAPendingRearmOfAPausedSession() {
+        var rig = makeRig(flag: false, ownedBoot: nil)
+        _ = rig.service.start(for: 2 * 3600)
+        XCTAssertTrue(rig.service.pauseForBattery())
+        rig.flag.value = false
+        rig.latchStore.save(.init(latch: .init(releasedByGuard: true)))
+
+        rig.service.finishOnQuit(flagReadsOff: true)
+
+        XCTAssertNil(rig.sessionStore.load())
+        let latch = rig.latchStore.load().latch
+        XCTAssertFalse(latch.releasedByGuard)
+        // Next launch, on AC well above the re-arm threshold: no re-arm.
+        let step = LowBatteryPolicy.step(
+            .init(onBattery: false, chargePercent: 80, minutesRemaining: nil,
+                  lidFlag: false, ownership: .notOwned, acDraining: false),
+            latch: latch)
+        XCTAssertNotEqual(step.decision.action, .rearm)
+    }
+
+    /// ADR 022 unchanged: with no session on disk the quit path leaves the
+    /// plain switch's pending re-arm alone.
+    func testQuitWithoutASessionLeavesAPendingRearm() {
+        let rig = makeRig(flag: false, ownedBoot: nil)
+        rig.latchStore.save(.init(latch: .init(releasedByGuard: true)))
+        rig.service.finishOnQuit(flagReadsOff: true)
+        XCTAssertTrue(rig.latchStore.load().latch.releasedByGuard)
+    }
+
+    /// The flag still reads ON after the restore (not ours, or the restore
+    /// failed): the record is kept, a later tick or the backstop retries.
+    func testQuitKeepsTheSessionWhileTheFlagStillReadsOn() {
+        var rig = makeRig(flag: false, ownedBoot: nil)
+        _ = rig.service.start(for: 3600)
+        rig.service.finishOnQuit(flagReadsOff: false)
+        XCTAssertNotNil(rig.sessionStore.load())
+    }
+
+    func testStartPastTheCapIsRefusedBeforeAnyWrite() {
+        var rig = makeRig(flag: false, ownedBoot: nil)
+        let result = rig.service.start(for: SessionDuration.maximum + 1)
+        XCTAssertEqual(result.failureValue, .durationTooLong)
+        XCTAssertNil(rig.sessionStore.load(), "nothing journaled")
+        XCTAssertEqual(rig.flag.value, false, "flag untouched")
+    }
+
+    func testExtendPastTheCapIsRefused() {
+        var rig = makeRig(flag: false, ownedBoot: nil)
+        _ = rig.service.start(for: 3600)
+        let before = rig.sessionStore.load()
+        let result = rig.service.extend(by: SessionDuration.maximum + 1)
+        XCTAssertEqual(result.failureValue, .durationTooLong)
+        XCTAssertEqual(rig.sessionStore.load(), before)
+    }
+}
+
+private extension Result {
+    var failureValue: Failure? {
+        if case .failure(let e) = self { return e }
+        return nil
+    }
 }

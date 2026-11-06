@@ -301,4 +301,58 @@ final class SessionPolicyTests: XCTestCase {
         XCTAssertEqual(ContinuousClockTimebase.seconds(fromNanoseconds: ns), 3600, accuracy: 0.001)
         XCTAssertEqual(ContinuousClockTimebase.nanoseconds(fromSeconds: -1), 0)
     }
+
+    // MARK: — Duration cap and trap-free conversion (review round 1)
+
+    func testStartAtTheCapIsAcceptedAndPastItRefused() {
+        let atCap = SessionPolicy.start(duration: SessionDuration.maximum, now: now(),
+                                        observedFlag: false, ownership: .notOwned)
+        guard case .success = atCap else { return XCTFail("7 days is allowed") }
+        let past = SessionPolicy.start(duration: SessionDuration.maximum + 1, now: now(),
+                                       observedFlag: false, ownership: .notOwned)
+        guard case .failure(.durationTooLong) = past else { return XCTFail("expected durationTooLong") }
+    }
+
+    func testNonFiniteDurationsAreRefused() {
+        for bad in [Double.infinity, -Double.infinity, Double.nan] {
+            let r = SessionPolicy.start(duration: bad, now: now(),
+                                        observedFlag: false, ownership: .notOwned)
+            guard case .failure(.nonPositiveDuration) = r else {
+                return XCTFail("\(bad) must be refused")
+            }
+        }
+    }
+
+    func testExtendPastTheCapLeavesTheSessionUnchanged() {
+        let session = timed(3600)
+        XCTAssertEqual(SessionPolicy.extend(session, by: SessionDuration.maximum + 1, now: now()), session)
+        XCTAssertEqual(SessionPolicy.extend(session, by: .infinity, now: now()), session)
+        XCTAssertEqual(SessionPolicy.extend(session, by: .nan, now: now()), session)
+    }
+
+    func testHugeOrNonNumericDurationTextIsNotAcceptable() {
+        // Parses (a number with a unit) but is far past the cap: the CLI
+        // turns this into exit 64 before any lock or write.
+        if let huge = SessionDuration.parse("999999999999h") {
+            XCTAssertFalse(SessionDuration.isAcceptable(huge))
+        }
+        XCTAssertNil(SessionDuration.parse("inf"))
+        XCTAssertNil(SessionDuration.parse("nan"))
+        XCTAssertTrue(SessionDuration.isAcceptable(2 * 3600))
+        XCTAssertFalse(SessionDuration.isAcceptable(0))
+    }
+
+    func testNanosecondConversionNeverTraps() {
+        XCTAssertEqual(ContinuousClockTimebase.nanoseconds(fromSeconds: .infinity), 0)
+        XCTAssertEqual(ContinuousClockTimebase.nanoseconds(fromSeconds: .nan), 0)
+        XCTAssertEqual(ContinuousClockTimebase.nanoseconds(fromSeconds: -5), 0)
+        XCTAssertEqual(ContinuousClockTimebase.nanoseconds(fromSeconds: 1e30), UInt64.max)
+        XCTAssertEqual(ContinuousClockTimebase.nanoseconds(fromSeconds: 1.5), 1_500_000_000)
+    }
+
+    func testContinuousDeadlineSaturatesInsteadOfWrapping() {
+        let nearTop = UInt64.max - 5
+        XCTAssertEqual(SessionPolicy.addingContinuous(nearTop, seconds: 3600), UInt64.max)
+        XCTAssertEqual(SessionPolicy.addingContinuous(1_000, seconds: 1), 1_000 + 1_000_000_000)
+    }
 }

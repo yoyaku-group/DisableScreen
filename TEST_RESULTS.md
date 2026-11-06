@@ -546,12 +546,23 @@ $ arch -arm64 swift build --build-tests
 Build complete! (0 warning)
 
 $ arch -arm64 swift test
-RunClosedPersistenceTests  36 · RunClosedMacSystemTests 113 · HelperSupport 13
-RunClosedCoreTests         89 · RunClosedAppTests        11
-→ 262/262, 0 échec
+RunClosedPersistenceTests  36 · RunClosedMacSystemTests 118 · HelperSupport 13
+RunClosedCoreTests         95 · RunClosedAppTests        11
+→ 273/273, 0 échec
 ```
 
-Dont **76 nouveaux** : 26 `SessionPolicyTests`, 11 `SessionStoreTests`, 23 `SessionServiceTests`, 11 `SessionGuardTickTests`, 5 dans `LidMutationServiceTests` (initiateur `.sessionRecovery`).
+Dont **87 nouveaux** : 32 `SessionPolicyTests`, 11 `SessionStoreTests`, 28 `SessionServiceTests`, 11 `SessionGuardTickTests`, 5 dans `LidMutationServiceTests` (initiateur `.sessionRecovery`).
+
+Relecture, tour 1 (11 tests ajoutés) :
+- Quit pendant une session mise en pause par la garde batterie : la dette de réarmement est effacée, une étape batterie suivante sur secteur à 80 % ne réarme pas. Sans session, le quit laisse la dette intacte (ADR 022 inchangé).
+- Plafond de 7 jours au démarrage et à l'extension ; durées infinies ou NaN refusées ; conversion secondes → nanosecondes et addition sur le compteur continu saturées, jamais de trap.
+
+```
+$ runclosed-cli session start --for 999999999999h   → exit 64 « a session is capped at 7 days »
+$ runclosed-cli session start --for inf             → exit 64 (usage)
+$ runclosed-cli session extend 8d                   → exit 64 (usage)
+$ runclosed-cli definitely-not-a-command            → exit 64
+```
 
 Contrats verrouillés :
 - Échéance continue sur le même boot ; une veille de 6 h dans une session de 1 h rend la session due (ce que `systemUptime` manquerait) ; non due avant l'échéance ; `remaining` à 0 une fois due.

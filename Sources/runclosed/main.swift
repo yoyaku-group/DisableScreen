@@ -559,6 +559,9 @@ func renderSessionError(_ e: SessionError) -> Int32 {
     case .alreadyRunning:
         msg = "refused: a session is already running — use `extend` or `end`"
         code = 3
+    case .durationTooLong:
+        msg = "refused: a session is capped at 7 days"
+        code = 64
     case .nonPositiveDuration:
         msg = "refused: the duration must be greater than zero"
         code = 64
@@ -626,6 +629,12 @@ func cmdSession(_ rest: [String]) -> Int32 {
                     FileHandler.err(sessionUsage)
                     return 64
                 }
+                // Reject an over-cap duration HERE, before any lock or write:
+                // a usage error must not queue behind the guard tick.
+                guard SessionDuration.isAcceptable(parsed) else {
+                    FileHandler.err("refused: a session is capped at 7 days")
+                    return 64
+                }
                 duration = parsed
             case "--indefinite":
                 indefinite = true
@@ -671,6 +680,11 @@ func cmdSession(_ rest: [String]) -> Int32 {
         if let raw = args.first {
             guard let parsed = SessionDuration.parse(raw) else {
                 FileHandler.err(sessionUsage)
+                return 64
+            }
+            // Same cap, same reason: refuse before the lock.
+            guard SessionDuration.isAcceptable(parsed) else {
+                FileHandler.err("refused: a session is capped at 7 days")
                 return 64
             }
             step = parsed

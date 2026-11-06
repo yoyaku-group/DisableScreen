@@ -119,6 +119,7 @@ public struct SessionService {
             case .alreadyRunning: return .failure(.alreadyRunning)
             case .nonPositiveDuration: return .failure(.nonPositiveDuration)
             case .flagOnNotOwned: return .failure(.flagOnNotOwned)
+            case .durationTooLong: return .failure(.durationTooLong)
             }
         case .success(let s):
             session = s
@@ -150,7 +151,10 @@ public struct SessionService {
         -> Result<KeepAwakeSession, SessionError> {
         guard let session = store.load() else { return .failure(.noSession) }
         guard !session.isIndefinite else { return .failure(.indefiniteSession) }
-        guard seconds > 0 else { return .failure(.nonPositiveDuration) }
+        guard seconds.isFinite, seconds > 0 else { return .failure(.nonPositiveDuration) }
+        // Same cap as `start`: an extension is a bounded push, never a way to
+        // reach an unrepresentable deadline.
+        guard seconds <= SessionDuration.maximum else { return .failure(.durationTooLong) }
         let next = SessionPolicy.extend(session, by: seconds, now: currentNow())
         store.save(next)
         return .success(next)
@@ -263,12 +267,38 @@ public struct SessionService {
         }
     }
 
+    /// The ONE end-of-session path. Every way a session can finish — expiry,
+    /// the End button, and the quit teardown — goes through here, so they
+    /// cannot drift apart.
+    ///
     /// A finished session clears its record AND any pending low-battery
-    /// re-arm: the guard must not flip the flag back on for a session that no
-    /// longer exists (ADR 023 §4).
-    private func finish(clearingRecord: Bool) {
-        if clearingRecord { store.clear() }
+    /// re-arm. The latch matters as much as the record: a session paused by
+    /// the guard leaves `releasedByGuard` set, and without this clear the next
+    /// launch on AC would re-arm the flag for a session that no longer exists
+    /// (ADR 023 §4).
+    ///
+    /// Callers run it inside `LidWriteLock`; it takes no lock itself.
+    public func finishSession() {
+        store.clear()
         latchStore.clearPendingRearm()
+    }
+
+    /// Quit teardown (ADR 023 §5): the session ends with the flag it backed.
+    /// It runs only when a session is on disk AND the flag reads off after the
+    /// restore. With no session the quit path is exactly ADR 022's, so a
+    /// pending re-arm owed to the plain switch survives the quit by design.
+    ///
+    /// Callers run it inside `LidWriteLock`; it takes no lock itself.
+    public func finishOnQuit(flagReadsOff: Bool) {
+        guard store.exists, flagReadsOff else { return }
+        finishSession()
+    }
+
+    /// Seam for the release path: it decides whether the record survives (a
+    /// failed release keeps it for the next tick), so it needs the switch.
+    private func finish(clearingRecord: Bool) {
+        guard clearingRecord else { return }
+        finishSession()
     }
 
     private static func map(_ error: LidMutationError) -> SessionError {
@@ -334,6 +364,8 @@ public enum SessionError: Error, Equatable, Sendable {
     /// Starting a timed session on a flag we do not own would succeed now and
     /// fail `notOwned` at expiry — refuse up front (ADR 023 §1).
     case flagOnNotOwned
+    /// Past `SessionDuration.maximum` (7 days) — a usage error.
+    case durationTooLong
     case preconditionUnknown
     case notOwned
     /// The flag already read OFF when a release was requested — no write needed.

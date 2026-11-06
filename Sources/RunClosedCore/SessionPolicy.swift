@@ -39,6 +39,19 @@ public enum SessionPolicy {
         case alreadyRunning
         /// A duration of zero (or less) is not a session.
         case nonPositiveDuration
+        /// Beyond `SessionDuration.maximum` (7 days) — a usage error, not a
+        /// session we are willing to journal.
+        case durationTooLong
+    }
+
+    /// Saturating add: a deadline past the counter's range clamps instead of
+    /// wrapping to a value in the past (which would make the session
+    /// instantly due) or trapping.
+    static func addingContinuous(_ base: UInt64, seconds: TimeInterval) -> UInt64 {
+        let delta = ContinuousClockTimebase.nanoseconds(
+            fromSeconds: SessionDuration.clamped(seconds))
+        let (sum, overflowed) = base.addingReportingOverflow(delta)
+        return overflowed ? UInt64.max : sum
     }
 
     /// Why a session came due.
@@ -120,16 +133,19 @@ public enum SessionPolicy {
         if let existing, !isDue(existing, now: now) {
             return .failure(.alreadyRunning)
         }
-        if let duration, duration <= 0 {
-            return .failure(.nonPositiveDuration)
+        if let duration {
+            guard duration.isFinite, duration > 0 else { return .failure(.nonPositiveDuration) }
+            // Above the cap is a usage error, not a session: an overflowed or
+            // effectively-infinite deadline is not something to journal.
+            guard duration <= SessionDuration.maximum else { return .failure(.durationTooLong) }
         }
         if duration != nil, observedFlag == true, ownership != .ownedThisBoot {
             return .failure(.flagOnNotOwned)
         }
         var session = KeepAwakeSession(startedAt: now.wall, bootID: now.bootID)
         if let duration {
-            session.endsAtContinuous =
-                now.continuousNanoseconds + ContinuousClockTimebase.nanoseconds(fromSeconds: duration)
+            session.endsAtContinuous = addingContinuous(
+                now.continuousNanoseconds, seconds: duration)
             session.endsAtWall = now.wall.addingTimeInterval(duration)
         }
         return .success(session)
@@ -146,10 +162,10 @@ public enum SessionPolicy {
         by seconds: TimeInterval,
         now: Now
     ) -> KeepAwakeSession {
-        guard !session.isIndefinite, seconds > 0 else { return session }
+        guard !session.isIndefinite, seconds.isFinite, seconds > 0,
+              seconds <= SessionDuration.maximum else { return session }
         var next = session
-        next.endsAtContinuous =
-            now.continuousNanoseconds + ContinuousClockTimebase.nanoseconds(fromSeconds: seconds)
+        next.endsAtContinuous = addingContinuous(now.continuousNanoseconds, seconds: seconds)
         next.endsAtWall = now.wall.addingTimeInterval(seconds)
         // Extending is the operator saying "keep going": a paused session
         // resumes, its deadline restated from this instant.
@@ -227,6 +243,24 @@ public enum SessionDuration {
 
     /// The popup's duration buttons, in seconds.
     public static let presets: [TimeInterval] = [3600, 2 * 3600, 4 * 3600, 8 * 3600]
+
+    /// Longest session we accept: 7 days. Not a product opinion about how long
+    /// a Mac should stay awake — a bound, so an absurd `--for 999999999999h`
+    /// is a usage error (exit 64) instead of an overflow, a trapped
+    /// conversion, or a deadline so far out it is indistinguishable from
+    /// "never". The popup only ever offers 8 h.
+    public static let maximum: TimeInterval = 7 * 24 * 3600
+
+    /// Whether a requested duration is usable at all.
+    public static func isAcceptable(_ seconds: TimeInterval) -> Bool {
+        seconds.isFinite && seconds > 0 && seconds <= maximum
+    }
+
+    /// A deadline value safe to store, whatever the caller asked for.
+    public static func clamped(_ seconds: TimeInterval) -> TimeInterval {
+        guard seconds.isFinite, seconds > 0 else { return 0 }
+        return min(seconds, maximum)
+    }
 
     /// `nil` = not parseable (the caller exits 64 with the usage line).
     public static func parse(_ text: String) -> TimeInterval? {
