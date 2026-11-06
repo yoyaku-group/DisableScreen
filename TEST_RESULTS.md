@@ -546,12 +546,12 @@ $ arch -arm64 swift build --build-tests
 Build complete! (0 warning)
 
 $ arch -arm64 swift test
-RunClosedPersistenceTests  44 · RunClosedMacSystemTests 141 · HelperSupport 13
+RunClosedPersistenceTests  46 · RunClosedMacSystemTests 145 · HelperSupport 13
 RunClosedCoreTests        105 · RunClosedAppTests        11
-→ 314/314, 0 échec
+→ 320/320, 0 échec
 ```
 
-Dont **128 nouveaux** : 42 `SessionPolicyTests`, 13 `SessionStoreTests`, 6 `AppLivenessLockTests`, 41 `SessionServiceTests`, 21 `SessionGuardTickTests`, 5 dans `LidMutationServiceTests` (initiateur `.sessionRecovery`).
+Dont **134 nouveaux** : 42 `SessionPolicyTests`, 13 `SessionStoreTests`, 8 `AppLivenessLockTests`, 44 `SessionServiceTests`, 22 `SessionGuardTickTests`, 5 dans `LidMutationServiceTests` (initiateur `.sessionRecovery`).
 
 Relecture, tour 1 (11 tests ajoutés) :
 - Quit pendant une session mise en pause par la garde batterie : la dette de réarmement est effacée, une étape batterie suivante sur secteur à 80 % ne réarme pas. Sans session, le quit laisse la dette intacte (ADR 022 inchangé).
@@ -603,6 +603,14 @@ $ runclosed-cli session start --for 2h --indefinite → exit 64 (usage)
 $ runclosed-cli session bogus                 → exit 64
 $ runclosed-cli definitely-not-a-command      → exit 64
 ```
+
+Relecture, tour 6 (`ai-review-gate`, 0 CRITICAL, 3 WARN corrigés, 6 tests ajoutés) :
+- Démarrage dont `pmset` a rendu 0 et déplacé le flag mais dont la relecture a échoué : échec signalé, flag remis à OFF (`[true, false]`), record retiré.
+- Démarrage dont la relecture est devenue INCONNUE : une seule écriture, record gardé ; il part dès que le flag se lit OFF.
+- Session indéfinie en pause sans réarmement dû : effacée, et un démarrage minuté n'est plus refusé.
+- Au tick : pause gardée tant que le réarmement est dû (sur secteur sous le seuil) ; pause dont le réarmement a été annulé : effacée, flag laissé OFF.
+- `app.lock` : une sonde en cours (verrou partagé) ne fait pas croire à l'app ; `release()` rend le verrou avant la fin du détenteur, idempotent, le verrou se reprend ensuite.
+- Non couverts par un test unitaire (code AppKit) : `release()` dans la section verrouillée du teardown, redessin du compte à rebours après Start, +30 min et End.
 
 Contrats verrouillés :
 - Échéance continue sur le même boot ; une veille de 6 h dans une session de 1 h rend la session due (ce que `systemUptime` manquerait) ; non due avant l'échéance ; `remaining` à 0 une fois due.

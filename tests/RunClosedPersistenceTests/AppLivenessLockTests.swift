@@ -63,4 +63,30 @@ final class AppLivenessLockTests: XCTestCase {
         XCTAssertTrue(app.hold())
         XCTAssertTrue(AppLivenessLock(url: url).isHeld())
     }
+
+    // MARK: — Review round 6
+
+    /// Two probes at once (the CLI and the future backstop) must not see each
+    /// other as the app: a probe's lock is shared, only the app's is
+    /// exclusive.
+    func testAProbeDoesNotReadAnotherProbeAsTheApp() {
+        let url = tempURL()
+        let fd = open(url.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        defer { close(fd) }
+        XCTAssertEqual(flock(fd, LOCK_SH | LOCK_NB), 0, "a probe in flight")
+        XCTAssertFalse(AppLivenessLock(url: url).isHeld())
+    }
+
+    /// The quit teardown gives the lock up explicitly, before the process
+    /// exits: a CLI queued behind it must find the app gone.
+    func testReleaseGivesTheLockUpBeforeTheHolderGoes() {
+        let url = tempURL()
+        let app = AppLivenessLock(url: url)
+        XCTAssertTrue(app.hold())
+        app.release()
+        XCTAssertFalse(AppLivenessLock(url: url).isHeld())
+        app.release()   // idempotent
+        XCTAssertTrue(app.hold(), "it can be taken again")
+    }
 }

@@ -13,10 +13,22 @@ final class SessionServiceTests: XCTestCase {
     private final class FakeLid: LidAssertion, @unchecked Sendable {
         var calls: [Bool] = []
         var failWrites = false
+        /// `pmset` returned 0 and the flag moved, but the readback failed.
+        var landsButFailsOnce = false
+        /// `pmset` returned 0, then `pmset -g` stopped answering.
+        var losesReadbackOnce = false
         let flag: FlagBox
         init(flag: FlagBox) { self.flag = flag }
         func setEnabled(_ enabled: Bool) -> OperationResult {
             calls.append(enabled)
+            if landsButFailsOnce || losesReadbackOnce {
+                flag.value = landsButFailsOnce ? enabled : nil
+                landsButFailsOnce = false
+                losesReadbackOnce = false
+                return OperationResult(requestID: "t", action: .sleepAll, state: .failed,
+                                       nativeRC: 0, readbackOK: false,
+                                       error: "readback: pmset -g did not report SleepDisabled")
+            }
             if failWrites {
                 return OperationResult(requestID: "t", action: .sleepAll, state: .failed,
                                        nativeRC: 1, readbackOK: false,
@@ -543,15 +555,63 @@ final class SessionServiceTests: XCTestCase {
         XCTAssertEqual(rig.lid.calls, [])
     }
 
-    /// A paused session is the low-battery guard's: never reconciled, even
-    /// with the flag OFF (that is what the pause means).
-    func testReconcileLeavesAPausedSession() {
+    /// A paused session stays the low-battery guard's while it still owes a
+    /// re-arm, even with the flag OFF (that is what the pause means).
+    func testReconcileLeavesAPausedSessionWhileTheRearmIsOwed() {
         var rig = makeRig(flag: false, ownedBoot: nil)
         rig.sessionStore.save(KeepAwakeSession(
             startedAt: epoch, endsAtWall: epoch.addingTimeInterval(3600),
             endsAtContinuous: UInt64.max, bootID: "A", pausedReason: .lowBattery))
+        rig.latchStore.save(.init(latch: .init(releasedByGuard: true)))
         XCTAssertNil(rig.service.reconcileOrphan())
         XCTAssertEqual(rig.sessionStore.load()?.pausedReason, .lowBattery)
+    }
+
+    // MARK: — Review round 6
+
+    /// The operator cancelled the re-arm (an OFF command, ADR 022): nothing
+    /// will resume the paused plain switch, and an indefinite session is
+    /// never due. Left alone it would show "Paused" forever and refuse every
+    /// timed start as `alreadyRunning`.
+    func testReconcileClearsAPausedIndefiniteSessionWithNoRearmOwed() {
+        var rig = makeRig(flag: false, ownedBoot: nil)
+        rig.sessionStore.save(KeepAwakeSession(startedAt: epoch, bootID: "A", pausedReason: .lowBattery))
+        XCTAssertEqual(rig.service.reconcileOrphan(), .cleared)
+        XCTAssertNil(rig.sessionStore.load())
+        guard case .success = rig.service.start(for: 3600) else {
+            return XCTFail("a timed start must no longer be refused")
+        }
+    }
+
+    /// `pmset` returned 0 and the flag went ON, but the readback failed: the
+    /// start is reported failed and the flag is put back OFF, where the
+    /// operator had it, so no flag is left awake without a record.
+    func testFailedStartPutsBackAFlagThatLandedAnyway() {
+        var rig = makeRig(flag: false, ownedBoot: nil)
+        rig.lid.landsButFailsOnce = true
+        guard case .failure(.backendFailed) = rig.service.start(for: 3600) else {
+            return XCTFail("expected a backend failure")
+        }
+        XCTAssertEqual(rig.lid.calls, [true, false])
+        XCTAssertEqual(rig.flag.value, false)
+        XCTAssertNil(rig.sessionStore.load())
+    }
+
+    /// The readback went UNKNOWN after the write: the Mac may be awake, so
+    /// the record stays (UNKNOWN is not OFF), and it goes once the flag reads
+    /// OFF again.
+    func testFailedStartKeepsTheRecordWhenTheFlagIsUnknown() {
+        var rig = makeRig(flag: false, ownedBoot: nil)
+        rig.lid.losesReadbackOnce = true
+        guard case .failure(.backendFailed) = rig.service.start(for: 3600) else {
+            return XCTFail("expected a backend failure")
+        }
+        XCTAssertEqual(rig.lid.calls, [true], "no blind write on an unknown flag")
+        XCTAssertNotNil(rig.sessionStore.load())
+        XCTAssertNil(rig.service.reconcileOrphan())
+        rig.flag.value = false
+        XCTAssertEqual(rig.service.reconcileOrphan(), .cleared)
+        XCTAssertNil(rig.sessionStore.load())
     }
 
     /// A due session is expiry's, not reconciliation's: `step()` ends it and

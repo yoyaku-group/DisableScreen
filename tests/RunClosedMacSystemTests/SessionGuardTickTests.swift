@@ -389,18 +389,34 @@ final class SessionGuardTickTests: XCTestCase {
         XCTAssertNil(rig.sessionStore.load()?.pausedReason)
     }
 
-    /// While the flag stays OFF the pause stays: nothing is keeping the Mac
-    /// awake, and saying so is the point of the pause.
-    func testPauseStaysWhileTheFlagIsOff() {
+    /// While the flag stays OFF and the re-arm is still owed, the pause
+    /// stays: nothing is keeping the Mac awake, and saying so is the point of
+    /// the pause.
+    func testPauseStaysWhileTheFlagIsOffAndTheRearmIsOwed() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 8))
+        saveSession(rig)
+        _ = rig.guardService.tick()
+        rig.battery.state = Self.reading(false, 12)       // charging, below the re-arm threshold
+        let outcome = rig.guardService.tick()
+        XCTAssertFalse(outcome.sessionResumed)
+        XCTAssertNil(outcome.sessionReconciled)
+        XCTAssertEqual(rig.sessionStore.load()?.pausedReason, .lowBattery)
+        XCTAssertEqual(rig.flag.value, false)
+    }
+
+    /// Review round 6: the operator cancelled the re-arm with an OFF command.
+    /// Nothing will resume the pause, so the next tick clears the session
+    /// instead of leaving "Paused" on screen until the deadline.
+    func testPauseWithACancelledRearmIsCleared() {
         var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 8))
         saveSession(rig)
         _ = rig.guardService.tick()
         rig.latchStore.clearPendingRearm()
         rig.battery.state = Self.reading(false, 40)
         let outcome = rig.guardService.tick()
-        XCTAssertFalse(outcome.sessionResumed)
-        XCTAssertEqual(rig.sessionStore.load()?.pausedReason, .lowBattery)
-        XCTAssertEqual(rig.flag.value, false)
+        XCTAssertEqual(outcome.sessionReconciled, .cleared)
+        XCTAssertNil(rig.sessionStore.load())
+        XCTAssertEqual(rig.flag.value, false, "a cancelled re-arm stays cancelled")
     }
 
     // MARK: — Review round 5: orphan sessions

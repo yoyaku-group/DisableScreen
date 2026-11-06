@@ -92,9 +92,12 @@ public struct SessionService {
 
     public enum StartOutcome: Equatable, Sendable {
         case started(KeepAwakeSession)
-        /// The flag was already ON and owned on this boot: the existing
-        /// indefinite session (the plain switch) simply became timed. No
-        /// second write was issued.
+        /// The flag was already ON with no live session on record (set before
+        /// the upgrade, by `lid-stay-awake on`, or by another tool for an
+        /// indefinite start): the new session took it over without a second
+        /// write. A running session is never adopted: `start` refuses it
+        /// (`alreadyRunning`), so the plain switch never silently becomes
+        /// timed.
         case adoptedRunningFlag(KeepAwakeSession)
     }
 
@@ -145,16 +148,45 @@ public struct SessionService {
             latchStore.clearPendingRearm()
             return .success(.adoptedRunningFlag(session))
         case .success(let op):
-            restore(existing)
+            abandonStart(previous: existing, afterWrite: true)
             return .failure(.backendFailed(op.error ?? "not verified (state=\(op.state.rawValue))"))
         case .failure(let error):
-            restore(existing)
+            // Only a backend failure ran `pmset`; B1/B2 refusals wrote nothing.
+            var wrote = false
+            if case .backendFailed = error { wrote = true }
+            abandonStart(previous: existing, afterWrite: wrote)
             return .failure(Self.map(error))
         }
     }
 
-    /// A failed start puts back the record it replaced (a due session the
-    /// next tick still has to end), or removes its own record.
+    /// Undo a failed start.
+    ///
+    /// Without a write, or with the flag reading OFF afterwards, the record
+    /// it replaced comes back (a due session the next tick still has to end),
+    /// or its own record goes.
+    ///
+    /// A write that failed its readback may still have landed: `pmset`
+    /// returned 0, then `pmset -g` timed out or caught up late. A start only
+    /// writes from an observed OFF, so a flag now reading ON is ours after
+    /// all and is put back OFF, where the operator had it, before the record
+    /// goes. When that cannot be done, or the flag reads UNKNOWN (which is
+    /// not OFF, ADR 009), the record stays: the Mac may be awake, and the
+    /// tick drops the record once the flag reads OFF.
+    private mutating func abandonStart(previous: KeepAwakeSession?, afterWrite: Bool) {
+        guard afterWrite else { return restore(previous) }
+        switch observedFlag() {
+        case false?:
+            restore(previous)
+        case true?:
+            if case .success(let op) = applyLid(false, .operatorCommand), op.state == .verified {
+                restore(previous)
+            }
+        case nil:
+            break
+        }
+    }
+
+    /// Put back the record a failed start replaced, or remove its own.
     private func restore(_ previous: KeepAwakeSession?) {
         if let previous { store.save(previous) } else { store.clear() }
     }
@@ -230,31 +262,38 @@ public struct SessionService {
     // MARK: — Orphan reconciliation (caller holds LidWriteLock)
 
     public enum ReconcileOutcome: Equatable, Sendable {
-        /// A running session whose flag reads OFF: the record went (and, for
-        /// a timed session, its re-arm debt with it).
+        /// A session whose flag reads OFF and that nothing will resume: the
+        /// record went (and, for a timed session, its re-arm debt with it).
         case cleared
         /// The guard released the flag but its pause was never written: the
         /// pause is restored, so the re-arm can still revive the session.
         case repaused
     }
 
-    /// A RUNNING (not paused) session whose flag reads OFF backs nothing.
+    /// A session whose flag reads OFF backs nothing, unless the low-battery
+    /// guard still owes it a re-arm.
     ///
     /// Every writer runs under `LidWriteLock`, so inside the lock this state
-    /// is never a start in progress. It is what remains when the process died
-    /// between writing the record and setting the flag (journal before
-    /// change), when the flag went off behind our back (`lid-stay-awake off`,
-    /// `pmset` by hand), or when a battery pause failed to save. Left alone,
-    /// the menu bar would count down to a deadline while the Mac sleeps on
-    /// lid close.
+    /// is never a start in progress. A RUNNING session here is what remains
+    /// when the process died between writing the record and setting the flag
+    /// (journal before change), when the flag went off behind our back
+    /// (`lid-stay-awake off`, `pmset` by hand), or when a battery pause failed
+    /// to save. A PAUSED session waits on the guard's re-arm; once that debt
+    /// is gone (an operator OFF cancels it, ADR 022, or the guard voids it for
+    /// a session it cannot revive), nothing will ever resume it, and an
+    /// indefinite one is never due — it would sit as "Paused" forever and
+    /// refuse every new start as `alreadyRunning`.
     ///
-    /// UNKNOWN is not OFF (ADR 009): only an observed `false` reconciles. A
-    /// paused session is the low-battery guard's and is never touched here.
+    /// UNKNOWN is not OFF (ADR 009): only an observed `false` reconciles.
     @discardableResult
     public mutating func reconcileOrphan() -> ReconcileOutcome? {
-        guard let session = store.load(), !session.isPaused else { return nil }
+        guard let session = store.load() else { return nil }
         guard observedFlag() == false else { return nil }
-        if latchStore.load().latch.releasedByGuard {
+        let rearmOwed = latchStore.load().latch.releasedByGuard
+        if session.isPaused {
+            // Still the guard's: the re-arm on AC revives it.
+            guard !rearmOwed else { return nil }
+        } else if rearmOwed {
             // The guard owes a re-arm: this is a battery pause whose write
             // failed, not an orphan. Put the pause back.
             return pauseForBattery() ? .repaused : nil

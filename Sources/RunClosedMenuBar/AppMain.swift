@@ -139,6 +139,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the same lock — a guard tick must not interleave with it.
         let bootID = clock.bootID
         LidWriteLock().withLock {
+            // Give up `app.lock` INSIDE this section: a CLI `session start`
+            // queued behind the teardown must find the app gone once it gets
+            // the lid lock. Otherwise the dying process still holds the flock
+            // until exit, the CLI's liveness check passes, and a timed
+            // session starts with nothing left to end it.
+            self.appLiveness.release()
             var lidService = LidMutationService(
                 bootID: bootID,
                 mutator: LidAssertions.live(),
@@ -689,6 +695,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.logSession(.failure(error))
             }
             self.refreshLidCache()
+            // The flag may not change (adoption, +30 min): redraw the countdown now.
+            self.refreshSessionDisplay()
         }
     }
 
@@ -707,6 +715,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             if case .failure(let error) = result { self.logSession(.failure(error)) }
             self.refreshLidCache()
+            self.refreshSessionDisplay()
         }
     }
 
@@ -729,6 +738,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.logSession(.failure(error))
             }
             self.refreshLidCache()
+            self.refreshSessionDisplay()
         }
     }
 

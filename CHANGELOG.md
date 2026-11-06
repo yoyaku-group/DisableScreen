@@ -40,7 +40,11 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   off (a crash between the record and the flag, `lid-stay-awake off`, or
   `pmset` by hand) is cleared on the next tick instead of counting down for
   nothing. Switching the low-battery guard off no longer stops session
-  deadlines: the app then runs the session step on its own.
+  deadlines: the app then runs the session step on its own. A paused session
+  whose re-arm was cancelled is cleared too. A start whose `pmset` write
+  failed its readback checks the flag again and turns it back off if the
+  write landed anyway. Quitting gives `app.lock` up inside the lid lock, so a
+  CLI start queued behind the quit is refused.
 - `runclosed session start --for <2h|90m|1h30m> | start --indefinite | extend
   [30m] | end | status [--json]`. `--for` together with `--indefinite` is a
   usage error; a timed start without the menu-bar app running exits 3. Mutating subcommands take the same lock as

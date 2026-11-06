@@ -13,7 +13,10 @@ import Foundation
 ///
 /// Probing opens a NEW file descriptor: flock locks belong to the open file
 /// description, so a probe from the holding process still sees the lock as
-/// held (that is what makes it testable in one process).
+/// held (that is what makes it testable in one process). A probe takes a
+/// SHARED lock, so two probes running at once (the CLI and the L2
+/// backstop) never mistake each other for the app; only the app's
+/// exclusive lock reads as held.
 public final class AppLivenessLock: @unchecked Sendable {
     public let url: URL
     private var heldFD: Int32 = -1
@@ -31,12 +34,22 @@ public final class AppLivenessLock: @unchecked Sendable {
     }
 
     deinit {
-        if heldFD >= 0 { close(heldFD) }
+        release()
+    }
+
+    /// Give the lock up before the process exits. The app calls it in its
+    /// quit teardown, inside the lid lock section, so a CLI waiting on that
+    /// lock sees the app as gone. Idempotent.
+    public func release() {
+        guard heldFD >= 0 else { return }
+        close(heldFD)
+        heldFD = -1
     }
 
     /// Take the lock for the life of this object (the app keeps it until it
     /// exits). `false` when the file cannot be opened or another process
-    /// already holds it (a second app instance).
+    /// already holds it (a second app instance), or a probe holds its shared
+    /// lock at that instant (the app retries).
     @discardableResult
     public func hold() -> Bool {
         if heldFD >= 0 { return true }
@@ -57,7 +70,7 @@ public final class AppLivenessLock: @unchecked Sendable {
         let fd = open(url.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
         guard fd >= 0 else { return false }
         defer { close(fd) }
-        if flock(fd, LOCK_EX | LOCK_NB) == 0 {
+        if flock(fd, LOCK_SH | LOCK_NB) == 0 {
             flock(fd, LOCK_UN)
             return false
         }

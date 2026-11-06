@@ -639,10 +639,10 @@ func cmdSession(_ rest: [String]) -> Int32 {
             // backstop will add a second enforcer). A timed session with
             // nothing to end it would keep the Mac awake past its deadline:
             // refuse it. Checked INSIDE the lock: the app's quit teardown
-            // takes this same lock before its process (and `app.lock`) goes,
-            // so an app seen alive here is either still running after the
-            // start or ends the session in its teardown. A crash in between
-            // is the backstop's case.
+            // gives up `app.lock` inside this same lock section, so a start
+            // queued behind a teardown finds the app gone, and an app seen
+            // alive here runs its teardown (which ends the session) only
+            // after this start. A crash in between is the backstop's case.
             if duration != nil, !AppLivenessLock().isHeld() { return nil }
             // `start` itself clears a pending low-battery re-arm on success,
             // for the popup and the CLI alike.
