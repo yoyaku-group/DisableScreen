@@ -631,16 +631,20 @@ func cmdSession(_ rest: [String]) -> Int32 {
             FileHandler.err(sessionUsage)
             return 64
         }
+        // Today only the menu-bar app enforces a deadline (the L2 launchd
+        // backstop will add a second enforcer). A timed session with nothing
+        // to end it would keep the Mac awake past its deadline: refuse it.
+        if duration != nil, !AppLivenessLock().isHeld() {
+            FileHandler.err("refused: RunClosed.app is not running, so nothing would end this session at its deadline. Open RunClosed first.")
+            return 3
+        }
         // Same lock as `lid-stay-awake on|off`: the session writes the record
         // and the flag, so it must not interleave with a guard tick.
         var svc = makeSessionService()
         let result = LidWriteLock().withLock { () -> Result<SessionService.StartOutcome, SessionError> in
-            let r = svc.start(for: duration)
-            if case .success = r {
-                // An explicit start supersedes a pending low-battery re-arm.
-                LowBatteryLatchStore().clearPendingRearm()
-            }
-            return r
+            // `start` itself clears a pending low-battery re-arm on success,
+            // for the popup and the CLI alike.
+            svc.start(for: duration)
         }
         switch result {
         case .success(let outcome):

@@ -29,10 +29,15 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   plain switch keeps its ADR 022 re-arm after a reboot and across a quit.
   Turning the switch on over a live timed session (for example one paused by
   the battery guard) resumes it with its deadline instead of replacing it.
-  A pause reason written by a later version keeps the session paused.
+  A pause reason written by a later version keeps the session paused. The
+  pause also ends when the flag is back on and ours by any path. End on an
+  indefinite session is the switch OFF and turns off an adopted flag; End on
+  a timed session never turns off a flag another tool owns. While the app
+  runs it holds `app.lock`; until the launchd backstop ships, the CLI refuses
+  a timed session when the app is not running, since nothing would end it.
 - `runclosed session start --for <2h|90m|1h30m> | start --indefinite | extend
   [30m] | end | status [--json]`. `--for` together with `--indefinite` is a
-  usage error. Mutating subcommands take the same lock as
+  usage error; a timed start without the menu-bar app running exits 3. Mutating subcommands take the same lock as
   `lid-stay-awake on|off`; exit codes stay 0 / 3 (refused by policy) / 5
   (backend failure) / 64 (usage). The session record lives in
   `~/Library/Application Support/RunClosed/session.json`, so a future launchd

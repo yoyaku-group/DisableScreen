@@ -54,6 +54,13 @@ final class SessionGuardTickTests: XCTestCase {
         init(_ s: BatteryState) { state = s }
     }
 
+    /// Hooks called from INSIDE the tick: `session` from the session step
+    /// (its wall clock), `battery` from the battery step (its readback).
+    private final class Probe: @unchecked Sendable {
+        var session: (() -> Void)?
+        var battery: (() -> Void)?
+    }
+
     private struct Rig {
         var guardService: LowBatteryGuardService
         var session: SessionService
@@ -65,6 +72,7 @@ final class SessionGuardTickTests: XCTestCase {
         let latchStore: LowBatteryLatchStore
         let battery: BatteryBox
         let lockURL: URL
+        let probe: Probe
     }
 
     private let epoch = Date(timeIntervalSince1970: 1_800_000_000)
@@ -91,6 +99,7 @@ final class SessionGuardTickTests: XCTestCase {
         let batteryBox = BatteryBox(battery)
         let clock = ClockBox(wall: epoch, continuous: 1_000)
         let lockURL = dir.appendingPathComponent("lid.lock")
+        let probe = Probe()
 
         let apply: (Bool, LidMutationService.Initiator) -> Result<OperationResult, LidMutationError> = { enabled, initiator in
             let rec = lidStore.load()
@@ -116,7 +125,7 @@ final class SessionGuardTickTests: XCTestCase {
 
         let sessionService = SessionService(
             store: sessionStore, latchStore: latchStore, continuous: clock,
-            wallClock: { clock.wall }, observedFlag: { flagBox.value },
+            wallClock: { probe.session?(); return clock.wall }, observedFlag: { flagBox.value },
             ownershipRecord: {
                 let rec = lidStore.load()
                 return (rec.bootID, rec.ownedEnabled)
@@ -127,7 +136,7 @@ final class SessionGuardTickTests: XCTestCase {
             lidService: LidMutationService(bootID: "A", mutator: lid, store: lidStore,
                                            priorProvider: { flagBox.value }),
             latchStore: latchStore,
-            batteryProvider: { batteryBox.state },
+            batteryProvider: { probe.battery?(); return batteryBox.state },
             sleeper: sleeper,
             lock: LidWriteLock(url: lockURL),
             auditLog: LowBatteryAuditLog(url: dir.appendingPathComponent("audit.jsonl")),
@@ -136,7 +145,7 @@ final class SessionGuardTickTests: XCTestCase {
         return Rig(guardService: guardService, session: sessionService, lid: lid,
                    sleeper: sleeper, flag: flagBox, clock: clock,
                    sessionStore: sessionStore, latchStore: latchStore,
-                   battery: batteryBox, lockURL: lockURL)
+                   battery: batteryBox, lockURL: lockURL, probe: probe)
     }
 
     /// A live 2 h session starting from the rig's clock.
@@ -155,14 +164,23 @@ final class SessionGuardTickTests: XCTestCase {
     /// the same file and block forever. A second non-blocking acquisition from
     /// another fd must also fail while the tick runs.
     func testTickDoesNotNestTheWriteLock() {
-        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 60))
+        let rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 60))
         saveSession(rig, duration: 60)
         rig.clock.advance(111)
 
-        // If the tick nests, this call never returns and the test hangs —
-        // exactly the app-freezing deadlock the rule prevents.
-        let outcome = rig.guardService.tick()
-        XCTAssertEqual(outcome.session, .ended(.released))
+        // If the tick nests, it never returns — exactly the app-freezing
+        // deadlock the rule prevents. Run it on its own thread so the test
+        // FAILS by name after a timeout instead of hanging the whole job.
+        final class Run: @unchecked Sendable {
+            var guardService: LowBatteryGuardService
+            var outcome: LowBatteryGuardService.TickOutcome?
+            let done: XCTestExpectation
+            init(_ g: LowBatteryGuardService, _ e: XCTestExpectation) { guardService = g; done = e }
+        }
+        let run = Run(rig.guardService, expectation(description: "tick returns"))
+        Thread { run.outcome = run.guardService.tick(); run.done.fulfill() }.start()
+        wait(for: [run.done], timeout: 10)
+        XCTAssertEqual(run.outcome?.session, .ended(.released))
 
         // Nothing is still holding the lock afterwards.
         let other = LidWriteLock(url: rig.lockURL)
@@ -172,22 +190,25 @@ final class SessionGuardTickTests: XCTestCase {
         XCTAssertTrue(ran)
     }
 
-    /// The session expiry and the battery step share ONE section: while the
-    /// tick runs, no other writer can get in.
+    /// The session expiry and the battery step share ONE section: probed from
+    /// inside each step while `tick()` runs, no other writer can get in. A
+    /// refactor that dropped the lock between the two steps fails here.
     func testTheLockIsExclusiveForTheWholeTick() {
-        var rig = makeRig(flag: false, ownedBoot: nil, battery: Self.reading(false, 60))
-        let lock = rig.guardService.lock
-        let other = LidWriteLock(url: lock.url)
-        final class Seen: @unchecked Sendable { var entered = 0 }
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 60))
+        saveSession(rig)
+        let other = LidWriteLock(url: rig.lockURL)
+        final class Seen: @unchecked Sendable { var session: [Bool] = []; var battery: [Bool] = [] }
         let seen = Seen()
-        var insideProbe: Int? = -1
-        _ = lock.withLock { () -> Bool in
-            insideProbe = other.tryWithLock { () -> Int in seen.entered += 1; return 1 }
-            return true
-        }
-        XCTAssertNil(insideProbe, "the section the tick takes excludes every other fd")
-        XCTAssertEqual(seen.entered, 0)
-        XCTAssertEqual(other.tryWithLock { 2 }, 2, "and it is released afterwards")
+        rig.probe.session = { seen.session.append(other.tryWithLock { 1 } == nil) }
+        rig.probe.battery = { seen.battery.append(other.tryWithLock { 1 } == nil) }
+        _ = rig.guardService.tick()
+        rig.probe.session = nil
+        rig.probe.battery = nil
+        XCTAssertFalse(seen.session.isEmpty, "the session step ran inside the tick")
+        XCTAssertFalse(seen.battery.isEmpty, "the battery step ran inside the tick")
+        XCTAssertTrue(seen.session.allSatisfy { $0 }, "locked during the session step")
+        XCTAssertTrue(seen.battery.allSatisfy { $0 }, "locked during the battery step")
+        XCTAssertEqual(other.tryWithLock { 2 }, 2, "and released afterwards")
     }
 
     // MARK: — Expiry end order
@@ -329,5 +350,51 @@ final class SessionGuardTickTests: XCTestCase {
         XCTAssertNil(second.mutation)
         XCTAssertNil(second.mutationError, "no refusal repeated every tick")
         XCTAssertEqual(rig.lid.calls, [], "the flag stays off")
+    }
+
+    // MARK: — Review round 4: a pause ends when the flag is back
+
+    /// The operator turned the flag back on themselves (switch or CLI) while
+    /// the session was paused: the next tick resumes the countdown, so the
+    /// menu bar no longer says "Paused" while the Mac is awake.
+    func testPauseEndsWhenTheOperatorTurnsTheFlagBackOn() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 8))
+        saveSession(rig)
+        _ = rig.guardService.tick()                       // release + pause
+        XCTAssertEqual(rig.sessionStore.load()?.pausedReason, .lowBattery)
+        _ = rig.guardService.lidService.setEnabled(true, initiator: .operatorCommand)
+        rig.latchStore.clearPendingRearm()                // the operator command supersedes it
+        rig.battery.state = Self.reading(false, 40)
+        let outcome = rig.guardService.tick()
+        XCTAssertNil(outcome.mutation)
+        XCTAssertTrue(outcome.sessionResumed)
+        XCTAssertNil(rig.sessionStore.load()?.pausedReason)
+    }
+
+    /// Same, with the re-arm debt still pending: the guard finds the flag
+    /// already ON and the session resumes too.
+    func testPauseEndsWhenTheRearmFindsTheFlagAlreadyOn() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 8))
+        saveSession(rig)
+        _ = rig.guardService.tick()
+        _ = rig.guardService.lidService.setEnabled(true, initiator: .operatorCommand)
+        rig.battery.state = Self.reading(false, 40)
+        let outcome = rig.guardService.tick()
+        XCTAssertTrue(outcome.sessionResumed)
+        XCTAssertNil(rig.sessionStore.load()?.pausedReason)
+    }
+
+    /// While the flag stays OFF the pause stays: nothing is keeping the Mac
+    /// awake, and saying so is the point of the pause.
+    func testPauseStaysWhileTheFlagIsOff() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 8))
+        saveSession(rig)
+        _ = rig.guardService.tick()
+        rig.latchStore.clearPendingRearm()
+        rig.battery.state = Self.reading(false, 40)
+        let outcome = rig.guardService.tick()
+        XCTAssertFalse(outcome.sessionResumed)
+        XCTAssertEqual(rig.sessionStore.load()?.pausedReason, .lowBattery)
+        XCTAssertEqual(rig.flag.value, false)
     }
 }

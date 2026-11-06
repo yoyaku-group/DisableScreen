@@ -61,7 +61,7 @@ SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
 Test:
 
 ```bash
-swift test        # 290 tests across Core / MacSystem / Persistence / UI logic
+swift test        # 302 tests across Core / MacSystem / Persistence / UI logic
 ```
 
 ## Install
@@ -99,6 +99,7 @@ session.json            # current keep-awake session: id, boot, deadlines, pause
 low_battery_guard.json  # guard latch (notifications, pending re-arm)
 low_battery_audit.jsonl # one line per low-battery mutation
 lid.lock                # cross-process lock serialising every lid writer
+app.lock                # held while the menu-bar app runs (it enforces session deadlines)
 ```
 
 ## Safety model

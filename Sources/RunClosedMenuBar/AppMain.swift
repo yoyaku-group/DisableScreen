@@ -74,6 +74,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// overlap, and the alert state that drives the status icon.
     private var guardTimer: Timer?
     private let guardQueue = DispatchQueue(label: "com.benjaminbelaga.RunClosed.lowBatteryGuard", qos: .utility)
+    /// Held for the app's whole life: tells the CLI (and the L2 backstop) that
+    /// something is enforcing session deadlines (ADR 023).
+    private let appLiveness = AppLivenessLock()
+    /// One store for the menu-bar refreshes: the canonical init creates the
+    /// directory, which has no place on every main-thread icon update.
+    private let sessionStore = SessionStore()
     private var guardTickInFlight = false
     private var batteryAlert = false
     static let lowBatteryTickInterval: TimeInterval = 30
@@ -90,6 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: — Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        appLiveness.hold()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.target = self
         statusItem.button?.action = #selector(statusItemClicked(_:))
@@ -258,7 +265,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateStatusTitle() {
         guard let button = statusItem.button else { return }
         let now = SystemContinuousClock(bootID: clock.bootID)
-        let session = SessionStore().load()
+        let session = sessionStore.load()
         let policyNow = SessionPolicy.Now(
             wall: Date(),
             continuousNanoseconds: now.nowContinuousNanoseconds,
@@ -508,7 +515,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             wall: Date(),
             continuousNanoseconds: clock.nowContinuousNanoseconds,
             bootID: self.clock.bootID)
-        guard let session = SessionStore().load() else {
+        guard let session = sessionStore.load() else {
             return PopupState.SessionRow(label: nil, timed: false, indefinite: false,
                                          pausedReason: nil, due: false)
         }
@@ -521,7 +528,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             label = L10n.t("Indefinite — switch it off to end it")
         } else if let ends = session.endsAtWall {
             let formatter = DateFormatter()
-            formatter.setLocalizedDateFormatFromTemplate("HH:mm")
+            // A session can last up to 7 days: past today, name the day too,
+            // or "Until 14:30" on Sunday would read as today for a Tuesday end.
+            formatter.setLocalizedDateFormatFromTemplate(
+                Calendar.current.isDateInToday(ends) ? "HH:mm" : "EEE HH:mm")
             let until = formatter.string(from: ends)
             if session.pausedReason == .lowBattery {
                 // The guard released the flag: say so, the Mac can sleep now.
@@ -606,7 +616,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // its latch clear cannot be overwritten by a stale tick save.
             // Non-blocking on main: if a guard tick (or the CLI) holds the
             // lock, say "busy" instead of freezing the menu bar.
-            let sessionStore = SessionStore()
+            let sessionStore = self.sessionStore
             guard let result = LidWriteLock().tryWithLock({ () -> Result<OperationResult, LidMutationError> in
                 let r = service.setEnabled(target, initiator: .operatorCommand)
                 // The operator's explicit choice supersedes a pending

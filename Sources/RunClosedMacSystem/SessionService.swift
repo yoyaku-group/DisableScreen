@@ -11,10 +11,12 @@ import RunClosedPersistence
 /// deadlock the app. Taking the lock here would make every one of those call
 /// sites a nested acquisition. The rule is stated on each mutating method.
 ///
-/// The lid backend is injected as two closures rather than a stored
-/// `LidMutationService`: the guard tick and the popup each own their service
-/// instance, and a struct copy of it would silently mutate a different
-/// ownership view. Closures keep one authority per process.
+/// The lid backend is injected as closures rather than a stored
+/// `LidMutationService`. Ownership lives only on disk (`owned_lid.json`),
+/// read and written under the caller's `LidWriteLock`, so the fresh service
+/// `live()` builds per call sees exactly what the guard's own service sees.
+/// If `LidMutationService` ever caches ownership in memory, this seam must
+/// take the caller's instance instead.
 public struct SessionService {
 
     public var store: SessionStore
@@ -132,10 +134,15 @@ public struct SessionService {
         let result = applyLid(true, .operatorCommand)
         switch result {
         case .success(let op) where op.state == .verified:
+            // An explicit start supersedes a pending low-battery re-arm, on
+            // every surface (popup and CLI alike).
+            latchStore.clearPendingRearm()
             return .success(.started(session))
         case .failure(.noChangeRequested(target: true)):
-            // The flag was already ON and owned: the previous session (most
-            // likely the indefinite plain switch) is replaced in place.
+            // The flag was already ON: owned for a timed start (the policy
+            // refuses a foreign flag), possibly foreign for an indefinite
+            // one, which `end()` then releases as an operator command.
+            latchStore.clearPendingRearm()
             return .success(.adoptedRunningFlag(session))
         case .success(let op):
             restore(existing)
@@ -172,11 +179,20 @@ public struct SessionService {
         return .success(next)
     }
 
-    /// Operator pressed End. Same release gate as expiry (`.sessionRecovery`)
-    /// so End can never turn off a flag another tool owns.
+    /// Operator pressed End (or ran `session end`).
+    ///
+    /// A TIMED session ends through the same ownership gate as expiry, so End
+    /// never turns off a flag another tool owns (a timed start refuses a
+    /// foreign flag in the first place). An INDEFINITE session is the plain
+    /// switch, which may have adopted a flag another tool set: End is then the
+    /// switch OFF, an operator command (ADR 021). Otherwise the record would
+    /// go while the Mac stays awake with no deadline.
     public mutating func end() -> Result<SessionEndOutcome, SessionError> {
         guard let session = store.load() else { return .failure(.noSession) }
-        return .success(release(session, clearingRecord: true))
+        let initiator: LidMutationService.Initiator = session.isIndefinite
+            ? .operatorCommand
+            : Self.releaseInitiator(for: session, currentBootID: continuous.bootID)
+        return .success(release(session, initiator: initiator, clearingRecord: true))
     }
 
     // MARK: — Expiry (caller holds LidWriteLock — called from the guard tick)
@@ -199,7 +215,10 @@ public struct SessionService {
         guard let session = store.load() else { return .noSession }
         let now = currentNow()
         guard SessionPolicy.dueReason(session, now: now) != nil else { return .notDue }
-        let outcome = release(session, clearingRecord: true)
+        let outcome = release(
+            session,
+            initiator: Self.releaseInitiator(for: session, currentBootID: continuous.bootID),
+            clearingRecord: true)
         switch outcome {
         case .released, .flagNotOwned, .flagAlreadyOff:
             return .ended(outcome)
@@ -231,6 +250,17 @@ public struct SessionService {
         return true
     }
 
+    /// The flag reads ON and ours again while the session is paused: it came
+    /// back another way (the switch, `lid-stay-awake on`, a re-arm that found
+    /// it already on). Resume the countdown, as long as the guard itself could
+    /// have re-armed this session; otherwise "Paused" would stay on screen
+    /// while the Mac is awake.
+    @discardableResult
+    public mutating func resumeIfFlagIsBack() -> Bool {
+        guard allowsRearm() else { return false }
+        return resumeAfterRearm()
+    }
+
     /// May the guard re-arm the flag? Only while a session is still live and
     /// belongs to this boot. `true` when there is no session at all — that is
     /// ADR 022's behaviour, untouched.
@@ -257,9 +287,11 @@ public struct SessionService {
             : .sessionRecovery(bootID: session.bootID)
     }
 
-    /// Release the flag for `session`, through the ownership gate.
-    private mutating func release(_ session: KeepAwakeSession, clearingRecord: Bool) -> SessionEndOutcome {
-        let result = applyLid(false, Self.releaseInitiator(for: session, currentBootID: continuous.bootID))
+    /// Release the flag for `session` as `initiator`.
+    private mutating func release(_ session: KeepAwakeSession,
+                                  initiator: LidMutationService.Initiator,
+                                  clearingRecord: Bool) -> SessionEndOutcome {
+        let result = applyLid(false, initiator)
         switch result {
         case .success(let op) where op.state == .verified:
             finish(clearingRecord: clearingRecord)

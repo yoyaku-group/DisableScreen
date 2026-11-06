@@ -546,12 +546,12 @@ $ arch -arm64 swift build --build-tests
 Build complete! (0 warning)
 
 $ arch -arm64 swift test
-RunClosedPersistenceTests  38 · RunClosedMacSystemTests 126 · HelperSupport 13
+RunClosedPersistenceTests  43 · RunClosedMacSystemTests 133 · HelperSupport 13
 RunClosedCoreTests        102 · RunClosedAppTests        11
-→ 290/290, 0 échec
+→ 302/302, 0 échec
 ```
 
-Dont **104 nouveaux** : 39 `SessionPolicyTests`, 13 `SessionStoreTests`, 34 `SessionServiceTests`, 13 `SessionGuardTickTests`, 5 dans `LidMutationServiceTests` (initiateur `.sessionRecovery`).
+Dont **116 nouveaux** : 39 `SessionPolicyTests`, 13 `SessionStoreTests`, 5 `AppLivenessLockTests`, 38 `SessionServiceTests`, 16 `SessionGuardTickTests`, 5 dans `LidMutationServiceTests` (initiateur `.sessionRecovery`).
 
 Relecture, tour 1 (11 tests ajoutés) :
 - Quit pendant une session mise en pause par la garde batterie : la dette de réarmement est effacée, une étape batterie suivante sur secteur à 80 % ne réarme pas. Sans session, le quit laisse la dette intacte (ADR 022 inchangé).
@@ -577,6 +577,14 @@ Relecture, tour 3 (`ai-review-gate`, 0 CRITICAL, 3 WARN corrigés, 10 tests ajou
 - `save()` dans un dossier absent : `false`, aucun dossier créé.
 - Arguments de `session start` (fonction pure, sans binaire) : `--for` + `--indefinite` dans les deux ordres → usage ; aucun argument, valeur manquante ou illisible, option inconnue → usage ; `--for 200h` → plafond.
 - `session start --for … --indefinite` n'a pas été lancé sur la machine : un binaire périmé aurait démarré une session réelle. Le refus est couvert par le test pur ci-dessus.
+
+Relecture, tour 4 (`ai-review-gate`, 0 CRITICAL, 5 WARN corrigés, 12 tests ajoutés) :
+- Pause batterie levée quand l'opérateur rallume le flag lui-même, ou quand le réarmement le trouve déjà ON ; pause conservée tant que le flag reste OFF.
+- End sur une session indéfinie adoptée par-dessus un flag posé par un autre outil : flag éteint, record effacé. End sur une session minutée : flag d'un autre outil laissé intact, aucun appel `pmset`.
+- Démarrage réussi : dette de réarmement effacée ; démarrage raté : dette conservée.
+- `app.lock` : libre sans détenteur, tenu tant que l'app le tient (sonde depuis un autre descripteur, même processus), libéré quand le détenteur disparaît, second détenteur refusé, fichier impossible à ouvrir = non tenu.
+- `testTheLockIsExclusiveForTheWholeTick` sonde le verrou depuis l'étape session et l'étape batterie pendant `tick()`. Contre-épreuve : avec `tick()` modifié pour ne plus prendre le verrou, le test échoue sur les deux étapes (« locked during the session step », « locked during the battery step ») ; le code a été restauré ensuite.
+- `testTickDoesNotNestTheWriteLock` tourne sur son propre thread avec un délai de 10 s : un emboîtement devient un échec nommé, plus un job CI bloqué.
 
 Contrats verrouillés :
 - Échéance continue sur le même boot ; une veille de 6 h dans une session de 1 h rend la session due (ce que `systemUptime` manquerait) ; non due avant l'échéance ; `remaining` à 0 une fois due.

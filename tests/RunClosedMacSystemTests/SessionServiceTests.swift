@@ -484,6 +484,52 @@ final class SessionServiceTests: XCTestCase {
         XCTAssertFalse(rig.sessionStore.exists)
         XCTAssertFalse(rig.latchStore.load().latch.releasedByGuard)
     }
+
+    // MARK: — Review round 4
+
+    /// An explicit start supersedes a pending low-battery re-arm on every
+    /// surface: the popup buttons and the CLI share this path.
+    func testStartClearsAPendingRearm() {
+        var rig = makeRig(flag: false, ownedBoot: nil)
+        rig.latchStore.save(.init(latch: .init(releasedByGuard: true)))
+        guard case .success = rig.service.start(for: 3600) else { return XCTFail("expected success") }
+        XCTAssertFalse(rig.latchStore.load().latch.releasedByGuard)
+    }
+
+    func testFailedStartKeepsAPendingRearm() {
+        var rig = makeRig(flag: false, ownedBoot: nil)
+        rig.latchStore.save(.init(latch: .init(releasedByGuard: true)))
+        rig.lid.failWrites = true
+        guard case .failure = rig.service.start(for: 3600) else { return XCTFail("expected a failure") }
+        XCTAssertTrue(rig.latchStore.load().latch.releasedByGuard)
+    }
+
+    /// An indefinite session adopted over a flag another tool set: End is the
+    /// switch OFF (ADR 021) and turns it off, instead of dropping the record
+    /// while the Mac stays awake with no deadline.
+    func testEndOfAnIndefiniteSessionOverAForeignFlagTurnsItOff() {
+        var rig = makeRig(flag: true, ownedBoot: nil)
+        guard case .success(.adoptedRunningFlag) = rig.service.start(for: nil) else {
+            return XCTFail("expected adoption")
+        }
+        XCTAssertEqual(rig.service.end(), .success(.released))
+        XCTAssertEqual(rig.flag.value, false)
+        XCTAssertNil(rig.sessionStore.load())
+    }
+
+    /// A timed session keeps the ownership gate: End never turns off a flag
+    /// another tool owns.
+    func testEndOfATimedSessionLeavesAForeignFlagAlone() {
+        var rig = makeRig(flag: true, ownedBoot: nil)
+        rig.sessionStore.save(KeepAwakeSession(
+            startedAt: epoch,
+            endsAtWall: epoch.addingTimeInterval(3600),
+            endsAtContinuous: UInt64.max,
+            bootID: "A"))
+        XCTAssertEqual(rig.service.end(), .success(.flagNotOwned))
+        XCTAssertEqual(rig.flag.value, true)
+        XCTAssertEqual(rig.lid.calls, [])
+    }
 }
 
 private extension Result {

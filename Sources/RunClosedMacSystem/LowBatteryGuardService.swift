@@ -278,6 +278,7 @@ public struct LowBatteryGuardService {
             case .failure(.noChangeRequested(target: true)):
                 outcome.mutation = .rearmAlreadyOn
                 record.latch = record.latch.recordingRearm()
+                outcome.sessionResumed = sessionService?.resumeAfterRearm() ?? false
             case .success(let op):
                 outcome.mutation = .rearmFailed
                 outcome.mutationError = op.error ?? "rearm not verified (state=\(op.state.rawValue))"
@@ -286,6 +287,14 @@ public struct LowBatteryGuardService {
                 outcome.mutation = .rearmFailed
                 outcome.mutationError = String(describing: error)
             }
+        }
+
+        // ADR 023 §4: a battery pause ends when the flag is ON and ours again,
+        // whichever path turned it back on. Observed before this tick's own
+        // writes; a release in this tick keeps the pause.
+        if outcome.mutation != .released, !outcome.sessionResumed,
+           evaluation.input.lidFlag == true, evaluation.input.ownership == .ownedThisBoot {
+            outcome.sessionResumed = sessionService?.resumeIfFlagIsBack() ?? false
         }
 
         if record != before {
