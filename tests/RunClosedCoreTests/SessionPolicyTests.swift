@@ -282,7 +282,7 @@ final class SessionPolicyTests: XCTestCase {
     }
 
     func testPresetsAndExtendStep() {
-        XCTAssertEqual(SessionDuration.presets, [3600, 7200, 4 * 3600, 8 * 3600])
+        XCTAssertEqual(SessionDuration.presets, [3600, 7200, 14_400, 28_800] as [TimeInterval])
         XCTAssertEqual(SessionDuration.extendStep, 1800)
     }
 
