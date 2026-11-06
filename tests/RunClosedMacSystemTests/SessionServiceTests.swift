@@ -530,6 +530,43 @@ final class SessionServiceTests: XCTestCase {
         XCTAssertEqual(rig.flag.value, true)
         XCTAssertEqual(rig.lid.calls, [])
     }
+
+    // MARK: — Review round 5: orphan reconciliation
+
+    /// `lid-stay-awake off` (or `pmset` by hand) under the plain switch: the
+    /// indefinite record goes, nothing else is touched.
+    func testReconcileClearsAnIndefiniteSessionWhoseFlagReadsOff() {
+        var rig = makeRig(flag: false, ownedBoot: nil)
+        rig.sessionStore.save(KeepAwakeSession(startedAt: epoch, bootID: "A"))
+        XCTAssertEqual(rig.service.reconcileOrphan(), .cleared)
+        XCTAssertNil(rig.sessionStore.load())
+        XCTAssertEqual(rig.lid.calls, [])
+    }
+
+    /// A paused session is the low-battery guard's: never reconciled, even
+    /// with the flag OFF (that is what the pause means).
+    func testReconcileLeavesAPausedSession() {
+        var rig = makeRig(flag: false, ownedBoot: nil)
+        rig.sessionStore.save(KeepAwakeSession(
+            startedAt: epoch, endsAtWall: epoch.addingTimeInterval(3600),
+            endsAtContinuous: UInt64.max, bootID: "A", pausedReason: .lowBattery))
+        XCTAssertNil(rig.service.reconcileOrphan())
+        XCTAssertEqual(rig.sessionStore.load()?.pausedReason, .lowBattery)
+    }
+
+    /// A due session is expiry's, not reconciliation's: `step()` ends it and
+    /// does not report a reconciliation on top.
+    func testStepExpiresBeforeItReconciles() {
+        var rig = makeRig(flag: false, ownedBoot: nil)
+        rig.sessionStore.save(KeepAwakeSession(
+            startedAt: epoch, endsAtWall: epoch.addingTimeInterval(60),
+            endsAtContinuous: ContinuousClockTimebase.nanoseconds(fromSeconds: 1_060), bootID: "A"))
+        rig.clock.advance(61)
+        let step = rig.service.step()
+        XCTAssertEqual(step.expiry, .ended(.flagNotOwned))
+        XCTAssertNil(step.reconciled)
+        XCTAssertNil(rig.sessionStore.load())
+    }
 }
 
 private extension Result {

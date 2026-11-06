@@ -227,27 +227,90 @@ public struct SessionService {
         }
     }
 
+    // MARK: — Orphan reconciliation (caller holds LidWriteLock)
+
+    public enum ReconcileOutcome: Equatable, Sendable {
+        /// A running session whose flag reads OFF: the record went (and, for
+        /// a timed session, its re-arm debt with it).
+        case cleared
+        /// The guard released the flag but its pause was never written: the
+        /// pause is restored, so the re-arm can still revive the session.
+        case repaused
+    }
+
+    /// A RUNNING (not paused) session whose flag reads OFF backs nothing.
+    ///
+    /// Every writer runs under `LidWriteLock`, so inside the lock this state
+    /// is never a start in progress. It is what remains when the process died
+    /// between writing the record and setting the flag (journal before
+    /// change), when the flag went off behind our back (`lid-stay-awake off`,
+    /// `pmset` by hand), or when a battery pause failed to save. Left alone,
+    /// the menu bar would count down to a deadline while the Mac sleeps on
+    /// lid close.
+    ///
+    /// UNKNOWN is not OFF (ADR 009): only an observed `false` reconciles. A
+    /// paused session is the low-battery guard's and is never touched here.
+    @discardableResult
+    public mutating func reconcileOrphan() -> ReconcileOutcome? {
+        guard let session = store.load(), !session.isPaused else { return nil }
+        guard observedFlag() == false else { return nil }
+        if latchStore.load().latch.releasedByGuard {
+            // The guard owes a re-arm: this is a battery pause whose write
+            // failed, not an orphan. Put the pause back.
+            return pauseForBattery() ? .repaused : nil
+        }
+        if session.isIndefinite {
+            // The plain switch: ADR 022 governs it, record only.
+            store.clear()
+        } else {
+            finishSession()
+        }
+        return .cleared
+    }
+
+    // MARK: — Session step (caller holds LidWriteLock)
+
+    public struct StepOutcome: Equatable, Sendable {
+        public var expiry: ExpiryOutcome
+        public var reconciled: ReconcileOutcome?
+    }
+
+    /// The session's share of a tick: expire a due session, otherwise
+    /// reconcile an orphan. The guard tick runs it first in its lock section;
+    /// with the low-battery guard switched off, the app runs it alone, so a
+    /// deadline never depends on the battery guard being enabled.
+    public mutating func step() -> StepOutcome {
+        let expiry = expireIfDue()
+        let reconciled = expiry == .notDue ? reconcileOrphan() : nil
+        return StepOutcome(expiry: expiry, reconciled: reconciled)
+    }
+
     // MARK: — Low-battery interplay (ADR 023 §4)
 
     /// The guard released the flag on a critical battery. The session is
     /// PAUSED, never ended: the operator's deadline is not the battery's to
     /// cancel, and the re-arm path below may revive it.
+    ///
+    /// `false` when there is nothing to pause or the pause could not be
+    /// written. A lost pause is not lost for good: the flag now reads OFF
+    /// with the re-arm debt pending, which `reconcileOrphan()` re-pauses on
+    /// the next tick.
     @discardableResult
     public mutating func pauseForBattery() -> Bool {
         guard var session = store.load(), !session.isPaused else { return false }
         session = SessionPolicy.pause(session, reason: .lowBattery)
-        store.save(session)
-        return true
+        return store.save(session)
     }
 
     /// The guard re-armed the flag and the session is still valid: clear the
     /// pause so the countdown resumes against its original deadline.
+    /// `false` when nothing was paused or the record could not be written
+    /// (the next tick retries through `resumeIfFlagIsBack()`).
     @discardableResult
     public mutating func resumeAfterRearm() -> Bool {
         guard var session = store.load(), session.isPaused else { return false }
         session = SessionPolicy.resume(session)
-        store.save(session)
-        return true
+        return store.save(session)
     }
 
     /// The flag reads ON and ours again while the session is paused: it came

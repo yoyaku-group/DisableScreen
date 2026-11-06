@@ -35,6 +35,12 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a timed session never turns off a flag another tool owns. While the app
   runs it holds `app.lock`; until the launchd backstop ships, the CLI refuses
   a timed session when the app is not running, since nothing would end it.
+  The check runs under the lid lock, and the app retries `app.lock` on every
+  tick if it could not take it at launch. A running session whose flag reads
+  off (a crash between the record and the flag, `lid-stay-awake off`, or
+  `pmset` by hand) is cleared on the next tick instead of counting down for
+  nothing. Switching the low-battery guard off no longer stops session
+  deadlines: the app then runs the session step on its own.
 - `runclosed session start --for <2h|90m|1h30m> | start --indefinite | extend
   [30m] | end | status [--json]`. `--for` together with `--indefinite` is a
   usage error; a timed start without the menu-bar app running exits 3. Mutating subcommands take the same lock as

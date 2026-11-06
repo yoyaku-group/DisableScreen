@@ -149,6 +149,9 @@ public struct LowBatteryGuardService {
         /// Set when the flag was re-armed on AC for a still-live session, so
         /// the menu bar can refresh without polling the record.
         public var sessionResumed: Bool = false
+        /// Set when the session step reconciled a record whose flag reads OFF
+        /// (ADR 023): cleared as an orphan, or a lost battery pause restored.
+        public var sessionReconciled: SessionService.ReconcileOutcome?
     }
 
     /// Read-only evaluation: no mutation, no persistence write. Used by
@@ -190,13 +193,17 @@ public struct LowBatteryGuardService {
         // tick that noticed the deadline. It is a separate step from the
         // battery one so the ADR 022 decision below is computed from an
         // observation taken AFTER any release.
-        let sessionExpiry = sessionService?.expireIfDue()
+        // The same step also reconciles a running session whose flag reads
+        // OFF, before the battery step reads the latch it may have cleared.
+        let sessionStep = sessionService?.step()
+        let sessionExpiry = sessionStep?.expiry
         let evaluation = evaluate()
         // Which boot wrote the ownership record, captured before any write
         // (an emergency release replaces a stale record with this boot's).
         let recordBootIDBefore = lidService.store.load().bootID
         var outcome = TickOutcome(evaluation: evaluation)
         outcome.session = sessionExpiry
+        outcome.sessionReconciled = sessionStep?.reconciled
         var record = latchStore.load()
         let before = record
         record.latch = evaluation.latchAfter
@@ -228,7 +235,9 @@ public struct LowBatteryGuardService {
                 record.releasedBootID = lidService.bootID
                 // ADR 023 §4: a low-battery release PAUSES the session instead
                 // of ending it — the operator's deadline is not the battery's
-                // to cancel, and the re-arm below may revive it.
+                // to cancel, and the re-arm below may revive it. A pause that
+                // fails to save is restored by the next tick's reconciliation
+                // (flag OFF + re-arm debt pending = a battery pause).
                 sessionService?.pauseForBattery()
                 // Persist the re-arm debt and the audit line BEFORE asking
                 // for sleep: the Mac may go down right after `sleepnow`.

@@ -631,20 +631,26 @@ func cmdSession(_ rest: [String]) -> Int32 {
             FileHandler.err(sessionUsage)
             return 64
         }
-        // Today only the menu-bar app enforces a deadline (the L2 launchd
-        // backstop will add a second enforcer). A timed session with nothing
-        // to end it would keep the Mac awake past its deadline: refuse it.
-        if duration != nil, !AppLivenessLock().isHeld() {
-            FileHandler.err("refused: RunClosed.app is not running, so nothing would end this session at its deadline. Open RunClosed first.")
-            return 3
-        }
         // Same lock as `lid-stay-awake on|off`: the session writes the record
         // and the flag, so it must not interleave with a guard tick.
         var svc = makeSessionService()
-        let result = LidWriteLock().withLock { () -> Result<SessionService.StartOutcome, SessionError> in
+        let locked = LidWriteLock().withLock { () -> Result<SessionService.StartOutcome, SessionError>? in
+            // Today only the menu-bar app enforces a deadline (the L2 launchd
+            // backstop will add a second enforcer). A timed session with
+            // nothing to end it would keep the Mac awake past its deadline:
+            // refuse it. Checked INSIDE the lock: the app's quit teardown
+            // takes this same lock before its process (and `app.lock`) goes,
+            // so an app seen alive here is either still running after the
+            // start or ends the session in its teardown. A crash in between
+            // is the backstop's case.
+            if duration != nil, !AppLivenessLock().isHeld() { return nil }
             // `start` itself clears a pending low-battery re-arm on success,
             // for the popup and the CLI alike.
-            svc.start(for: duration)
+            return svc.start(for: duration)
+        }
+        guard let result = locked else {
+            FileHandler.err("refused: RunClosed.app is not running, so nothing would end this session at its deadline. Open RunClosed first.")
+            return 3
         }
         switch result {
         case .success(let outcome):

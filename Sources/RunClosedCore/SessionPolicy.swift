@@ -165,7 +165,14 @@ public enum SessionPolicy {
         guard !session.isIndefinite, seconds.isFinite, seconds > 0,
               seconds <= SessionDuration.maximum else { return session }
         var next = session
-        next.endsAtContinuous = addingContinuous(now.continuousNanoseconds, seconds: seconds)
+        // The continuous deadline only means something on the boot that wrote
+        // the session (`dueReason` ignores it elsewhere). Extending a session
+        // from a previous boot keeps its bootID, which `.sessionRecovery`
+        // matches against the ownership record, so it gets a wall deadline
+        // only — never this boot's counter filed under another boot.
+        next.endsAtContinuous = session.isOnBoot(now.bootID)
+            ? addingContinuous(now.continuousNanoseconds, seconds: seconds)
+            : nil
         next.endsAtWall = now.wall.addingTimeInterval(seconds)
         // A battery pause survives an extension: the guard released the flag
         // and only its re-arm (on AC, above the threshold) turns it back on.
@@ -231,6 +238,20 @@ public enum SessionPolicy {
         if h == 0 { return "\(m) min left" }
         if m == 0 { return "\(h) h left" }
         return "\(h) h \(m) left"
+    }
+
+    /// `"2h41"` / `"2h"` / `"45m"` / `"<1m"`: the menu-bar title, which has no
+    /// room for words. Digits and unit letters read the same in English and
+    /// French, so this needs no localization.
+    public static func compactRemainingLabel(_ session: KeepAwakeSession, now: Now) -> String? {
+        guard let seconds = remaining(session, now: now) else { return nil }
+        let minutes = Int((seconds / 60).rounded(.up))
+        if minutes <= 0 { return "<1m" }
+        let h = minutes / 60
+        let m = minutes % 60
+        if h == 0 { return "\(m)m" }
+        if m == 0 { return "\(h)h" }
+        return String(format: "%dh%02d", h, m)
     }
 
     /// `"Until 14:30 · 2 h 41 left"` — the lid row's session line.

@@ -417,4 +417,42 @@ final class SessionPolicyTests: XCTestCase {
         XCTAssertEqual(SessionDuration.parseStartArguments(["--bogus"]), .failure(.usage))
         XCTAssertEqual(SessionDuration.parseStartArguments(["--for", "200h"]), .failure(.overCap))
     }
+
+    // MARK: — Review round 5
+
+    /// A session from a previous boot extended on this one gets a wall
+    /// deadline only: this boot's counter filed under the old bootID would
+    /// mean nothing, and the bootID must stay for `.sessionRecovery`.
+    func testExtendOnAnotherBootKeepsTheBootAndDropsTheContinuousDeadline() {
+        let session = timed(3600, bootID: Boot.a)
+        let extended = SessionPolicy.extend(session, by: 1800,
+                                            now: now(continuousSeconds: 50, bootID: Boot.b))
+        XCTAssertEqual(extended.bootID, Boot.a)
+        XCTAssertNil(extended.endsAtContinuous)
+        XCTAssertEqual(extended.endsAtWall, Self.epoch.addingTimeInterval(1800))
+        XCTAssertFalse(extended.isIndefinite)
+    }
+
+    func testExtendOnTheSameBootKeepsTheContinuousDeadline() {
+        let extended = SessionPolicy.extend(timed(3600), by: 1800, now: now(continuousSeconds: 2_000))
+        XCTAssertEqual(extended.endsAtContinuous,
+                       ContinuousClockTimebase.nanoseconds(fromSeconds: 3_800))
+    }
+
+    /// The menu-bar title: digits and unit letters only, so it reads the
+    /// same in every language.
+    func testCompactRemainingLabel() {
+        let session = timed(3 * 3600)
+        XCTAssertEqual(SessionPolicy.compactRemainingLabel(session, now: now(continuousSeconds: 1_000)), "3h")
+        XCTAssertEqual(SessionPolicy.compactRemainingLabel(
+            session, now: now(wallOffset: 3600 + 19 * 60, continuousSeconds: 1_000 + 3600 + 19 * 60)), "1h41")
+        XCTAssertEqual(SessionPolicy.compactRemainingLabel(
+            session, now: now(wallOffset: 3600 + 55 * 60, continuousSeconds: 1_000 + 3600 + 55 * 60)), "1h05")
+        XCTAssertEqual(SessionPolicy.compactRemainingLabel(
+            session, now: now(wallOffset: 2 * 3600 + 15 * 60, continuousSeconds: 1_000 + 2 * 3600 + 15 * 60)), "45m")
+        XCTAssertEqual(SessionPolicy.compactRemainingLabel(
+            session, now: now(wallOffset: 3 * 3600, continuousSeconds: 1_000 + 3 * 3600)), "<1m")
+        XCTAssertNil(SessionPolicy.compactRemainingLabel(
+            KeepAwakeSession(startedAt: Self.epoch, bootID: Boot.a), now: now()))
+    }
 }

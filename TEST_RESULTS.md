@@ -546,12 +546,12 @@ $ arch -arm64 swift build --build-tests
 Build complete! (0 warning)
 
 $ arch -arm64 swift test
-RunClosedPersistenceTests  43 · RunClosedMacSystemTests 133 · HelperSupport 13
-RunClosedCoreTests        102 · RunClosedAppTests        11
-→ 302/302, 0 échec
+RunClosedPersistenceTests  44 · RunClosedMacSystemTests 141 · HelperSupport 13
+RunClosedCoreTests        105 · RunClosedAppTests        11
+→ 314/314, 0 échec
 ```
 
-Dont **116 nouveaux** : 39 `SessionPolicyTests`, 13 `SessionStoreTests`, 5 `AppLivenessLockTests`, 38 `SessionServiceTests`, 16 `SessionGuardTickTests`, 5 dans `LidMutationServiceTests` (initiateur `.sessionRecovery`).
+Dont **128 nouveaux** : 42 `SessionPolicyTests`, 13 `SessionStoreTests`, 6 `AppLivenessLockTests`, 41 `SessionServiceTests`, 21 `SessionGuardTickTests`, 5 dans `LidMutationServiceTests` (initiateur `.sessionRecovery`).
 
 Relecture, tour 1 (11 tests ajoutés) :
 - Quit pendant une session mise en pause par la garde batterie : la dette de réarmement est effacée, une étape batterie suivante sur secteur à 80 % ne réarme pas. Sans session, le quit laisse la dette intacte (ADR 022 inchangé).
@@ -585,6 +585,24 @@ Relecture, tour 4 (`ai-review-gate`, 0 CRITICAL, 5 WARN corrigés, 12 tests ajou
 - `app.lock` : libre sans détenteur, tenu tant que l'app le tient (sonde depuis un autre descripteur, même processus), libéré quand le détenteur disparaît, second détenteur refusé, fichier impossible à ouvrir = non tenu.
 - `testTheLockIsExclusiveForTheWholeTick` sonde le verrou depuis l'étape session et l'étape batterie pendant `tick()`. Contre-épreuve : avec `tick()` modifié pour ne plus prendre le verrou, le test échoue sur les deux étapes (« locked during the session step », « locked during the battery step ») ; le code a été restauré ensuite.
 - `testTickDoesNotNestTheWriteLock` tourne sur son propre thread avec un délai de 10 s : un emboîtement devient un échec nommé, plus un job CI bloqué.
+
+Relecture, tour 5 (`ai-review-gate`, 0 CRITICAL, 3 WARN corrigés, 12 tests ajoutés) :
+- Session en cours sur un flag qui se lit OFF (crash entre le journal et le flag) : effacée au tick, aucun appel `pmset` ; flag INCONNU ou ON : session laissée ; session indéfinie : record seul effacé ; session en pause : jamais touchée.
+- Pause batterie perdue (flag OFF, dette de réarmement en attente) : pause restaurée, dette conservée.
+- Étape session seule sous `LidWriteLock` (garde batterie coupée) : une session due est terminée, flag OFF vérifié, record effacé ; une session due est expirée avant toute réconciliation.
+- `app.lock` : `hold()` échoue pendant qu'une sonde le tient, réussit au réessai une fois la sonde partie.
+- Extension d'une session d'un autre boot : même `bootID`, échéance continue retirée, échéance murale déplacée ; même boot : échéance continue déplacée.
+- Titre de barre compact : `3h`, `1h41`, `1h05`, `45m`, `<1m`, rien pour une session indéfinie.
+- `testTickDoesNotNestTheWriteLock` vérifie le résultat de l'attente avant de lire celui du thread.
+- Non couverts par un test unitaire (code AppKit) : réessai de `app.lock` à chaque tick, `runSessionOnlyTick`, cache de propriété lu hors thread principal.
+
+```
+$ runclosed-cli session status --json        → exit 0, ownership ownedThisBoot, session.present false
+$ runclosed-cli session start --for 200h      → exit 64 « a session is capped at 7 days »
+$ runclosed-cli session start --for 2h --indefinite → exit 64 (usage)
+$ runclosed-cli session bogus                 → exit 64
+$ runclosed-cli definitely-not-a-command      → exit 64
+```
 
 Contrats verrouillés :
 - Échéance continue sur le même boot ; une veille de 6 h dans une session de 1 h rend la session due (ce que `systemUptime` manquerait) ; non due avant l'échéance ; `remaining` à 0 une fois due.

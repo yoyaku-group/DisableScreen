@@ -49,4 +49,18 @@ final class AppLivenessLockTests: XCTestCase {
         XCTAssertFalse(AppLivenessLock(url: url).isHeld())
         XCTAssertFalse(AppLivenessLock(url: url).hold())
     }
+
+    /// A CLI probe holds the file for an instant: if the app launches right
+    /// then, its first `hold()` fails. The app retries on every tick, and
+    /// the retry must succeed once the probe is gone.
+    func testHoldSucceedsOnRetryAfterATransientHolder() {
+        let url = tempURL()
+        var probe: AppLivenessLock? = AppLivenessLock(url: url)
+        XCTAssertEqual(probe?.hold(), true)
+        let app = AppLivenessLock(url: url)
+        XCTAssertFalse(app.hold())
+        probe = nil
+        XCTAssertTrue(app.hold())
+        XCTAssertTrue(AppLivenessLock(url: url).isHeld())
+    }
 }

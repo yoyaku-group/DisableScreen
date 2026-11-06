@@ -179,7 +179,12 @@ final class SessionGuardTickTests: XCTestCase {
         }
         let run = Run(rig.guardService, expectation(description: "tick returns"))
         Thread { run.outcome = run.guardService.tick(); run.done.fulfill() }.start()
-        wait(for: [run.done], timeout: 10)
+        let waited = XCTWaiter().wait(for: [run.done], timeout: 10)
+        guard waited == .completed else {
+            // The thread is still blocked inside `withLock`: reading
+            // `run.outcome` now would race it.
+            return XCTFail("the tick did not return: LidWriteLock is nested (deadlock)")
+        }
         XCTAssertEqual(run.outcome?.session, .ended(.released))
 
         // Nothing is still holding the lock afterwards.
@@ -396,5 +401,63 @@ final class SessionGuardTickTests: XCTestCase {
         XCTAssertFalse(outcome.sessionResumed)
         XCTAssertEqual(rig.sessionStore.load()?.pausedReason, .lowBattery)
         XCTAssertEqual(rig.flag.value, false)
+    }
+
+    // MARK: — Review round 5: orphan sessions
+
+    /// The process died between writing the record and setting the flag
+    /// (journal before change): a running session over a flag that reads
+    /// OFF. The next tick clears it instead of counting down for nothing.
+    func testTickClearsARunningSessionWhoseFlagReadsOff() {
+        var rig = makeRig(flag: false, ownedBoot: nil, battery: Self.reading(false, 80))
+        saveSession(rig)
+        let outcome = rig.guardService.tick()
+        XCTAssertEqual(outcome.session, .notDue)
+        XCTAssertEqual(outcome.sessionReconciled, .cleared)
+        XCTAssertNil(rig.sessionStore.load())
+        XCTAssertEqual(rig.lid.calls, [], "nothing to write: the flag is already off")
+    }
+
+    /// UNKNOWN is not OFF (ADR 009): an unreadable flag leaves the session.
+    func testTickLeavesTheSessionWhenTheFlagIsUnknown() {
+        var rig = makeRig(flag: nil, ownedBoot: "A", battery: Self.reading(false, 80))
+        saveSession(rig)
+        let outcome = rig.guardService.tick()
+        XCTAssertNil(outcome.sessionReconciled)
+        XCTAssertNotNil(rig.sessionStore.load())
+    }
+
+    func testTickLeavesARunningSessionWhoseFlagIsOn() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 80))
+        saveSession(rig)
+        let outcome = rig.guardService.tick()
+        XCTAssertNil(outcome.sessionReconciled)
+        XCTAssertNotNil(rig.sessionStore.load())
+    }
+
+    /// The guard released the flag but the pause was never written: flag OFF
+    /// with the re-arm debt pending is a battery pause, restored — and the
+    /// re-arm on AC then revives the session.
+    func testTickRestoresALostBatteryPause() {
+        var rig = makeRig(flag: false, ownedBoot: nil, battery: Self.reading(true, 8))
+        saveSession(rig)
+        rig.latchStore.save(.init(latch: LowBatteryPolicy.Latch().recordingRelease(), releasedBootID: "A"))
+        let outcome = rig.guardService.tick()
+        XCTAssertEqual(outcome.sessionReconciled, .repaused)
+        XCTAssertEqual(rig.sessionStore.load()?.pausedReason, .lowBattery)
+        XCTAssertTrue(rig.latchStore.load().latch.releasedByGuard, "the re-arm debt stays")
+    }
+
+    /// With the low-battery guard switched off the app runs the session step
+    /// alone: a deadline still ends the session.
+    func testSessionStepAloneEndsADueSession() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 80))
+        saveSession(rig, duration: 60)
+        rig.clock.advance(61)
+        let step = LidWriteLock(url: rig.lockURL).withLock { rig.session.step() }
+        XCTAssertEqual(step.expiry, .ended(.released))
+        XCTAssertNil(step.reconciled)
+        XCTAssertEqual(rig.flag.value, false)
+        XCTAssertNil(rig.sessionStore.load())
     }
 }

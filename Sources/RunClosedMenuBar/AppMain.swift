@@ -77,6 +77,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Held for the app's whole life: tells the CLI (and the L2 backstop) that
     /// something is enforcing session deadlines (ADR 023).
     private let appLiveness = AppLivenessLock()
+    /// The liveness lock could not be taken (a second instance, or a CLI
+    /// probe racing the launch): logged once, retried on every guard tick.
+    private var livenessWarned = false
+    /// `owned_lid.json` says the flag is ours on this boot. Read off the main
+    /// thread with the 5 s lid poll, like `lidCache`.
+    private var lidOwnedCache = false
     /// One store for the menu-bar refreshes: the canonical init creates the
     /// directory, which has no place on every main-thread icon update.
     private let sessionStore = SessionStore()
@@ -96,7 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: — Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        appLiveness.hold()
+        ensureLivenessLock()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.target = self
         statusItem.button?.action = #selector(statusItemClicked(_:))
@@ -223,12 +229,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refreshLidCache() {
+        let bootID = clock.bootID
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let value = PowerReadback.lidStayAwake()
+            let rec = OwnedLidAssertion(currentBootID: bootID).load()
+            let owned = rec.ownedEnabled && rec.bootID == bootID
             DispatchQueue.main.async {
                 guard let self else { return }
                 let changed = self.lidCache != value
                 self.lidCache = .some(value)
+                self.lidOwnedCache = owned
                 self.lidReady = true
                 self.syncKeepAwakeActivity()
                 if changed { self.rebuildPanelIfVisible() }
@@ -270,12 +280,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             wall: Date(),
             continuousNanoseconds: now.nowContinuousNanoseconds,
             bootID: clock.bootID)
-        if let session, !session.isIndefinite, let label = SessionPolicy.remainingLabel(session, now: policyNow) {
+        if let session, !session.isIndefinite,
+           let label = SessionPolicy.compactRemainingLabel(session, now: policyNow) {
             // "2h41" — the bar has no room for words.
             button.title = (session.pausedReason != nil ? " ⏸ " : " ") + label
-                .replacingOccurrences(of: " left", with: "")
-                .replacingOccurrences(of: " h", with: "h")
-                .replacingOccurrences(of: " min", with: "m")
         } else {
             button.title = ""
         }
@@ -301,10 +309,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// be flipped OFF by someone else, and the assertion is released the moment
     /// we notice.
     private func syncKeepAwakeActivity() {
-        // The cached readback (refreshed off the main thread every 5 s), never
-        // a fresh `pmset -g` here: this runs on every icon refresh.
+        // The cached readback and ownership (refreshed off the main thread
+        // every 5 s), never a fresh `pmset -g` or file read here: this runs on
+        // every icon refresh.
         let observed: Bool? = lidCache ?? nil
-        let ours = Self.flagIsOurs(bootID: clock.bootID, observed: observed)
+        let ours = lidOwnedCache && observed == true
         if ours, keepAwakeActivity == nil {
             keepAwakeActivity = ProcessInfo.processInfo.beginActivity(
                 options: [.userInitiated, .idleSystemSleepDisabled],
@@ -332,12 +341,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Is `disablesleep` ours on THIS boot? Read from the ownership record
     /// (the same source `LidMutationService` gates on) and confirmed by the
     /// live readback: a stale record with the flag observed OFF is not ours.
-    private static func flagIsOurs(bootID: String, observed: Bool?) -> Bool {
-        let rec = OwnedLidAssertion(currentBootID: bootID).load()
-        guard rec.ownedEnabled, rec.bootID == bootID else { return false }
-        return observed == true
-    }
-
     private func showContextMenu() {
         let menu = NSMenu()
         let refresh = NSMenuItem(title: L10n.t("Refresh"), action: #selector(refreshClicked), keyEquivalent: "r")
@@ -811,9 +814,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Take `app.lock` if this process does not hold it yet. A failure (a
+    /// second RunClosed instance, or a CLI probe that held the file at the
+    /// very moment of the launch) is logged once and retried on every tick:
+    /// until it succeeds, `session start --for` refuses, which is the safe
+    /// side.
+    private func ensureLivenessLock() {
+        if appLiveness.hold() {
+            livenessWarned = false
+            return
+        }
+        guard !livenessWarned else { return }
+        livenessWarned = true
+        FileHandle.standardError.write(Data(
+            "[RunClosed] app.lock is held by another process; retrying on every guard tick (timed sessions from the CLI are refused until then)\n".utf8))
+    }
+
     private func runLowBatteryTick() {
+        ensureLivenessLock()
         guard LowBatteryGuardSettings.isEnabled() else {
             if batteryAlert { batteryAlert = false; updateStatusIcon() }
+            // The battery kill switch must not switch deadlines off with it.
+            runSessionOnlyTick()
             return
         }
         // Never race an operator toggle on the same flag/record.
@@ -840,21 +862,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// The session step alone (ADR 023), for when the low-battery guard is
+    /// switched off: same queue, same single `LidWriteLock` section, so a
+    /// deadline still ends on time with the battery guard disabled.
+    private func runSessionOnlyTick() {
+        guard !busy, !guardTickInFlight else { return }
+        guardTickInFlight = true
+        let bootID = clock.bootID
+        guardQueue.async { [weak self, bootID] in
+            var service = SessionService.live(bootID: bootID)
+            let step = LidWriteLock().withLock { service.step() }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.guardTickInFlight = false
+                var endedNaturally = false
+                if case .ended(let end) = step.expiry { endedNaturally = !end.isFailure }
+                self.handleSessionStep(expiry: step.expiry, reconciled: step.reconciled,
+                                       endedNaturally: endedNaturally)
+            }
+        }
+    }
+
+    /// What every tick does with the session step's result, with or without
+    /// the battery guard.
+    private func handleSessionStep(expiry: SessionService.ExpiryOutcome?,
+                                   reconciled: SessionService.ReconcileOutcome?,
+                                   endedNaturally: Bool) {
+        var changed = false
+        if let expiry, expiry != .noSession, expiry != .notDue {
+            FileHandle.standardError.write(Data(
+                "[RunClosed] session tick: \(String(describing: expiry))\n".utf8))
+            changed = true
+        }
+        if let reconciled {
+            FileHandle.standardError.write(Data(
+                "[RunClosed] session reconciled (flag reads off): \(String(describing: reconciled))\n".utf8))
+            changed = true
+        }
+        if changed {
+            refreshLidCache()
+            refreshSessionDisplay()
+        }
+        if endedNaturally {
+            notify(L10n.t("Session ended"),
+                   L10n.t("The keep-awake session reached its end time and lid stay-awake was turned off."))
+        }
+    }
+
     private func handleLowBattery(_ outcome: LowBatteryGuardService.TickOutcome) {
         guardTickInFlight = false
         let e = outcome.evaluation
         let pct = e.input.chargePercent.map(String.init) ?? "?"
 
         // ADR 023: the session step ran first inside the same lock section.
-        if let expiry = outcome.session, expiry != .noSession, expiry != .notDue {
-            FileHandle.standardError.write(Data(
-                "[RunClosed] session tick: \(String(describing: expiry))\n".utf8))
-            refreshLidCache()
-        }
-        if outcome.sessionEndedNaturally {
-            notify(L10n.t("Session ended"),
-                   L10n.t("The keep-awake session reached its end time and lid stay-awake was turned off."))
-        }
+        handleSessionStep(expiry: outcome.session, reconciled: outcome.sessionReconciled,
+                          endedNaturally: outcome.sessionEndedNaturally)
 
         let alert = (e.decision.level == .low || e.decision.level == .critical)
             && e.input.lidFlag != false
