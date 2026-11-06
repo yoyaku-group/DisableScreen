@@ -546,12 +546,12 @@ $ arch -arm64 swift build --build-tests
 Build complete! (0 warning)
 
 $ arch -arm64 swift test
-RunClosedPersistenceTests  46 · RunClosedMacSystemTests 150 · HelperSupport 13
-RunClosedCoreTests        105 · RunClosedAppTests        11
-→ 325/325, 0 échec
+RunClosedPersistenceTests  46 · RunClosedMacSystemTests 151 · HelperSupport 13
+RunClosedCoreTests        106 · RunClosedAppTests        11
+→ 327/327, 0 échec
 ```
 
-Dont **139 nouveaux** : 42 `SessionPolicyTests`, 13 `SessionStoreTests`, 8 `AppLivenessLockTests`, 47 `SessionServiceTests`, 24 `SessionGuardTickTests`, 5 dans `LidMutationServiceTests` (initiateur `.sessionRecovery`).
+Dont **141 nouveaux** : 43 `SessionPolicyTests`, 13 `SessionStoreTests`, 8 `AppLivenessLockTests`, 48 `SessionServiceTests`, 24 `SessionGuardTickTests`, 5 dans `LidMutationServiceTests` (initiateur `.sessionRecovery`).
 
 Relecture, tour 1 (11 tests ajoutés) :
 - Quit pendant une session mise en pause par la garde batterie : la dette de réarmement est effacée, une étape batterie suivante sur secteur à 80 % ne réarme pas. Sans session, le quit laisse la dette intacte (ADR 022 inchangé).
@@ -620,6 +620,12 @@ Relecture, tour 7 (`ai-review-gate`, 0 CRITICAL, 3 WARN corrigés, 5 tests ajout
 - Au tick : `flagLeftOn` n'est pas une fin normale (`sessionEndedNaturally` faux) ; une écriture en échec rend `.retained("sudo: a password is required")` et garde le record.
 - End sur une session minutée dont le flag est étranger : `.flagLeftOn`, flag intact, record effacé.
 - Non couverts par un test unitaire : refus de `session extend` quand l'app ne tourne pas (câblage CLI sous `LidWriteLock`, lecture du code), notification et message du popup pour `flagLeftOn` (AppKit).
+Relecture, tour 8 (`ai-review-gate`, 0 CRITICAL, 1 WARN corrigé, 2 tests ajoutés) :
+- Quit dont le flag ne se lit pas OFF : `finishOnQuit` garde la session et la rend ; quit qui termine la session ou sans session : rien à signaler.
+- Durées : `2h3h`, `1h1h1h`, `30m2h`, `5s1m`, `1h30m30m`, `30s5` refusées ; `1h30m15s` = 5415 s, `1m30` = 90 s.
+- Le test du plafond affirme que `999999999999h` se lit puis est refusé (`overCap`), sans branche conditionnelle.
+- Non couverts par un test unitaire (AppKit) : la notification de quit avant la sortie, le cache de session rempli hors du thread principal.
+
 Contrats verrouillés :
 - Échéance continue sur le même boot ; une veille de 6 h dans une session de 1 h rend la session due (ce que `systemUptime` manquerait) ; non due avant l'échéance ; `remaining` à 0 une fois due.
 - Échéance murale inter-boot ; le compteur continu d'un boot précédent est ignoré et ne peut pas terminer la session immédiatement (comparaison naïve sinon).
@@ -644,6 +650,7 @@ $ runclosed-cli session status --json
 $ runclosed-cli session end                      → « refused: no session is running », exit 3
 $ runclosed-cli session extend 30m               → « refused: no session is running », exit 3
 $ runclosed-cli session extend 9999h             → exit 64
+$ runclosed-cli session start --for 2h3h         → usage, exit 64
 $ runclosed-cli session start --for nonsense     → usage, exit 64
 $ runclosed-cli session bogus                    → usage, exit 64
 $ runclosed-cli definitely-not-a-command         → « unknown command », exit 64

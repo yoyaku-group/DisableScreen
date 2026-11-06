@@ -49,7 +49,11 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   failed its readback checks the flag again and turns it back off if the
   write landed anyway. Quitting gives `app.lock` up inside the lid lock, so a
   CLI start queued behind the quit is refused. `session extend` is refused
-  the same way when the app is not running.
+  the same way when the app is not running. A quit whose flag release fails
+  keeps the session, logs it and, for a timed session, warns "RunClosed quit
+  — Mac still awake" before exiting. The menu bar no longer reads
+  `session.json` on the main thread. A duration whose units repeat or do not
+  get smaller (`2h3h`, `30m2h`) is a usage error instead of a sum.
 - `runclosed session start --for <2h|90m|1h30m> | start --indefinite | extend
   [30m] | end | status [--json]`. `--for` together with `--indefinite` is a
   usage error; a timed start or an extend without the menu-bar app running exits 3. Mutating subcommands take the same lock as

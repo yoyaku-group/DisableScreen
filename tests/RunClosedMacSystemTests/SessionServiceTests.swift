@@ -446,8 +446,23 @@ final class SessionServiceTests: XCTestCase {
     func testQuitKeepsTheSessionWhileTheFlagStillReadsOn() {
         var rig = makeRig(flag: false, ownedBoot: nil)
         _ = rig.service.start(for: 3600)
-        rig.service.finishOnQuit(flagReadsOff: false)
+        let left = rig.service.finishOnQuit(flagReadsOff: false)
         XCTAssertNotNil(rig.sessionStore.load())
+        // Review round 8: the teardown reports what it leaves behind, so the
+        // app can log it and warn before exiting (nothing enforces it now).
+        XCTAssertEqual(left, rig.sessionStore.load())
+        XCTAssertEqual(left?.isIndefinite, false)
+    }
+
+    /// Review round 8: nothing to warn about when the quit ended the session,
+    /// or when there was none.
+    func testQuitReportsNothingLeftBehindWhenItEndsTheSession() {
+        var rig = makeRig(flag: false, ownedBoot: nil)
+        _ = rig.service.start(for: 3600)
+        XCTAssertNil(rig.service.finishOnQuit(flagReadsOff: true))
+        XCTAssertNil(rig.sessionStore.load())
+        let empty = makeRig(flag: true, ownedBoot: nil)
+        XCTAssertNil(empty.service.finishOnQuit(flagReadsOff: false))
     }
 
     func testStartPastTheCapIsRefusedBeforeAnyWrite() {

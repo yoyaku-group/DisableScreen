@@ -290,6 +290,16 @@ final class SessionPolicyTests: XCTestCase {
         XCTAssertNil(SessionDuration.parse("h"))
         XCTAssertNil(SessionDuration.parse("0"))
         XCTAssertNil(SessionDuration.parse("-5m"))
+        XCTAssertEqual(SessionDuration.parse("1h30m15s"), 5415)
+        XCTAssertEqual(SessionDuration.parse("1m30"), 90, "a bare number after minutes is seconds")
+    }
+
+    /// Review round 8: a repeated or out-of-order unit is a typo, never a sum
+    /// (`--for 2h2h` used to start a 4 h session).
+    func testRepeatedOrOutOfOrderUnitsAreRefused() {
+        for text in ["2h3h", "1h1h1h", "30m2h", "5s1m", "1h30m30m", "30s5"] {
+            XCTAssertNil(SessionDuration.parse(text), text)
+        }
     }
 
     func testPresetsAndExtendStep() {
@@ -344,9 +354,11 @@ final class SessionPolicyTests: XCTestCase {
     func testHugeOrNonNumericDurationTextIsNotAcceptable() {
         // Parses (a number with a unit) but is far past the cap: the CLI
         // turns this into exit 64 before any lock or write.
-        if let huge = SessionDuration.parse("999999999999h") {
-            XCTAssertFalse(SessionDuration.isAcceptable(huge))
-        }
+        let huge = SessionDuration.parse("999999999999h")
+        XCTAssertNotNil(huge, "a number with a unit parses; the cap refuses it")
+        XCTAssertFalse(SessionDuration.isAcceptable(huge ?? 0))
+        XCTAssertEqual(SessionDuration.parseStartArguments(["--for", "999999999999h"]),
+                       .failure(.overCap))
         XCTAssertNil(SessionDuration.parse("inf"))
         XCTAssertNil(SessionDuration.parse("nan"))
         XCTAssertTrue(SessionDuration.isAcceptable(2 * 3600))

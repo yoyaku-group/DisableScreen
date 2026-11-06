@@ -83,9 +83,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `owned_lid.json` says the flag is ours on this boot. Read off the main
     /// thread with the 5 s lid poll, like `lidCache`.
     private var lidOwnedCache = false
-    /// One store for the menu-bar refreshes: the canonical init creates the
-    /// directory, which has no place on every main-thread icon update.
+    /// One store for the switch's writes: the canonical init creates the
+    /// directory, which has no place on every main-thread action.
     private let sessionStore = SessionStore()
+    /// `session.json` as last read off the main thread, with the 5 s lid poll
+    /// (ADR 023). The title and the popup row read only this, never the
+    /// file: they run on every icon refresh and popup rebuild.
+    private var sessionCache: KeepAwakeSession?
     private var guardTickInFlight = false
     private var batteryAlert = false
     static let lowBatteryTickInterval: TimeInterval = 30
@@ -138,7 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // ADR 023 §5: the quit path is a lid writer like any other, so it takes
         // the same lock — a guard tick must not interleave with it.
         let bootID = clock.bootID
-        LidWriteLock().withLock {
+        let leftBehind = LidWriteLock().withLock { () -> KeepAwakeSession? in
             // Give up `app.lock` INSIDE this section: a CLI `session start`
             // queued behind the teardown must find the app gone once it gets
             // the lid lock. Otherwise the dying process still holds the flock
@@ -161,8 +165,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Only when a session exists: with no session on disk, quitting
             // must behave exactly as it did before this ADR (ADR 022's
             // re-arm debt survives a quit by design).
-            SessionService.live(bootID: bootID)
+            return SessionService.live(bootID: bootID)
                 .finishOnQuit(flagReadsOff: lidService.priorProvider() == false)
+        }
+        // The flag did not read off: the restore failed (`sudo -n`, a pmset
+        // timeout) or the flag is not ours. The record stays, and with
+        // `app.lock` gone nothing enforces it until RunClosed opens again.
+        // Say so, outside the lid lock, before the process exits.
+        if let left = leftBehind {
+            FileHandle.standardError.write(Data(
+                ("[RunClosed] quit: lid stay-awake did not read off; session \(left.id) "
+                 + "ends=\(left.endsAtWall.map { ISO8601DateFormatter().string(from: $0) } ?? "indefinite") "
+                 + "left on disk, not enforced until RunClosed reopens\n").utf8))
+            if !left.isIndefinite {
+                notify(L10n.t("RunClosed quit — Mac still awake"),
+                       L10n.t("Lid stay-awake could not be turned off, so the session stays on with nothing to end it at its deadline. Reopen RunClosed, or turn it off with `runclosed-cli lid-stay-awake off --operator`."),
+                       waitUpTo: 2)
+            }
         }
     }
 
@@ -234,20 +253,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Every action that may change the flag or the session calls this, so a
+    /// Start, +30 min or End (or a CLI change) redraws as soon as the
+    /// background read lands.
     private func refreshLidCache() {
         let bootID = clock.bootID
+        let sessionURL = sessionStore.url
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let value = PowerReadback.lidStayAwake()
             let rec = OwnedLidAssertion(currentBootID: bootID).load()
             let owned = rec.ownedEnabled && rec.bootID == bootID
+            let session = SessionStore(url: sessionURL).load()
             DispatchQueue.main.async {
                 guard let self else { return }
                 let changed = self.lidCache != value
+                let sessionChanged = self.sessionCache != session
                 self.lidCache = .some(value)
                 self.lidOwnedCache = owned
+                self.sessionCache = session
                 self.lidReady = true
                 self.syncKeepAwakeActivity()
-                if changed { self.rebuildPanelIfVisible() }
+                if sessionChanged { self.updateStatusTitle() }
+                if changed || sessionChanged { self.rebuildPanelIfVisible() }
             }
         }
     }
@@ -281,7 +308,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateStatusTitle() {
         guard let button = statusItem.button else { return }
         let now = SystemContinuousClock(bootID: clock.bootID)
-        let session = sessionStore.load()
+        let session = sessionCache
         let policyNow = SessionPolicy.Now(
             wall: Date(),
             continuousNanoseconds: now.nowContinuousNanoseconds,
@@ -515,16 +542,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
-    /// What the lid row should say about the session (ADR 023 §6). Pure-ish:
-    /// two file reads and the injected clocks, no mutation, no subprocess
-    /// beyond the readback the popup already performs.
+    /// What the lid row should say about the session (ADR 023 §6). Reads the
+    /// cached record and the clocks only: no file read, no mutation.
     private func sessionRow() -> PopupState.SessionRow {
         let clock = SystemContinuousClock(bootID: self.clock.bootID)
         let now = SessionPolicy.Now(
             wall: Date(),
             continuousNanoseconds: clock.nowContinuousNanoseconds,
             bootID: self.clock.bootID)
-        guard let session = sessionStore.load() else {
+        guard let session = sessionCache else {
             return PopupState.SessionRow(label: nil, timed: false, indefinite: false,
                                          pausedReason: nil, due: false)
         }
@@ -997,7 +1023,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// User notification, with a stderr trace. Unbundled dev runs (no bundle
     /// identifier) cannot use UNUserNotificationCenter — beep instead.
-    private func notify(_ title: String, _ body: String) {
+    /// `waitUpTo`: block up to that many seconds until the request reaches
+    /// the notification center — for the quit teardown, where the process
+    /// exits right after. The completion runs off the main thread, so the
+    /// wait cannot deadlock.
+    private func notify(_ title: String, _ body: String, waitUpTo timeout: TimeInterval? = nil) {
         FileHandle.standardError.write(Data("[RunClosed] notify: \(title) — \(body)\n".utf8))
         guard Bundle.main.bundleIdentifier != nil else {
             NSSound.beep()
@@ -1010,7 +1040,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let request = UNNotificationRequest(
             identifier: "runclosed.low-battery.\(UUID().uuidString)",
             content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
+        guard let timeout else {
+            UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
+            return
+        }
+        let sent = DispatchSemaphore(value: 0)
+        UNUserNotificationCenter.current().add(request) { _ in sent.signal() }
+        _ = sent.wait(timeout: .now() + timeout)
     }
 
     // MARK: — Helpers

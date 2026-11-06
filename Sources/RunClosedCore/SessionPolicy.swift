@@ -349,6 +349,8 @@ public enum SessionDuration {
         }
     }
 
+    private static let unitRank: [Character: Int] = ["h": 3, "m": 2, "s": 1]
+
     public static func parse(_ text: String) -> TimeInterval? {
         let trimmed = text.trimmingCharacters(in: .whitespaces).lowercased()
         guard !trimmed.isEmpty else { return nil }
@@ -373,11 +375,16 @@ public enum SessionDuration {
                 continue
             }
             guard !digits.isEmpty else { return nil }
+            // Units must get strictly smaller (h, then m, then s): `2h3h` or
+            // `30m2h` is a typo, and summing it would start a session the
+            // operator did not ask for.
+            guard let rank = unitRank[ch], rank < (lastUnit.flatMap { unitRank[$0] } ?? 4) else {
+                return nil
+            }
             switch ch {
             case "h": if !flush(3600) { return nil }
             case "m": if !flush(60) { return nil }
-            case "s": if !flush(1) { return nil }
-            default: return nil
+            default: if !flush(1) { return nil }
             }
             lastUnit = ch
         }
@@ -386,7 +393,7 @@ public enum SessionDuration {
             switch lastUnit {
             case "h"?: multiplier = 60      // "1h30" → +30 min
             case "m"?: multiplier = 1       // "1m30" → +30 s
-            case "s"?: multiplier = 1
+            case "s"?: return nil           // nothing is smaller than a second
             default: multiplier = 60        // bare "90" → 90 min
             }
             if !flush(multiplier) { return nil }

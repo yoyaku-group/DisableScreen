@@ -466,14 +466,22 @@ public struct SessionService {
     /// an unreadable record) ends through `finishSession()`, which also voids
     /// its re-arm debt.
     ///
+    /// Returns the session the quit leaves on disk: the flag did not read off
+    /// (the restore failed, or the flag is not ours), so nothing enforces it
+    /// until RunClosed opens again. The app logs it, and warns before it
+    /// exits when it has a deadline (ADR 023). `nil` when no session is left.
+    ///
     /// Callers run it inside `LidWriteLock`; it takes no lock itself.
-    public func finishOnQuit(flagReadsOff: Bool) {
-        guard store.exists, flagReadsOff else { return }
+    @discardableResult
+    public func finishOnQuit(flagReadsOff: Bool) -> KeepAwakeSession? {
+        guard store.exists else { return nil }
+        guard flagReadsOff else { return store.load() }
         if let session = store.load(), session.isIndefinite {
             store.clear()
         } else {
             finishSession()
         }
+        return nil
     }
 
     /// Seam for the release path: it decides whether the record survives (a

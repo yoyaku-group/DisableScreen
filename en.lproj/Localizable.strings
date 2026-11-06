@@ -56,3 +56,5 @@
 "Session ended, but lid stay-awake is still on (not set by RunClosed) — use the switch to turn it off" = "Session ended, but lid stay-awake is still on (not set by RunClosed) — use the switch to turn it off";
 "Session ended — Mac still awake" = "Session ended — Mac still awake";
 "The keep-awake session reached its end time, but lid stay-awake is still on and RunClosed did not set it, so it was left on. Turn it off with the switch in RunClosed." = "The keep-awake session reached its end time, but lid stay-awake is still on and RunClosed did not set it, so it was left on. Turn it off with the switch in RunClosed.";
+"RunClosed quit — Mac still awake" = "RunClosed quit — Mac still awake";
+"Lid stay-awake could not be turned off, so the session stays on with nothing to end it at its deadline. Reopen RunClosed, or turn it off with `runclosed-cli lid-stay-awake off --operator`." = "Lid stay-awake could not be turned off, so the session stays on with nothing to end it at its deadline. Reopen RunClosed, or turn it off with `runclosed-cli lid-stay-awake off --operator`.";
