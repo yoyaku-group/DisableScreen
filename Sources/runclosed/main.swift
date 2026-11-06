@@ -490,6 +490,227 @@ func cmdLowBattery(_ rest: [String]) -> Int32 {
     }
 }
 
+// ── ADR 023 — timed keep-awake session ──────────────────────────────────────
+
+let sessionUsage = """
+usage: runclosed session start --for <2h|90m|1h30m>   (bare number = minutes)
+       runclosed session start --indefinite          (the plain switch)
+       runclosed session extend [30m]
+       runclosed session end
+       runclosed session status [--json]
+"""
+
+func sessionJSON(_ session: KeepAwakeSession?, now: SessionPolicy.Now) -> [String: Any] {
+    let iso = ISO8601DateFormatter()
+    guard let s = session else {
+        return ["present": false]
+    }
+    var obj: [String: Any] = [
+        "present": true,
+        "schemaVersion": s.schemaVersion,
+        "id": s.id.uuidString,
+        "startedAt": iso.string(from: s.startedAt),
+        "bootID": s.bootID,
+        "indefinite": s.isIndefinite,
+        "pausedReason": s.pausedReason?.rawValue as Any? ?? NSNull(),
+        "onThisBoot": s.isOnBoot(now.bootID),
+        "due": SessionPolicy.isDue(s, now: now),
+        "dueReason": SessionPolicy.dueReason(s, now: now)?.rawValue as Any? ?? NSNull(),
+        "remainingSeconds": SessionPolicy.remaining(s, now: now) as Any? ?? NSNull(),
+        "remainingLabel": SessionPolicy.remainingLabel(s, now: now) as Any? ?? NSNull(),
+        "endsAtWall": s.endsAtWall.map { iso.string(from: $0) } as Any? ?? NSNull(),
+        "endsAtContinuous": s.endsAtContinuous as Any? ?? NSNull(),
+    ]
+    // Only meaningful on the boot that wrote the counter.
+    if s.isOnBoot(now.bootID), let deadline = s.endsAtContinuous {
+        obj["continuousDeadlineSecondsFromNow"] =
+            deadline > now.continuousNanoseconds
+            ? ContinuousClockTimebase.seconds(fromNanoseconds: deadline - now.continuousNanoseconds)
+            : 0
+    }
+    return obj
+}
+
+/// One line a script can read without a JSON parser.
+func sessionHumanLine(_ session: KeepAwakeSession?, now: SessionPolicy.Now) -> String {
+    guard let s = session else { return "no session" }
+    if s.isIndefinite {
+        return "indefinite session (started \(ISO8601DateFormatter().string(from: s.startedAt)))"
+    }
+    if SessionPolicy.isDue(s, now: now) {
+        return "due (\(SessionPolicy.dueReason(s, now: now)?.rawValue ?? "-")) — ends on the next tick"
+    }
+    let left = SessionPolicy.remainingLabel(s, now: now) ?? "-"
+    let paused = s.pausedReason.map { " (paused: \($0.rawValue))" } ?? ""
+    return "running: \(left)\(paused)"
+}
+
+func makeSessionService() -> SessionService {
+    SessionService.live(bootID: clock.bootID)
+}
+
+func renderSessionError(_ e: SessionError) -> Int32 {
+    let msg: String
+    let code: Int32
+    switch e {
+    case .noSession:
+        msg = "refused: no session is running"
+        code = 3
+    case .alreadyRunning:
+        msg = "refused: a session is already running — use `extend` or `end`"
+        code = 3
+    case .nonPositiveDuration:
+        msg = "refused: the duration must be greater than zero"
+        code = 64
+    case .indefiniteSession:
+        msg = "refused: this session is indefinite (the plain switch) — start a timed session instead"
+        code = 3
+    case .flagOnNotOwned:
+        msg = "refused: lid stay-awake is on but RunClosed does not own it on this boot, so the session could not be ended at its deadline. Turn it off then on (`lid-stay-awake off --operator` then `on`), or start an indefinite session."
+        code = 3
+    case .preconditionUnknown:
+        msg = "refused: B1 invariant — observed prior state is UNKNOWN (pmset -g did not report SleepDisabled)"
+        code = 3
+    case .notOwned:
+        msg = "refused: B2 invariant — we do not own the disablesleep flag on this boot"
+        code = 3
+    case .flagAlreadyOff:
+        msg = "no change: the flag already read off"
+        code = 0
+    case .backendFailed(let m):
+        msg = "backend failed: \(m)"
+        code = 5
+    }
+    FileHandler.err(msg)
+    return code
+}
+
+func cmdSession(_ rest: [String]) -> Int32 {
+    guard let sub = rest.first else {
+        FileHandler.err(sessionUsage)
+        return 64
+    }
+    let args = Array(rest.dropFirst())
+
+    switch sub {
+    case "status":
+        // Read-only: no lock, no mutation, no file write. Same stance as
+        // `low-battery status`.
+        let svc = makeSessionService()
+        let now = svc.currentNow()
+        let session = svc.load()
+        if args.contains("--json") {
+            emitJSON([
+                "schemaVersion": kSchemaVersion,
+                "bootID": now.bootID,
+                "session": sessionJSON(session, now: now),
+                "ownership": svc.currentOwnership.rawValue,
+                "storedSchemaVersion": SessionStore().storedSchemaVersion() as Any? ?? NSNull(),
+                "observed": PowerReadback.lidStayAwake().map { $0 ? "on" : "off" } ?? "unknown",
+                "rowLabel": session.flatMap { SessionPolicy.rowLabel($0, now: now) } as Any? ?? NSNull(),
+            ])
+        } else {
+            print(sessionHumanLine(session, now: now))
+        }
+        return 0
+
+    case "start":
+        var duration: TimeInterval?
+        var indefinite = false
+        var i = 0
+        while i < args.count {
+            switch args[i] {
+            case "--for":
+                i += 1
+                guard i < args.count, let parsed = SessionDuration.parse(args[i]) else {
+                    FileHandler.err(sessionUsage)
+                    return 64
+                }
+                duration = parsed
+            case "--indefinite":
+                indefinite = true
+            default:
+                FileHandler.err(sessionUsage)
+                return 64
+            }
+            i += 1
+        }
+        guard indefinite || duration != nil else {
+            FileHandler.err(sessionUsage)
+            return 64
+        }
+        if indefinite { duration = nil }
+        // Same lock as `lid-stay-awake on|off`: the session writes the record
+        // and the flag, so it must not interleave with a guard tick.
+        var svc = makeSessionService()
+        let result = LidWriteLock().withLock { () -> Result<SessionService.StartOutcome, SessionError> in
+            let r = svc.start(for: duration)
+            if case .success = r {
+                // An explicit start supersedes a pending low-battery re-arm.
+                LowBatteryLatchStore().clearPendingRearm()
+            }
+            return r
+        }
+        switch result {
+        case .success(let outcome):
+            let now = svc.currentNow()
+            var obj = sessionJSON(svc.load(), now: now)
+            obj["schemaVersion"] = kSchemaVersion
+            obj["bootID"] = now.bootID
+            switch outcome {
+            case .started: obj["outcome"] = "started"
+            case .adoptedRunningFlag: obj["outcome"] = "adoptedRunningFlag"
+            }
+            emitJSON(obj)
+            return 0
+        case .failure(let e):
+            return renderSessionError(e)
+        }
+    case "extend":
+        var step = SessionDuration.extendStep
+        if let raw = args.first {
+            guard let parsed = SessionDuration.parse(raw) else {
+                FileHandler.err(sessionUsage)
+                return 64
+            }
+            step = parsed
+        }
+        var svc = makeSessionService()
+        let result = LidWriteLock().withLock { svc.extend(by: step) }
+        switch result {
+        case .success(let session):
+            let now = svc.currentNow()
+            var obj = sessionJSON(session, now: now)
+            obj["schemaVersion"] = kSchemaVersion
+            obj["bootID"] = now.bootID
+            obj["outcome"] = "extended"
+            emitJSON(obj)
+            return 0
+        case .failure(let e):
+            return renderSessionError(e)
+        }
+    case "end":
+        var svc = makeSessionService()
+        let result = LidWriteLock().withLock { svc.end() }
+        switch result {
+        case .success(let outcome):
+            emitJSON([
+                "schemaVersion": kSchemaVersion,
+                "bootID": clock.bootID,
+                "action": "end",
+                "outcome": outcome.rawValue,
+                "error": outcome.failureMessage as Any? ?? NSNull(),
+            ])
+            return outcome.isFailure ? 5 : 0
+        case .failure(let e):
+            return renderSessionError(e)
+        }
+    default:
+        FileHandler.err(sessionUsage)
+        return 64
+    }
+}
+
 // ── G2b — display mutation subcommands ───────────────────────────────────────
 
 /// Build a DisplayMutationService wired against the production SLS backend
@@ -643,7 +864,7 @@ func cmdLoginItem(_ rest: [String]) -> Int32 {
 // ── dispatch ─────────────────────────────────────────────────────────────────
 let args = Array(CommandLine.arguments.dropFirst())
 guard let sub = args.first else {
-    FileHandler.err("usage: runclosed <status|displays|doctor|run|restore|disable|enable|lid-stay-awake|login-item|helper|low-battery> [...]")
+    FileHandler.err("usage: runclosed <status|displays|doctor|run|restore|disable|enable|lid-stay-awake|login-item|helper|low-battery|session> [...]")
     exit(64)
 }
 let rest = Array(args.dropFirst())
@@ -659,6 +880,7 @@ case "lid-stay-awake": exit(cmdLidStayAwake(rest))
 case "login-item": exit(cmdLoginItem(rest))
 case "helper":   exit(cmdHelper(rest))
 case "low-battery": exit(cmdLowBattery(rest))
+case "session":  exit(cmdSession(rest))
 case "restore":
     // restore --owned = re-enable every display we previously disabled (B3).
     // restore --lid = closed-lid keep-awake restore (G3 stub, unchanged).
