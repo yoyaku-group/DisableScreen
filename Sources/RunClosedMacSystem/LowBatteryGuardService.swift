@@ -144,7 +144,8 @@ public struct LowBatteryGuardService {
         /// layer is wired or nothing happened.
         public var session: SessionService.ExpiryOutcome?
         /// Set when the operator should be told a session ended by itself, at
-        /// most once (the record is gone afterwards).
+        /// most once (the record is gone afterwards). `false` for
+        /// `.flagLeftOn`: the session ended but the Mac is still awake.
         public var sessionEndedNaturally: Bool = false
         /// Set when the flag was re-armed on AC for a still-live session, so
         /// the menu bar can refresh without polling the record.
@@ -214,7 +215,7 @@ public struct LowBatteryGuardService {
             // (ADR 023 §4). `SessionService.finish` already cleared the latch
             // on disk; this keeps the in-memory copy from re-saving it.
             record.latch = record.latch.recordingRearm()
-            outcome.sessionEndedNaturally = !end.isFailure
+            outcome.sessionEndedNaturally = end.stopsKeepingAwake
         }
 
         switch evaluation.decision.action {

@@ -10,10 +10,16 @@ final class SessionGuardTickTests: XCTestCase {
 
     private final class FakeLid: LidAssertion, @unchecked Sendable {
         var calls: [Bool] = []
+        var failWrites = false
         let flag: FlagBox
         init(flag: FlagBox) { self.flag = flag }
         func setEnabled(_ enabled: Bool) -> OperationResult {
             calls.append(enabled)
+            if failWrites {
+                return OperationResult(requestID: "t", action: .sleepAll, state: .failed,
+                                       nativeRC: 1, readbackOK: false,
+                                       error: "sudo: a password is required")
+            }
             flag.value = enabled
             return OperationResult(requestID: "t", action: .sleepAll, state: .verified,
                                    nativeRC: 0, readbackOK: true)
@@ -101,27 +107,11 @@ final class SessionGuardTickTests: XCTestCase {
         let lockURL = dir.appendingPathComponent("lid.lock")
         let probe = Probe()
 
-        let apply: (Bool, LidMutationService.Initiator) -> Result<OperationResult, LidMutationError> = { enabled, initiator in
-            let rec = lidStore.load()
-            if !enabled, initiator != .operatorCommand,
-               !LidMutationService.mayRelease(initiator: initiator, record: rec, currentBootID: "A") {
-                return .failure(.notOwned)
-            }
-            let prior = flagBox.value
-            guard LidMutationPolicy.canSet(enabled: enabled, observedPrior: prior) else {
-                if prior == nil { return .failure(.preconditionUnknown) }
-                return .failure(.noChangeRequested(target: enabled))
-            }
-            let result = lid.setEnabled(enabled)
-            if result.state == .verified {
-                var next = lidStore.load()
-                next.bootID = "A"
-                next.ownedEnabled = enabled
-                next.referenceState = enabled ? "on" : "off"
-                lidStore.save(next)
-            }
-            return .success(result)
-        }
+        // The production wiring, on the same fake backend and stores as the
+        // guard's own real LidMutationService below.
+        let apply = SessionService.gatedLid(
+            bootID: "A", makeMutator: { lid }, store: lidStore,
+            priorProvider: { flagBox.value })
 
         let sessionService = SessionService(
             store: sessionStore, latchStore: latchStore, continuous: clock,
@@ -229,15 +219,45 @@ final class SessionGuardTickTests: XCTestCase {
         XCTAssertNil(rig.sessionStore.load())
     }
 
-    func testTickExpiryNotOwnedClearsWithoutMutation() {
+    func testTickExpiryOfAFlagAlreadyOffClearsWithoutMutation() {
         var rig = makeRig(flag: false, ownedBoot: nil, battery: Self.reading(false, 60))
         saveSession(rig, duration: 60)
         rig.clock.advance(111)
         // No ownership, flag observed OFF: the session has nothing to protect.
         let outcome = rig.guardService.tick()
-        XCTAssertEqual(outcome.session, .ended(.flagNotOwned))
+        XCTAssertEqual(outcome.session, .ended(.flagAlreadyOff))
+        XCTAssertTrue(outcome.sessionEndedNaturally)
         XCTAssertTrue(rig.lid.calls.isEmpty, "no release write on an already-off flag")
         XCTAssertNil(rig.sessionStore.load())
+    }
+
+    /// Review round 7: the flag is ON with no RunClosed owner at the
+    /// deadline. The tick must not tell the operator the session simply
+    /// ended — the Mac is still awake.
+    func testTickExpiryWithTheFlagLeftOnIsNotANaturalEnd() {
+        var rig = makeRig(flag: true, ownedBoot: nil, battery: Self.reading(false, 60))
+        saveSession(rig, duration: 60)
+        rig.clock.advance(111)
+        let outcome = rig.guardService.tick()
+        XCTAssertEqual(outcome.session, .ended(.flagLeftOn))
+        XCTAssertFalse(outcome.sessionEndedNaturally)
+        XCTAssertEqual(rig.flag.value, true)
+        XCTAssertTrue(rig.lid.calls.isEmpty, "B2: no release write on a flag we do not own")
+        XCTAssertNil(rig.sessionStore.load())
+    }
+
+    /// Review round 7: the rig runs the real gate, which maps a `.failed`
+    /// write to `backendFailed`. The record stays for the next tick.
+    func testTickExpiryRetainsTheRecordWhenTheWriteFails() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 60))
+        saveSession(rig, duration: 60)
+        rig.clock.advance(111)
+        rig.lid.failWrites = true
+        let outcome = rig.guardService.tick()
+        XCTAssertEqual(outcome.session, .retained("sudo: a password is required"))
+        XCTAssertFalse(outcome.sessionEndedNaturally)
+        XCTAssertNotNil(rig.sessionStore.load())
+        XCTAssertEqual(rig.flag.value, true)
     }
 
     func testTickIsSilentWithNoSession() {

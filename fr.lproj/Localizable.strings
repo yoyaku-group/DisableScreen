@@ -51,3 +51,6 @@
 "%@ h %@ left" = "%@ h %@ restantes";
 "< 1 min left" = "< 1 min restante";
 "%@%% on battery: lid stay-awake was still on from before the last restart. RunClosed turned it off as an emergency and the Mac is going to sleep (hibernation keeps every process). It comes back on once charging above 15%%." = "%@ %% sur batterie : le maintien éveillé était encore actif depuis avant le dernier redémarrage. RunClosed l'a coupé en urgence et le Mac se met en veille (l'hibernation conserve tous les processus). Il sera réactivé une fois en charge au-dessus de 15 %%.";
+"Session ended, but lid stay-awake is still on (not set by RunClosed) — use the switch to turn it off" = "Session terminée, mais le maintien éveillé reste actif (il n'a pas été activé par RunClosed) : coupez-le avec l'interrupteur";
+"Session ended — Mac still awake" = "Session terminée — le Mac reste éveillé";
+"The keep-awake session reached its end time, but lid stay-awake is still on and RunClosed did not set it, so it was left on. Turn it off with the switch in RunClosed." = "La session de maintien éveillé a atteint son heure de fin, mais le maintien éveillé capot fermé reste actif et n'a pas été activé par RunClosed : il a donc été laissé tel quel. Coupez-le avec l'interrupteur de RunClosed.";

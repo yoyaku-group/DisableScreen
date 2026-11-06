@@ -546,12 +546,12 @@ $ arch -arm64 swift build --build-tests
 Build complete! (0 warning)
 
 $ arch -arm64 swift test
-RunClosedPersistenceTests  46 · RunClosedMacSystemTests 145 · HelperSupport 13
+RunClosedPersistenceTests  46 · RunClosedMacSystemTests 150 · HelperSupport 13
 RunClosedCoreTests        105 · RunClosedAppTests        11
-→ 320/320, 0 échec
+→ 325/325, 0 échec
 ```
 
-Dont **134 nouveaux** : 42 `SessionPolicyTests`, 13 `SessionStoreTests`, 8 `AppLivenessLockTests`, 44 `SessionServiceTests`, 22 `SessionGuardTickTests`, 5 dans `LidMutationServiceTests` (initiateur `.sessionRecovery`).
+Dont **139 nouveaux** : 42 `SessionPolicyTests`, 13 `SessionStoreTests`, 8 `AppLivenessLockTests`, 47 `SessionServiceTests`, 24 `SessionGuardTickTests`, 5 dans `LidMutationServiceTests` (initiateur `.sessionRecovery`).
 
 Relecture, tour 1 (11 tests ajoutés) :
 - Quit pendant une session mise en pause par la garde batterie : la dette de réarmement est effacée, une étape batterie suivante sur secteur à 80 % ne réarme pas. Sans session, le quit laisse la dette intacte (ADR 022 inchangé).
@@ -612,6 +612,14 @@ Relecture, tour 6 (`ai-review-gate`, 0 CRITICAL, 3 WARN corrigés, 6 tests ajout
 - `app.lock` : une sonde en cours (verrou partagé) ne fait pas croire à l'app ; `release()` rend le verrou avant la fin du détenteur, idempotent, le verrou se reprend ensuite.
 - Non couverts par un test unitaire (code AppKit) : `release()` dans la section verrouillée du teardown, redessin du compte à rebours après Start, +30 min et End.
 
+Relecture, tour 7 (`ai-review-gate`, 0 CRITICAL, 3 WARN corrigés, 5 tests ajoutés, 4 attentes corrigées) :
+- Les bancs `SessionServiceTests` et `SessionGuardTickTests` passent par le vrai `LidMutationService` (`SessionService.gatedLid`, le câblage même de `live()`) au lieu d'une copie du contrôle. La copie vérifiait la propriété avant de lire le flag : 4 tests attendaient `flagNotOwned` sur un flag OFF, le vrai service rend `flagAlreadyOff`. Attentes corrigées.
+- Record de propriété perdu pendant une session minutée : à l'échéance, `.ended(.flagLeftOn)`, flag laissé ON (B2), record et dette de réarmement effacés, `stopsKeepingAwake` faux.
+- Refus relu : flag relu OFF → `flagNotOwned` ; relu INCONNU → `flagLeftOn`.
+- Démarrage abandonné dont l'annulation échoue aussi : record gardé, puis `flagLeftOn` à l'échéance au lieu d'une fin silencieuse.
+- Au tick : `flagLeftOn` n'est pas une fin normale (`sessionEndedNaturally` faux) ; une écriture en échec rend `.retained("sudo: a password is required")` et garde le record.
+- End sur une session minutée dont le flag est étranger : `.flagLeftOn`, flag intact, record effacé.
+- Non couverts par un test unitaire : refus de `session extend` quand l'app ne tourne pas (câblage CLI sous `LidWriteLock`, lecture du code), notification et message du popup pour `flagLeftOn` (AppKit).
 Contrats verrouillés :
 - Échéance continue sur le même boot ; une veille de 6 h dans une session de 1 h rend la session due (ce que `systemUptime` manquerait) ; non due avant l'échéance ; `remaining` à 0 une fois due.
 - Échéance murale inter-boot ; le compteur continu d'un boot précédent est ignoré et ne peut pas terminer la session immédiatement (comparaison naïve sinon).
@@ -634,6 +642,8 @@ $ codesign --verify --strict build/RunClosed.app → exit 0
 $ runclosed-cli session status --json
   ownership: "ownedThisBoot" ; observed: "on" ; session { present: false } ; rowLabel: null
 $ runclosed-cli session end                      → « refused: no session is running », exit 3
+$ runclosed-cli session extend 30m               → « refused: no session is running », exit 3
+$ runclosed-cli session extend 9999h             → exit 64
 $ runclosed-cli session start --for nonsense     → usage, exit 64
 $ runclosed-cli session bogus                    → usage, exit 64
 $ runclosed-cli definitely-not-a-command         → « unknown command », exit 64

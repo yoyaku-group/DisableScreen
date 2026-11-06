@@ -32,7 +32,11 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   A pause reason written by a later version keeps the session paused. The
   pause also ends when the flag is back on and ours by any path. End on an
   indefinite session is the switch OFF and turns off an adopted flag; End on
-  a timed session never turns off a flag another tool owns. While the app
+  a timed session never turns off a flag another tool owns. When a deadline
+  or End finds the flag still on but not RunClosed's (for example a lost
+  ownership record), the session ends with a "Session ended — Mac still
+  awake" alert instead of a plain "Session ended", and `session end` exits 3.
+  While the app
   runs it holds `app.lock`; until the launchd backstop ships, the CLI refuses
   a timed session when the app is not running, since nothing would end it.
   The check runs under the lid lock, and the app retries `app.lock` on every
@@ -44,10 +48,11 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   whose re-arm was cancelled is cleared too. A start whose `pmset` write
   failed its readback checks the flag again and turns it back off if the
   write landed anyway. Quitting gives `app.lock` up inside the lid lock, so a
-  CLI start queued behind the quit is refused.
+  CLI start queued behind the quit is refused. `session extend` is refused
+  the same way when the app is not running.
 - `runclosed session start --for <2h|90m|1h30m> | start --indefinite | extend
   [30m] | end | status [--json]`. `--for` together with `--indefinite` is a
-  usage error; a timed start without the menu-bar app running exits 3. Mutating subcommands take the same lock as
+  usage error; a timed start or an extend without the menu-bar app running exits 3. Mutating subcommands take the same lock as
   `lid-stay-awake on|off`; exit codes stay 0 / 3 (refused by policy) / 5
   (backend failure) / 64 (usage). The session record lives in
   `~/Library/Application Support/RunClosed/session.json`, so a future launchd

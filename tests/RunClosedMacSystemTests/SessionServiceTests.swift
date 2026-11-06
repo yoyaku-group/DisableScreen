@@ -113,35 +113,14 @@ final class SessionServiceTests: XCTestCase {
                 let rec = lidStore.load()
                 return (rec.bootID, rec.ownedEnabled)
             },
-            // Mirrors LidMutationService's gate, including the initiator rules,
-            // so a passing test proves the INITIATOR this service sends is one
-            // the real service would accept.
-            applyLid: { enabled, initiator in
-                let rec = lidStore.load()
-                if !enabled, initiator != .operatorCommand,
-                   !LidMutationService.mayRelease(initiator: initiator,
-                                                  record: rec,
-                                                  currentBootID: bootID) {
-                    return .failure(.notOwned)
-                }
-                let prior = flagBox.value
-                guard LidMutationPolicy.canSet(enabled: enabled, observedPrior: prior) else {
-                    if prior == nil { return .failure(.preconditionUnknown) }
-                    return .failure(.noChangeRequested(target: enabled))
-                }
-                let result = lid.setEnabled(enabled)
-                if result.state == .verified {
-                    var next = lidStore.load()
-                    next.bootID = bootID
-                    next.ownedEnabled = enabled
-                    next.referenceState = enabled ? "on" : "off"
-                    lidStore.save(next)
-                }
-                if result.state == .failed {
-                    return .failure(.backendFailed(message: result.error ?? "unknown"))
-                }
-                return .success(result)
-            })
+            // The production wiring, on a fake backend: the REAL
+            // LidMutationService gate decides, so a passing test proves the
+            // initiator this service sends is one the real service accepts.
+            applyLid: SessionService.gatedLid(
+                bootID: bootID,
+                makeMutator: { lid },
+                store: lidStore,
+                priorProvider: { flagBox.value }))
         return Rig(service: service, lid: lid, flag: flagBox, clock: clock,
                    sessionStore: sessionStore, latchStore: latchStore, lidStore: lidStore)
     }
@@ -231,16 +210,76 @@ final class SessionServiceTests: XCTestCase {
         XCTAssertNil(rig.sessionStore.load())
     }
 
-    func testExpiryWhenNotOwnedClearsWithoutMutating() {
+    func testExpiryOfAFlagAlreadyOffClearsWithoutMutating() {
         var rig = makeRig(flag: false, ownedBoot: nil)
         _ = rig.service.start(for: 60)
         // Someone else turned the flag off between the start and the expiry.
         rig.flag.value = false
         rig.lidStore.save(.init(bootID: "A", ownedEnabled: false, referenceState: "off"))
         rig.clock.advance(61)
-        XCTAssertEqual(rig.service.expireIfDue(), .ended(.flagNotOwned))
+        XCTAssertEqual(rig.service.expireIfDue(), .ended(.flagAlreadyOff))
         XCTAssertEqual(rig.lid.calls, [true], "no second write — the flag is already off")
         XCTAssertNil(rig.sessionStore.load())
+    }
+
+    // MARK: — Review round 7: a refused release with the flag still ON
+
+    /// `owned_lid.json` lost or damaged during a timed session: at the
+    /// deadline the real gate refuses `.automatic` (`notOwned`) with the flag
+    /// ON. The record goes (nothing can enforce it), but the outcome says the
+    /// Mac is still awake instead of passing for a natural end.
+    func testExpiryWithALostOwnershipRecordReportsTheFlagLeftOn() {
+        var rig = makeRig(flag: false, ownedBoot: nil)
+        guard case .success(.started) = rig.service.start(for: 60) else {
+            return XCTFail("expected a started session")
+        }
+        rig.lidStore.purge()
+        rig.latchStore.save(.init(latch: LowBatteryPolicy.Latch(releasedByGuard: true)))
+        rig.clock.advance(61)
+        let outcome = rig.service.expireIfDue()
+        XCTAssertEqual(outcome, .ended(.flagLeftOn))
+        XCTAssertEqual(rig.flag.value, true, "B2: not provably ours, so never turned off")
+        XCTAssertEqual(rig.lid.calls, [true], "no release write")
+        XCTAssertNil(rig.sessionStore.load())
+        XCTAssertFalse(rig.latchStore.load().latch.releasedByGuard,
+                       "an ended session owes no re-arm")
+        XCTAssertFalse(SessionEndOutcome.flagLeftOn.stopsKeepingAwake)
+        XCTAssertFalse(SessionEndOutcome.flagLeftOn.isFailure,
+                       "the record is gone: there is nothing left to retry")
+    }
+
+    /// The refusal is re-read: a flag that went OFF right after the gate saw
+    /// it ON is a session with nothing left to protect; UNKNOWN is not OFF.
+    func testRefusedReleaseIsJudgedOnAFreshReadback() {
+        for (reread, expected) in [(false, SessionEndOutcome.flagNotOwned),
+                                   (nil, .flagLeftOn)] as [(Bool?, SessionEndOutcome)] {
+            var rig = makeRig(flag: false, ownedBoot: nil)
+            _ = rig.service.start(for: 60)
+            rig.lidStore.purge()
+            rig.clock.advance(61)
+            rig.service.observedFlag = { reread }
+            XCTAssertEqual(rig.service.expireIfDue(), .ended(expected), "reread=\(reread as Any)")
+            XCTAssertNil(rig.sessionStore.load())
+        }
+    }
+
+    /// The double failure the review named: the start's write lands but its
+    /// readback fails (no ownership recorded), and putting it back OFF fails
+    /// too. The record stays; at the deadline the gate refuses `notOwned`,
+    /// which must surface as the flag left on, never as a quiet end.
+    func testAbandonedStartWithAFailedUndoEndsLoudly() {
+        var rig = makeRig(flag: false, ownedBoot: nil)
+        rig.lid.landsButFailsOnce = true
+        rig.lid.failWrites = true
+        guard case .failure(.backendFailed) = rig.service.start(for: 60) else {
+            return XCTFail("expected a backend failure")
+        }
+        XCTAssertEqual(rig.flag.value, true)
+        XCTAssertNotNil(rig.sessionStore.load(), "the Mac may be awake: the record stays")
+        rig.lid.failWrites = false
+        rig.clock.advance(61)
+        XCTAssertEqual(rig.service.expireIfDue(), .ended(.flagLeftOn))
+        XCTAssertEqual(rig.flag.value, true)
     }
 
     func testExpiryRetainsTheRecordWhenTheReleaseFails() {
@@ -530,7 +569,8 @@ final class SessionServiceTests: XCTestCase {
     }
 
     /// A timed session keeps the ownership gate: End never turns off a flag
-    /// another tool owns.
+    /// another tool owns, and says so (`.flagLeftOn`) rather than reporting
+    /// a clean end.
     func testEndOfATimedSessionLeavesAForeignFlagAlone() {
         var rig = makeRig(flag: true, ownedBoot: nil)
         rig.sessionStore.save(KeepAwakeSession(
@@ -538,9 +578,10 @@ final class SessionServiceTests: XCTestCase {
             endsAtWall: epoch.addingTimeInterval(3600),
             endsAtContinuous: UInt64.max,
             bootID: "A"))
-        XCTAssertEqual(rig.service.end(), .success(.flagNotOwned))
+        XCTAssertEqual(rig.service.end(), .success(.flagLeftOn))
         XCTAssertEqual(rig.flag.value, true)
         XCTAssertEqual(rig.lid.calls, [])
+        XCTAssertNil(rig.sessionStore.load())
     }
 
     // MARK: — Review round 5: orphan reconciliation
@@ -623,7 +664,7 @@ final class SessionServiceTests: XCTestCase {
             endsAtContinuous: ContinuousClockTimebase.nanoseconds(fromSeconds: 1_060), bootID: "A"))
         rig.clock.advance(61)
         let step = rig.service.step()
-        XCTAssertEqual(step.expiry, .ended(.flagNotOwned))
+        XCTAssertEqual(step.expiry, .ended(.flagAlreadyOff))
         XCTAssertNil(step.reconciled)
         XCTAssertNil(rig.sessionStore.load())
     }

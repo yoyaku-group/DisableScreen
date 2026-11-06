@@ -682,7 +682,18 @@ func cmdSession(_ rest: [String]) -> Int32 {
             step = parsed
         }
         var svc = makeSessionService()
-        let result = LidWriteLock().withLock { svc.extend(by: step) }
+        let locked = LidWriteLock().withLock { () -> Result<KeepAwakeSession, SessionError>? in
+            // Same refusal as `start --for`, same place: a new deadline that
+            // nothing would enforce must not be reported as "extended" (the
+            // app crashed during a timed session). No session on record
+            // falls through to `extend`'s own `noSession`.
+            if svc.load() != nil, !AppLivenessLock().isHeld() { return nil }
+            return svc.extend(by: step)
+        }
+        guard let result = locked else {
+            FileHandler.err("refused: RunClosed.app is not running, so nothing would end this session at its new deadline. Open RunClosed first.")
+            return 3
+        }
         switch result {
         case .success(let session):
             let now = svc.currentNow()
@@ -707,6 +718,11 @@ func cmdSession(_ rest: [String]) -> Int32 {
                 "outcome": outcome.rawValue,
                 "error": outcome.failureMessage as Any? ?? NSNull(),
             ])
+            if outcome == .flagLeftOn {
+                // The record is gone, but B2 kept the flag ON: not ours.
+                FileHandler.err("refused: the session ended, but lid stay-awake is still on and RunClosed does not own it, so it was left on. Turn it off with `lid-stay-awake off --operator`.")
+                return 3
+            }
             return outcome.isFailure ? 5 : 0
         case .failure(let e):
             return renderSessionError(e)

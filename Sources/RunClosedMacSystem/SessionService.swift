@@ -60,14 +60,31 @@ public struct SessionService {
                 let rec = OwnedLidAssertion(currentBootID: bootID).load()
                 return (rec.bootID, rec.ownedEnabled)
             },
-            applyLid: { enabled, initiator in
-                var service = LidMutationService(
-                    bootID: bootID,
-                    mutator: LidAssertions.live(),
-                    store: OwnedLidAssertion(currentBootID: bootID),
-                    priorProvider: { PowerReadback.lidStayAwake() })
-                return service.setEnabled(enabled, initiator: initiator)
-            })
+            applyLid: gatedLid(
+                bootID: bootID,
+                makeMutator: { LidAssertions.live() },
+                store: OwnedLidAssertion(currentBootID: bootID),
+                priorProvider: { PowerReadback.lidStayAwake() }))
+    }
+
+    /// The ONE wiring from a session's lid request to the gated
+    /// `LidMutationService`. `live()` and the tests both build `applyLid`
+    /// here, so the tests run the real ownership gate (B1 order, cross-boot
+    /// reconciliation, the initiator rules) rather than a copy of it.
+    public static func gatedLid(
+        bootID: String,
+        makeMutator: @escaping () -> any LidAssertion,
+        store: OwnedLidAssertion,
+        priorProvider: @escaping @Sendable () -> Bool?
+    ) -> (Bool, LidMutationService.Initiator) -> Result<OperationResult, LidMutationError> {
+        { enabled, initiator in
+            var service = LidMutationService(
+                bootID: bootID,
+                mutator: makeMutator(),
+                store: store,
+                priorProvider: priorProvider)
+            return service.setEnabled(enabled, initiator: initiator)
+        }
     }
 
     // MARK: — Read
@@ -218,7 +235,9 @@ public struct SessionService {
     /// foreign flag in the first place). An INDEFINITE session is the plain
     /// switch, which may have adopted a flag another tool set: End is then the
     /// switch OFF, an operator command (ADR 021). Otherwise the record would
-    /// go while the Mac stays awake with no deadline.
+    /// go while the Mac stays awake with no deadline. A timed End refused
+    /// with the flag still ON reports `.flagLeftOn`, so the popup and the CLI
+    /// tell the operator to turn it off with the switch.
     public mutating func end() -> Result<SessionEndOutcome, SessionError> {
         guard let session = store.load() else { return .failure(.noSession) }
         let initiator: LidMutationService.Initiator = session.isIndefinite
@@ -241,8 +260,11 @@ public struct SessionService {
     /// End the session if a deadline has passed.
     ///
     /// Normal end order (ADR 023 §5): release through the ownership gate →
-    /// clear the record when the result is VERIFIED, or `notOwned` (the flag is
-    /// already OFF or belongs to someone else — nothing left to protect).
+    /// clear the record when the result is VERIFIED, already OFF, or refused
+    /// `notOwned`. A refusal with the flag still ON ends as `.flagLeftOn`,
+    /// never as a natural end: the deadline is past, RunClosed may not turn
+    /// a flag it cannot prove is its own OFF (B2), and the operator must be
+    /// told the Mac is still awake.
     public mutating func expireIfDue() -> ExpiryOutcome {
         guard let session = store.load() else { return .noSession }
         let now = currentNow()
@@ -252,7 +274,7 @@ public struct SessionService {
             initiator: Self.releaseInitiator(for: session, currentBootID: continuous.bootID),
             clearingRecord: true)
         switch outcome {
-        case .released, .flagNotOwned, .flagAlreadyOff:
+        case .released, .flagNotOwned, .flagAlreadyOff, .flagLeftOn:
             return .ended(outcome)
         case .releaseFailed(let message):
             return .retained(message)
@@ -399,10 +421,15 @@ public struct SessionService {
             finish(clearingRecord: clearingRecord)
             return .released
         case .failure(.notOwned):
-            // The flag is OFF already or belongs to another tool: the session
-            // has nothing left to protect. No mutation happened.
+            // The gate refuses `notOwned` only after reading the flag ON: it
+            // is set and not provably ours (ownership record lost or damaged,
+            // a write whose readback failed, another tool). Nothing was
+            // mutated. The record goes either way: RunClosed cannot enforce
+            // this deadline. Re-read before saying so: only an observed OFF
+            // means the session has nothing left to protect; ON or UNKNOWN
+            // (not OFF, ADR 009) means the Mac may stay awake.
             finish(clearingRecord: clearingRecord)
-            return .flagNotOwned
+            return observedFlag() == false ? .flagNotOwned : .flagLeftOn
         case .failure(.noChangeRequested(target: false)):
             finish(clearingRecord: clearingRecord)
             return .flagAlreadyOff
@@ -480,17 +507,31 @@ public struct SessionService {
 public enum SessionEndOutcome: Equatable, Sendable {
     /// `disablesleep 0` verified by readback.
     case released
-    /// Refused `notOwned`: the flag is already OFF or set by another tool.
-    /// Nothing was mutated.
+    /// Refused `notOwned`, and the flag read OFF right after: it went off by
+    /// itself in between. Nothing was mutated, nothing left to protect.
     case flagNotOwned
     /// The flag already read OFF (no-op refusal).
     case flagAlreadyOff
+    /// Refused `notOwned` with the flag still ON (or UNKNOWN): the record
+    /// went, but the Mac may stay awake with no deadline and no RunClosed
+    /// owner. Never a natural end; the operator is told to turn it off.
+    case flagLeftOn
     /// The write or its readback failed; the record is kept for a retry.
     case releaseFailed(String)
 
+    /// The release failed and the record was kept for a retry.
     public var isFailure: Bool {
         if case .releaseFailed = self { return true }
         return false
+    }
+
+    /// The session ended AND the Mac is no longer kept awake by it: the only
+    /// outcomes reported to the operator as a plain "Session ended".
+    public var stopsKeepingAwake: Bool {
+        switch self {
+        case .released, .flagNotOwned, .flagAlreadyOff: return true
+        case .flagLeftOn, .releaseFailed: return false
+        }
     }
 
     public var rawValue: String {
@@ -498,6 +539,7 @@ public enum SessionEndOutcome: Equatable, Sendable {
         case .released: return "released"
         case .flagNotOwned: return "flagNotOwned"
         case .flagAlreadyOff: return "flagAlreadyOff"
+        case .flagLeftOn: return "flagLeftOn"
         case .releaseFailed: return "releaseFailed"
         }
     }

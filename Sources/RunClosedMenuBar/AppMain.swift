@@ -727,6 +727,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             switch result {
+            case .success(.flagLeftOn):
+                // The session is gone, but the flag it ran on is not
+                // provably ours, so End did not turn it off (B2).
+                self.lidError = L10n.t("Session ended, but lid stay-awake is still on (not set by RunClosed) — use the switch to turn it off")
             case .success(let outcome) where !outcome.isFailure:
                 self.lidError = nil
             case .success(let outcome):
@@ -885,10 +889,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.guardTickInFlight = false
-                var endedNaturally = false
-                if case .ended(let end) = step.expiry { endedNaturally = !end.isFailure }
-                self.handleSessionStep(expiry: step.expiry, reconciled: step.reconciled,
-                                       endedNaturally: endedNaturally)
+                self.handleSessionStep(expiry: step.expiry, reconciled: step.reconciled)
             }
         }
     }
@@ -896,8 +897,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// What every tick does with the session step's result, with or without
     /// the battery guard.
     private func handleSessionStep(expiry: SessionService.ExpiryOutcome?,
-                                   reconciled: SessionService.ReconcileOutcome?,
-                                   endedNaturally: Bool) {
+                                   reconciled: SessionService.ReconcileOutcome?) {
         var changed = false
         if let expiry, expiry != .noSession, expiry != .notDue {
             FileHandle.standardError.write(Data(
@@ -913,9 +913,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             refreshLidCache()
             refreshSessionDisplay()
         }
-        if endedNaturally {
+        guard case .ended(let end)? = expiry else { return }
+        if end.stopsKeepingAwake {
             notify(L10n.t("Session ended"),
                    L10n.t("The keep-awake session reached its end time and lid stay-awake was turned off."))
+        } else if end == .flagLeftOn {
+            // Never a quiet "Session ended": the Mac is still awake, with no
+            // deadline and no RunClosed owner (ADR 023).
+            notify(L10n.t("Session ended — Mac still awake"),
+                   L10n.t("The keep-awake session reached its end time, but lid stay-awake is still on and RunClosed did not set it, so it was left on. Turn it off with the switch in RunClosed."))
         }
     }
 
@@ -925,8 +931,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let pct = e.input.chargePercent.map(String.init) ?? "?"
 
         // ADR 023: the session step ran first inside the same lock section.
-        handleSessionStep(expiry: outcome.session, reconciled: outcome.sessionReconciled,
-                          endedNaturally: outcome.sessionEndedNaturally)
+        handleSessionStep(expiry: outcome.session, reconciled: outcome.sessionReconciled)
 
         let alert = (e.decision.level == .low || e.decision.level == .critical)
             && e.input.lidFlag != false
