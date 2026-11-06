@@ -30,4 +30,24 @@
 
 "%@%% on battery. Lid stay-awake is on but was turned on by another tool (or its state cannot be read), so RunClosed will NOT turn it off at 10%% and the Mac will not sleep by itself. Plug in, or switch \"Keep awake with lid closed\" off then on so RunClosed owns it." = "%@ %% sur batterie. Le maintien éveillé est actif mais a été activé par un autre outil (ou son état est illisible) : RunClosed ne le coupera PAS à 10 %% et le Mac ne se mettra pas en veille tout seul. Branchez le chargeur, ou basculez « Maintenir éveillé capot fermé » sur off puis on pour que RunClosed en devienne propriétaire.";
 "Battery critical: emergency sleep" = "Batterie critique : veille d'urgence";
+
+/* Session minuée de maintien éveillé (ADR 023) */
+"1 h" = "1 h";
+"2 h" = "2 h";
+"4 h" = "4 h";
+"8 h" = "8 h";
+"+30 min" = "+30 min";
+"End" = "Terminer";
+"Indefinite — switch it off to end it" = "Indéterminée — coupez l'interrupteur pour y mettre fin";
+"Session ended" = "Session terminée";
+"The keep-awake session reached its end time and lid stay-awake was turned off." = "La session de maintien éveillé a atteint son heure de fin et le maintien éveillé capot fermé a été coupé.";
+"Lid stay-awake is on but not owned by RunClosed — switch it off then on first" = "Le maintien éveillé est actif mais n'appartient pas à RunClosed : coupez-le puis réactivez-le d'abord";
+"A session is already running" = "Une session est déjà en cours";
+"No session is running" = "Aucune session en cours";
+"This session has no end time" = "Cette session n'a pas d'heure de fin";
+"Until %@ · %@" = "Jusqu'à %@ · %@";
+"%@ min left" = "%@ min restantes";
+"%@ h left" = "%@ h restantes";
+"%@ h %@ left" = "%@ h %@ restantes";
+"< 1 min left" = "< 1 min restante";
 "%@%% on battery: lid stay-awake was still on from before the last restart. RunClosed turned it off as an emergency and the Mac is going to sleep (hibernation keeps every process). It comes back on once charging above 15%%." = "%@ %% sur batterie : le maintien éveillé était encore actif depuis avant le dernier redémarrage. RunClosed l'a coupé en urgence et le Mac se met en veille (l'hibernation conserve tous les processus). Il sera réactivé une fois en charge au-dessus de 15 %%.";

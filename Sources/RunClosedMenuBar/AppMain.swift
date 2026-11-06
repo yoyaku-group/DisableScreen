@@ -78,6 +78,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var batteryAlert = false
     static let lowBatteryTickInterval: TimeInterval = 30
 
+    /// Timed session (ADR 023). The countdown is refreshed once a minute —
+    /// not on the 5 s lid poll and never in a busy loop.
+    private var sessionTimer: Timer?
+    /// Held while `disablesleep` is ours so App Nap does not stretch the guard
+    /// timer with the lid closed (ADR 023 §5). Released as soon as the flag is
+    /// no longer ours.
+    private var keepAwakeActivity: NSObjectProtocol?
+    static let sessionCountdownInterval: TimeInterval = 60
+
     // MARK: — Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -90,6 +99,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self, selector: #selector(screensChanged),
             name: NSApplication.didChangeScreenParametersNotification, object: nil)
 
+        // ADR 023 §5: a session's deadline may have passed while the machine
+        // slept (that is the whole point of the continuous clock). Tick once on
+        // wake so the flag does not stay on until the next 30 s timer.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(didWake),
+            name: NSWorkspace.didWakeNotification, object: nil)
+
         // Launch recovery: re-enable displays we owned, reconcile the lid
         // record (never auto-restore across boots — ADR 015).
         recoverAtLaunch()
@@ -99,14 +115,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in self?.refreshLidCache() }
         }
         startLowBatteryGuard()
+        startSessionCountdown()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         var displayService = makeDisplayService()
         _ = displayService.restoreOwned()
         // Lid: restore ONLY if we own it on this boot (B2/ADR 015).
-        var lidService = makeLidService()
-        _ = lidService.restoreIfOwned()
+        // ADR 023 §5: the quit path is a lid writer like any other, so it takes
+        // the same lock — a guard tick must not interleave with it.
+        let bootID = clock.bootID
+        LidWriteLock().withLock {
+            var lidService = LidMutationService(
+                bootID: bootID,
+                mutator: LidAssertions.live(),
+                store: OwnedLidAssertion(currentBootID: bootID),
+                priorProvider: { PowerReadback.lidStayAwake() })
+            _ = lidService.restoreIfOwned()
+            // The session ends with the flag it was backing: a record left
+            // behind would be a deadline nothing enforces.
+            let store = SessionStore()
+            if store.exists, lidService.priorProvider() == false {
+                store.clear()
+            }
+        }
+    }
+
+    /// A wake is a deadline check (ADR 023 §5). `mach_continuous_time` counted
+    /// through the sleep, so a session that lapsed overnight is due the moment
+    /// the machine comes back.
+    @objc private func didWake() {
+        Task { @MainActor in
+            self.refreshLidCache()
+            self.runLowBatteryTick()
+            self.refreshSessionDisplay()
+        }
     }
 
     @objc private func screensChanged() {
@@ -199,6 +242,83 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         statusItem.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
         statusItem.button?.image?.isTemplate = true
+        updateStatusTitle()
+        syncKeepAwakeActivity()
+    }
+
+    /// Remaining time next to the icon (ADR 023 §6). Empty for an indefinite
+    /// session — the plain switch stays exactly as it was.
+    private func updateStatusTitle() {
+        guard let button = statusItem.button else { return }
+        let now = SystemContinuousClock(bootID: clock.bootID)
+        let session = SessionStore().load()
+        let policyNow = SessionPolicy.Now(
+            wall: Date(),
+            continuousNanoseconds: now.nowContinuousNanoseconds,
+            bootID: clock.bootID)
+        if let session, !session.isIndefinite, let label = SessionPolicy.remainingLabel(session, now: policyNow) {
+            // "2h41" — the bar has no room for words.
+            button.title = " " + label
+                .replacingOccurrences(of: " left", with: "")
+                .replacingOccurrences(of: " h", with: "h")
+                .replacingOccurrences(of: " min", with: "m")
+        } else {
+            button.title = ""
+        }
+    }
+
+    /// Refresh everything that shows the countdown, off the 30 s guard cadence.
+    private func refreshSessionDisplay() {
+        updateStatusTitle()
+        rebuildPanelIfVisible()
+    }
+
+    private func startSessionCountdown() {
+        // Once a minute is enough: the label's finest unit is minutes.
+        sessionTimer = Timer.scheduledTimer(withTimeInterval: Self.sessionCountdownInterval,
+                                            repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshSessionDisplay() }
+        }
+    }
+
+    /// Hold `beginActivity` while the flag is ours so App Nap cannot stretch
+    /// the guard timer with the lid closed (ADR 023 §5). `idleSystemSleepDisabled`
+    /// is redundant with `disablesleep` and deliberately included: the flag can
+    /// be flipped OFF by someone else, and the assertion is released the moment
+    /// we notice.
+    private func syncKeepAwakeActivity() {
+        let ours = Self.flagIsOurs(bootID: clock.bootID)
+        if ours, keepAwakeActivity == nil {
+            keepAwakeActivity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiated, .idleSystemSleepDisabled],
+                reason: "RunClosed keep-awake session")
+        } else if !ours, let activity = keepAwakeActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            keepAwakeActivity = nil
+        }
+    }
+
+    /// `"2 h 41 left"` through the localization table, so French reads
+    /// "2 h 41 restantes". The arithmetic lives in `SessionPolicy` (pure,
+    /// tested); only the words are localized here.
+    private static func localizedRemaining(_ session: KeepAwakeSession, now: SessionPolicy.Now) -> String {
+        guard let seconds = SessionPolicy.remaining(session, now: now) else { return "" }
+        let minutes = Int((seconds / 60).rounded(.up))
+        if minutes <= 0 { return L10n.t("< 1 min left") }
+        let h = minutes / 60
+        let m = minutes % 60
+        if h == 0 { return L10n.t("%@ min left", String(m)) }
+        if m == 0 { return L10n.t("%@ h left", String(h)) }
+        return L10n.t("%@ h %@ left", String(h), String(m))
+    }
+
+    /// Is `disablesleep` ours on THIS boot? Read from the ownership record
+    /// (the same source `LidMutationService` gates on) and confirmed by the
+    /// live readback: a stale record with the flag observed OFF is not ours.
+    private static func flagIsOurs(bootID: String) -> Bool {
+        let rec = OwnedLidAssertion(currentBootID: bootID).load()
+        guard rec.ownedEnabled, rec.bootID == bootID else { return false }
+        return PowerReadback.lidStayAwake() == true
     }
 
     private func showContextMenu() {
@@ -364,8 +484,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             loginItemEnabled: LoginItemControl.isEnabled(),
             loginItemAvailable: LoginItemControl.isActionable(),
             leasesSummary: summary,
-            busy: busy
+            busy: busy,
+            session: sessionRow()
         )
+    }
+
+    /// What the lid row should say about the session (ADR 023 §6). Pure-ish:
+    /// two file reads and the injected clocks, no mutation, no subprocess
+    /// beyond the readback the popup already performs.
+    private func sessionRow() -> PopupState.SessionRow {
+        let clock = SystemContinuousClock(bootID: self.clock.bootID)
+        let now = SessionPolicy.Now(
+            wall: Date(),
+            continuousNanoseconds: clock.nowContinuousNanoseconds,
+            bootID: self.clock.bootID)
+        guard let session = SessionStore().load() else {
+            return PopupState.SessionRow(label: nil, timed: false, indefinite: false,
+                                         pausedReason: nil, due: false)
+        }
+        let due = SessionPolicy.isDue(session, now: now)
+        // All user-visible text goes through L10n (English key + FR table);
+        // `SessionPolicy` keeps an English rendering only for the CLI, where a
+        // script reads it.
+        let label: String?
+        if session.isIndefinite {
+            label = L10n.t("Indefinite — switch it off to end it")
+        } else if let ends = session.endsAtWall {
+            let formatter = DateFormatter()
+            formatter.setLocalizedDateFormatFromTemplate("HH:mm")
+            let until = formatter.string(from: ends)
+            label = L10n.t("Until %@ · %@", until, Self.localizedRemaining(session, now: now))
+        } else {
+            label = Self.localizedRemaining(session, now: now)
+        }
+        return PopupState.SessionRow(
+            label: label,
+            timed: !session.isIndefinite,
+            indefinite: session.isIndefinite,
+            pausedReason: session.pausedReason?.rawValue,
+            due: due)
     }
 
     // MARK: — Actions
@@ -432,11 +589,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // its latch clear cannot be overwritten by a stale tick save.
             // Non-blocking on main: if a guard tick (or the CLI) holds the
             // lock, say "busy" instead of freezing the menu bar.
+            let sessionStore = SessionStore()
             guard let result = LidWriteLock().tryWithLock({ () -> Result<OperationResult, LidMutationError> in
                 let r = service.setEnabled(target, initiator: .operatorCommand)
                 // The operator's explicit choice supersedes a pending
                 // low-battery re-arm.
                 LowBatteryLatchStore().operatorCommandFinished(r)
+                // ADR 023: the plain switch IS an indefinite session. Turning
+                // it OFF ends that session (and any timed one the switch was
+                // backing); turning it ON records an indefinite session so
+                // every surface reports one shape.
+                switch r {
+                case .success where target:
+                    sessionStore.save(KeepAwakeSession(startedAt: Date(), bootID: self.clock.bootID))
+                case .success:
+                    sessionStore.clear()
+                case .failure(.noChangeRequested(let requested)) where requested:
+                    sessionStore.save(KeepAwakeSession(startedAt: Date(), bootID: self.clock.bootID))
+                case .failure(.noChangeRequested):
+                    sessionStore.clear()
+                case .failure:
+                    break
+                }
                 return r
             }) else {
                 self.lidError = L10n.t("Busy, try again")
@@ -447,6 +621,107 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.lidError = Self.lidFailureHint(result)
             self.refreshLidCache()
         }
+    }
+
+    // MARK: — Session actions (ADR 023)
+
+    /// One of the 1 h / 2 h / 4 h / 8 h buttons. The duration travels in the
+    /// button tag, in seconds.
+    @objc func startSession(_ sender: NSButton) {
+        let duration = TimeInterval(sender.tag)
+        guard duration > 0 else { return }
+        withBusy {
+            var service = self.makeSessionService()
+            // Non-blocking on main: never freeze the menu bar behind a guard
+            // tick. The service itself never takes the lock (that would nest).
+            guard let result = LidWriteLock().tryWithLock({ service.start(for: duration) }) else {
+                self.lidError = L10n.t("Busy, try again")
+                return
+            }
+            switch result {
+            case .success(let outcome):
+                self.lidError = nil
+                FileHandle.standardError.write(Data(
+                    "[RunClosed] session start: \(outcome)\n".utf8))
+            case .failure(let error):
+                self.lidError = Self.sessionFailureHint(error)
+                self.logSession(.failure(error))
+            }
+            self.refreshLidCache()
+        }
+    }
+
+    @objc func extendSession(_ sender: Any?) {
+        withBusy {
+            var service = self.makeSessionService()
+            guard let result = LidWriteLock().tryWithLock({ service.extend() }) else {
+                self.lidError = L10n.t("Busy, try again")
+                return
+            }
+            switch result {
+            case .success:
+                self.lidError = nil
+            case .failure(let error):
+                self.lidError = Self.sessionFailureHint(error)
+            }
+            if case .failure(let error) = result { self.logSession(.failure(error)) }
+            self.refreshLidCache()
+        }
+    }
+
+    @objc func endSession(_ sender: Any?) {
+        withBusy {
+            var service = self.makeSessionService()
+            guard let result = LidWriteLock().tryWithLock({ service.end() }) else {
+                self.lidError = L10n.t("Busy, try again")
+                return
+            }
+            switch result {
+            case .success(let outcome) where !outcome.isFailure:
+                self.lidError = nil
+            case .success(let outcome):
+                self.lidError = L10n.t("Change failed (see log)")
+                FileHandle.standardError.write(Data(
+                    "[RunClosed] session end: \(outcome.rawValue) \(outcome.failureMessage ?? "-")\n".utf8))
+            case .failure(let error):
+                self.lidError = Self.sessionFailureHint(error)
+                self.logSession(.failure(error))
+            }
+            self.refreshLidCache()
+        }
+    }
+
+    private func logSession(_ result: Result<KeepAwakeSession, SessionError>) {
+        switch result {
+        case .success(let s):
+            FileHandle.standardError.write(Data(
+                "[RunClosed] session: id=\(s.id) ends=\(s.endsAtWall.map { ISO8601DateFormatter().string(from: $0) } ?? "indefinite")\n".utf8))
+        case .failure(let e):
+            FileHandle.standardError.write(Data("[RunClosed] session: refused \(e)\n".utf8))
+        }
+    }
+
+    private static func sessionFailureHint(_ error: SessionError) -> String {
+        switch error {
+        case .flagOnNotOwned:
+            return L10n.t("Lid stay-awake is on but not owned by RunClosed — switch it off then on first")
+        case .alreadyRunning:
+            return L10n.t("A session is already running")
+        case .noSession:
+            return L10n.t("No session is running")
+        case .indefiniteSession:
+            return L10n.t("This session has no end time")
+        case .nonPositiveDuration:
+            return L10n.t("Change failed (see log)")
+        case .preconditionUnknown:
+            return L10n.t("unknown state")
+        case .notOwned, .flagAlreadyOff, .backendFailed:
+            return L10n.t("Change failed (see log)")
+        }
+    }
+
+    private func makeSessionService() -> SessionService {
+        SessionService.live(bootID: clock.bootID)
     }
 
     private static func lidFailureHint(_ result: Result<OperationResult, LidMutationError>) -> String? {
@@ -514,7 +789,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     priorProvider: { PowerReadback.lidStayAwake() }),
                 latchStore: LowBatteryLatchStore(),
                 batteryProvider: { BatteryReadback.read() },
-                sleeper: PMSetSleeper())
+                sleeper: PMSetSleeper(),
+                // ADR 023: the SAME tick (one LidWriteLock section) expires a
+                // due session and pauses/resumes it around a battery release.
+                sessionService: SessionService.live(bootID: bootID))
             let outcome = service.tick()
             DispatchQueue.main.async {
                 self?.handleLowBattery(outcome)
@@ -526,6 +804,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guardTickInFlight = false
         let e = outcome.evaluation
         let pct = e.input.chargePercent.map(String.init) ?? "?"
+
+        // ADR 023: the session step ran first inside the same lock section.
+        if let expiry = outcome.session, expiry != .noSession, expiry != .notDue {
+            FileHandle.standardError.write(Data(
+                "[RunClosed] session tick: \(String(describing: expiry))\n".utf8))
+            refreshLidCache()
+        }
+        if outcome.sessionEndedNaturally {
+            notify(L10n.t("Session ended"),
+                   L10n.t("The keep-awake session reached its end time and lid stay-awake was turned off."))
+        }
 
         let alert = (e.decision.level == .low || e.decision.level == .critical)
             && e.input.lidFlag != false
@@ -545,6 +834,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if outcome.mutation == .released || outcome.mutation == .rearmed {
                 refreshLidCache()
             }
+            if outcome.sessionResumed { refreshLidCache() }
             // Failures notify once per discharge episode (service latch).
             guard outcome.shouldNotify else { return }
             switch mutation {
