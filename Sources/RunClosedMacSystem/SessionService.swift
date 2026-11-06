@@ -125,7 +125,10 @@ public struct SessionService {
             session = s
         }
 
-        store.save(session)
+        // Journal before change: no record on disk, no flag write.
+        guard store.save(session) else {
+            return .failure(.backendFailed("session record could not be written"))
+        }
         let result = applyLid(true, .operatorCommand)
         switch result {
         case .success(let op) where op.state == .verified:
@@ -135,18 +138,25 @@ public struct SessionService {
             // likely the indefinite plain switch) is replaced in place.
             return .success(.adoptedRunningFlag(session))
         case .success(let op):
-            store.clear()
+            restore(existing)
             return .failure(.backendFailed(op.error ?? "not verified (state=\(op.state.rawValue))"))
         case .failure(let error):
-            store.clear()
+            restore(existing)
             return .failure(Self.map(error))
         }
     }
 
+    /// A failed start puts back the record it replaced (a due session the
+    /// next tick still has to end), or removes its own record.
+    private func restore(_ previous: KeepAwakeSession?) {
+        if let previous { store.save(previous) } else { store.clear() }
+    }
+
     // MARK: — Extend / end (caller holds LidWriteLock)
 
-    /// Push the deadline out by `seconds` from now. Mutates the record only —
-    /// the flag is already ON, so there is nothing to write to `pmset`.
+    /// Push the deadline out by `seconds` from now. Mutates the record only,
+    /// never `pmset`: a battery-paused session stays paused until the guard
+    /// re-arms the flag.
     public mutating func extend(by seconds: TimeInterval = SessionDuration.extendStep)
         -> Result<KeepAwakeSession, SessionError> {
         guard let session = store.load() else { return .failure(.noSession) }
@@ -156,7 +166,9 @@ public struct SessionService {
         // reach an unrepresentable deadline.
         guard seconds <= SessionDuration.maximum else { return .failure(.durationTooLong) }
         let next = SessionPolicy.extend(session, by: seconds, now: currentNow())
-        store.save(next)
+        guard store.save(next) else {
+            return .failure(.backendFailed("session record could not be written"))
+        }
         return .success(next)
     }
 

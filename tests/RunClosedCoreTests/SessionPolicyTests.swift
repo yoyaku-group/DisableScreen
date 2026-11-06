@@ -191,11 +191,15 @@ final class SessionPolicyTests: XCTestCase {
         XCTAssertFalse(SessionPolicy.isDue(extended, now: late))
     }
 
-    func testExtendClearsAPause() {
+    /// Review round 2: extend only moves the deadline. The flag is still OFF
+    /// after a battery release, so the session must stay paused until the
+    /// guard re-arms it.
+    func testExtendKeepsABatteryPause() {
         let paused = SessionPolicy.pause(timed(3600), reason: .lowBattery)
         XCTAssertEqual(paused.pausedReason, .lowBattery)
         let extended = SessionPolicy.extend(paused, by: 60, now: now(continuousSeconds: 2_000))
-        XCTAssertNil(extended.pausedReason)
+        XCTAssertEqual(extended.pausedReason, .lowBattery)
+        XCTAssertNotEqual(extended.endsAtWall, paused.endsAtWall, "the deadline still moves")
     }
 
     func testExtendIsANoOpOnAnIndefiniteSessionAndOnNonPositiveSteps() {
@@ -226,6 +230,13 @@ final class SessionPolicyTests: XCTestCase {
                                                                     continuousSeconds: 5_000)))
         // Another boot: the counters do not line up, so no re-arm.
         XCTAssertFalse(SessionPolicy.allowsRearm(session, now: SessionPolicy.Now(
+            wall: Self.epoch, continuousNanoseconds: 1, bootID: Boot.b)))
+    }
+
+    /// The plain switch is ADR 022's: it re-arms on any boot.
+    func testAllowsRearmForTheIndefiniteSwitchOnAnyBoot() {
+        let indefinite = KeepAwakeSession(startedAt: Self.epoch, bootID: Boot.a)
+        XCTAssertTrue(SessionPolicy.allowsRearm(indefinite, now: SessionPolicy.Now(
             wall: Self.epoch, continuousNanoseconds: 1, bootID: Boot.b)))
     }
 

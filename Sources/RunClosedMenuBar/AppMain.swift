@@ -223,6 +223,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let changed = self.lidCache != value
                 self.lidCache = .some(value)
                 self.lidReady = true
+                self.syncKeepAwakeActivity()
                 if changed { self.rebuildPanelIfVisible() }
             }
         }
@@ -264,7 +265,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             bootID: clock.bootID)
         if let session, !session.isIndefinite, let label = SessionPolicy.remainingLabel(session, now: policyNow) {
             // "2h41" — the bar has no room for words.
-            button.title = " " + label
+            button.title = (session.pausedReason != nil ? " ⏸ " : " ") + label
                 .replacingOccurrences(of: " left", with: "")
                 .replacingOccurrences(of: " h", with: "h")
                 .replacingOccurrences(of: " min", with: "m")
@@ -293,7 +294,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// be flipped OFF by someone else, and the assertion is released the moment
     /// we notice.
     private func syncKeepAwakeActivity() {
-        let ours = Self.flagIsOurs(bootID: clock.bootID)
+        // The cached readback (refreshed off the main thread every 5 s), never
+        // a fresh `pmset -g` here: this runs on every icon refresh.
+        let observed: Bool? = lidCache ?? nil
+        let ours = Self.flagIsOurs(bootID: clock.bootID, observed: observed)
         if ours, keepAwakeActivity == nil {
             keepAwakeActivity = ProcessInfo.processInfo.beginActivity(
                 options: [.userInitiated, .idleSystemSleepDisabled],
@@ -321,10 +325,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Is `disablesleep` ours on THIS boot? Read from the ownership record
     /// (the same source `LidMutationService` gates on) and confirmed by the
     /// live readback: a stale record with the flag observed OFF is not ours.
-    private static func flagIsOurs(bootID: String) -> Bool {
+    private static func flagIsOurs(bootID: String, observed: Bool?) -> Bool {
         let rec = OwnedLidAssertion(currentBootID: bootID).load()
         guard rec.ownedEnabled, rec.bootID == bootID else { return false }
-        return PowerReadback.lidStayAwake() == true
+        return observed == true
     }
 
     private func showContextMenu() {
@@ -519,7 +523,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let formatter = DateFormatter()
             formatter.setLocalizedDateFormatFromTemplate("HH:mm")
             let until = formatter.string(from: ends)
-            label = L10n.t("Until %@ · %@", until, Self.localizedRemaining(session, now: now))
+            if session.pausedReason != nil {
+                // The guard released the flag: say so, the Mac can sleep now.
+                label = L10n.t("Paused (low battery) · until %@", until)
+            } else {
+                label = L10n.t("Until %@ · %@", until, Self.localizedRemaining(session, now: now))
+            }
         } else {
             label = Self.localizedRemaining(session, now: now)
         }

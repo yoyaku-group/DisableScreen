@@ -35,7 +35,9 @@ final class PopupPanel: NSPanel {
     static func lidHeight(_ state: PopupState) -> CGFloat {
         var h = hLid
         if state.session.label != nil { h += hLidSessionLine }
-        if state.session.showsDurationButtons { h += hLidSessionButtons }
+        // Same condition as `lidRow`: the duration buttons when idle, or
+        // "+30 min" / "End" while a timed session runs.
+        if state.session.showsDurationButtons || state.session.timed { h += hLidSessionButtons }
         return h
     }
 
@@ -338,16 +340,18 @@ final class PopupPanel: NSPanel {
     /// 1 h / 2 h / 4 h / 8 h — only offered when no session is running.
     private static func addSessionControls(_ state: PopupState, target: AnyObject,
                                            view: NSView, at y: CGFloat) {
-        let titles = ["1 h", "2 h", "4 h", "8 h"]
+        // Titles come from the presets themselves, so a button can never
+        // start a duration other than the one it shows.
+        let presets = SessionDuration.presets
         let gap: CGFloat = 6
         let available = width - 28
-        let bw = (available - gap * CGFloat(titles.count - 1)) / CGFloat(titles.count)
-        for (i, title) in titles.enumerated() {
+        let bw = (available - gap * CGFloat(presets.count - 1)) / CGFloat(presets.count)
+        for (i, seconds) in presets.enumerated() {
             let btn = NSButton(frame: NSMakeRect(14 + CGFloat(i) * (bw + gap), y + 2, bw, 22))
-            btn.title = L10n.t(title)
+            btn.title = L10n.t("%@ h", String(Int(seconds / 3600)))
             btn.bezelStyle = .rounded
             btn.font = .systemFont(ofSize: 11)
-            btn.tag = Int(SessionDuration.presets[i])
+            btn.tag = Int(seconds)
             btn.target = target
             btn.action = #selector(AppDelegate.startSession(_:))
             btn.isEnabled = state.lidCanToggle && !state.busy

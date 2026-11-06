@@ -61,7 +61,7 @@ SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
 Test:
 
 ```bash
-swift test        # 262 tests across Core / MacSystem / Persistence / UI logic
+swift test        # 280 tests across Core / MacSystem / Persistence / UI logic
 ```
 
 ## Install

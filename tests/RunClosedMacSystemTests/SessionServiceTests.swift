@@ -69,7 +69,7 @@ final class SessionServiceTests: XCTestCase {
     /// - `flag`: observed `disablesleep`.
     /// - `ownedBoot`: nil = no record; "A" = owned on this boot; "OLD" = stale.
     private func makeRig(flag: Bool?, ownedBoot: String?, continuous: Double = 1_000,
-                         bootID: String = "A") -> Rig {
+                         bootID: String = "A", unwritableSessionStore: Bool = false) -> Rig {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("runclosed-session-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -78,7 +78,14 @@ final class SessionServiceTests: XCTestCase {
         if let b = ownedBoot {
             lidStore.save(.init(bootID: b, ownedEnabled: true, referenceState: "on"))
         }
-        let sessionStore = SessionStore(url: dir.appendingPathComponent("session.json"))
+        var sessionURL = dir.appendingPathComponent("session.json")
+        if unwritableSessionStore {
+            // The parent "directory" is a regular file: no write can succeed.
+            let blocker = dir.appendingPathComponent("not-a-dir")
+            FileManager.default.createFile(atPath: blocker.path, contents: Data())
+            sessionURL = blocker.appendingPathComponent("session.json")
+        }
+        let sessionStore = SessionStore(url: sessionURL)
         let latchStore = LowBatteryLatchStore(url: dir.appendingPathComponent("latch.json"))
         let flagBox = FlagBox(flag)
         let lid = FakeLid(flag: flagBox)
@@ -407,6 +414,50 @@ final class SessionServiceTests: XCTestCase {
         let result = rig.service.extend(by: SessionDuration.maximum + 1)
         XCTAssertEqual(result.failureValue, .durationTooLong)
         XCTAssertEqual(rig.sessionStore.load(), before)
+    }
+    // MARK: — Review round 2
+
+    /// Journal before change: when session.json cannot be written, the flag
+    /// is never touched.
+    func testStartNeverSetsTheFlagWhenTheJournalCannotBeWritten() {
+        var rig = makeRig(flag: false, ownedBoot: nil, unwritableSessionStore: true)
+        let result = rig.service.start(for: 3600)
+        XCTAssertEqual(result.failureValue, .backendFailed("session record could not be written"))
+        XCTAssertEqual(rig.lid.calls, [], "no pmset write without a journal")
+        XCTAssertEqual(rig.flag.value, false)
+    }
+
+    /// A failed start puts back the due session it replaced: the next tick
+    /// still has to end that deadline through the ownership gate.
+    func testFailedStartRestoresTheDueSessionItReplaced() {
+        var rig = makeRig(flag: false, ownedBoot: nil)
+        _ = rig.service.start(for: 60)
+        let due = rig.sessionStore.load()
+        rig.clock.advance(120)
+        rig.flag.value = false            // the flag went OFF; the due record is still on disk
+        rig.lid.failWrites = true
+        guard case .failure = rig.service.start(for: 3600) else { return XCTFail("expected a failure") }
+        XCTAssertEqual(rig.lid.calls.last, true, "the start did try to set the flag")
+        XCTAssertEqual(rig.sessionStore.load(), due)
+    }
+
+    /// Extend moves the deadline but never resumes a battery pause: the flag
+    /// is still OFF until the guard re-arms it.
+    func testExtendKeepsABatteryPause() {
+        var rig = makeRig(flag: false, ownedBoot: nil)
+        _ = rig.service.start(for: 3600)
+        _ = rig.service.pauseForBattery()
+        guard case .success(let next) = rig.service.extend(by: 1800) else { return XCTFail("expected success") }
+        XCTAssertEqual(next.pausedReason, .lowBattery)
+        XCTAssertEqual(rig.sessionStore.load()?.pausedReason, .lowBattery)
+    }
+
+    /// The plain switch (indefinite session) keeps ADR 022's re-arm on any
+    /// boot; only a timed session is bound to its boot.
+    func testIndefiniteSessionFromAnotherBootStillAllowsTheRearm() {
+        let rig = makeRig(flag: false, ownedBoot: nil, bootID: "B")
+        rig.sessionStore.save(KeepAwakeSession(startedAt: epoch, bootID: "A"))
+        XCTAssertTrue(rig.service.allowsRearm())
     }
 }
 

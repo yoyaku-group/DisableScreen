@@ -167,9 +167,10 @@ public enum SessionPolicy {
         var next = session
         next.endsAtContinuous = addingContinuous(now.continuousNanoseconds, seconds: seconds)
         next.endsAtWall = now.wall.addingTimeInterval(seconds)
-        // Extending is the operator saying "keep going": a paused session
-        // resumes, its deadline restated from this instant.
-        next.pausedReason = nil
+        // A battery pause survives an extension: the guard released the flag
+        // and only its re-arm (on AC, above the threshold) turns it back on.
+        // Clearing the pause here would show a running countdown while
+        // `disablesleep` reads 0 and the Mac sleeps on lid close.
         return next
     }
 
@@ -194,8 +195,12 @@ public enum SessionPolicy {
     /// a previous boot keeps its wall deadline so `isDue` can still end it, but
     /// re-arming the flag on a boot that never agreed to the session would
     /// resurrect a deadline nobody is watching — so it never re-arms.
+    ///
+    /// An indefinite session is the plain switch: ADR 022 governs it, on any
+    /// boot, exactly as before sessions existed.
     public static func allowsRearm(_ session: KeepAwakeSession, now: Now) -> Bool {
-        session.isOnBoot(now.bootID) && !isDue(session, now: now)
+        if session.isIndefinite { return true }
+        return session.isOnBoot(now.bootID) && !isDue(session, now: now)
     }
 
     // MARK: — Presentation

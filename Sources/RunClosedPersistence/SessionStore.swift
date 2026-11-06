@@ -88,12 +88,24 @@ public struct SessionStore {
 
     /// Atomic write (sibling temp file + rename), ISO-8601 dates so the file
     /// stays readable by `jq` and by the CLI.
-    public func save(_ session: KeepAwakeSession) {
+    ///
+    /// Returns `false` when the record could not be encoded or written (disk
+    /// full, permissions, missing directory). Journal-before-change callers
+    /// must not set the flag then.
+    @discardableResult
+    public func save(_ session: KeepAwakeSession) -> Bool {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(Record(session: session)) else { return }
-        try? data.write(to: url, options: .atomic)
+        guard let data = try? encoder.encode(Record(session: session)) else { return false }
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                 withIntermediateDirectories: true)
+        do {
+            try data.write(to: url, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
     }
 
     /// Remove the record. Called when the session ends (expiry verified, End

@@ -546,16 +546,22 @@ $ arch -arm64 swift build --build-tests
 Build complete! (0 warning)
 
 $ arch -arm64 swift test
-RunClosedPersistenceTests  36 · RunClosedMacSystemTests 118 · HelperSupport 13
-RunClosedCoreTests         95 · RunClosedAppTests        11
-→ 273/273, 0 échec
+RunClosedPersistenceTests  36 · RunClosedMacSystemTests 124 · HelperSupport 13
+RunClosedCoreTests         96 · RunClosedAppTests        11
+→ 280/280, 0 échec
 ```
 
-Dont **87 nouveaux** : 32 `SessionPolicyTests`, 11 `SessionStoreTests`, 28 `SessionServiceTests`, 11 `SessionGuardTickTests`, 5 dans `LidMutationServiceTests` (initiateur `.sessionRecovery`).
+Dont **94 nouveaux** : 33 `SessionPolicyTests`, 11 `SessionStoreTests`, 32 `SessionServiceTests`, 13 `SessionGuardTickTests`, 5 dans `LidMutationServiceTests` (initiateur `.sessionRecovery`).
 
 Relecture, tour 1 (11 tests ajoutés) :
 - Quit pendant une session mise en pause par la garde batterie : la dette de réarmement est effacée, une étape batterie suivante sur secteur à 80 % ne réarme pas. Sans session, le quit laisse la dette intacte (ADR 022 inchangé).
 - Plafond de 7 jours au démarrage et à l'extension ; durées infinies ou NaN refusées ; conversion secondes → nanosecondes et addition sur le compteur continu saturées, jamais de trap.
+
+Relecture, tour 2 (`ai-review-gate`, 0 CRITICAL, 5 WARN corrigés, 7 tests ajoutés) :
+- Extension d'une session en pause batterie : la pause reste, l'échéance bouge.
+- Interrupteur simple après un reboot : réarmé comme en ADR 022 ; session minutée d'un autre boot : dette annulée une fois, aucun refus répété au tick suivant.
+- `session.json` impossible à écrire : aucun appel `pmset` ; démarrage raté : la session échue remplacée est restaurée.
+- Non couverts par un test unitaire (code AppKit) : lecture `pmset` retirée du thread principal (cache rafraîchi hors thread), hauteur de la ligne capot avec « +30 min » / « End », titres des boutons tirés des préréglages, état « En pause » visible dans la ligne et la barre.
 
 ```
 $ runclosed-cli session start --for 999999999999h   → exit 64 « a session is capped at 7 days »

@@ -298,4 +298,36 @@ final class SessionGuardTickTests: XCTestCase {
         XCTAssertFalse(outcome.sessionResumed, "nothing to resume without a session")
         XCTAssertEqual(rig.lid.calls, [false, true])
     }
+
+    // MARK: — Review round 2: re-arm across a reboot
+
+    /// The plain switch after a reboot: ADR 022 still re-arms it.
+    func testPlainSwitchIsRearmedAfterAReboot() {
+        var rig = makeRig(flag: false, ownedBoot: "OLD", battery: Self.reading(false, 40))
+        rig.sessionStore.save(KeepAwakeSession(startedAt: epoch, bootID: "OLD"))
+        rig.latchStore.save(.init(latch: .init(releasedByGuard: true)))
+        let outcome = rig.guardService.tick()
+        XCTAssertEqual(outcome.mutation, .rearmed)
+        XCTAssertEqual(rig.lid.calls, [true])
+    }
+
+    /// A timed session from another boot never gets the flag back, and the
+    /// debt is voided once rather than refused on every tick.
+    func testTimedSessionFromAnotherBootVoidsTheRearmOnce() {
+        var rig = makeRig(flag: false, ownedBoot: "OLD", battery: Self.reading(false, 40))
+        rig.sessionStore.save(KeepAwakeSession(
+            startedAt: epoch,
+            endsAtWall: epoch.addingTimeInterval(4 * 3600),
+            endsAtContinuous: ContinuousClockTimebase.nanoseconds(fromSeconds: 1_000 + 4 * 3600),
+            bootID: "OLD"))
+        rig.latchStore.save(.init(latch: .init(releasedByGuard: true)))
+        let first = rig.guardService.tick()
+        XCTAssertNil(first.mutation)
+        XCTAssertNotNil(first.mutationError)
+        XCTAssertFalse(rig.latchStore.load().latch.releasedByGuard, "debt voided")
+        let second = rig.guardService.tick()
+        XCTAssertNil(second.mutation)
+        XCTAssertNil(second.mutationError, "no refusal repeated every tick")
+        XCTAssertEqual(rig.lid.calls, [], "the flag stays off")
+    }
 }

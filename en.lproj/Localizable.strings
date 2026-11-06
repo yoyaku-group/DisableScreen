@@ -34,10 +34,7 @@
 "Battery critical: emergency sleep" = "Battery critical: emergency sleep";
 
 /* Timed keep-awake session (ADR 023) */
-"1 h" = "1 h";
-"2 h" = "2 h";
-"4 h" = "4 h";
-"8 h" = "8 h";
+"%@ h" = "%@ h";
 "+30 min" = "+30 min";
 "End" = "End";
 "Indefinite — switch it off to end it" = "Indefinite — switch it off to end it";
@@ -46,6 +43,7 @@
 "Lid stay-awake is on but not owned by RunClosed — switch it off then on first" = "Lid stay-awake is on but not owned by RunClosed — switch it off then on first";
 "A session is already running" = "A session is already running";
 "That is longer than 7 days" = "That is longer than 7 days";
+"Paused (low battery) · until %@" = "Paused (low battery) · until %@";
 "No session is running" = "No session is running";
 "This session has no end time" = "This session has no end time";
 "Until %@ · %@" = "Until %@ · %@";

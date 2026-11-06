@@ -260,8 +260,12 @@ public struct LowBatteryGuardService {
             // due) AND on the boot that owns it. With no session the answer is
             // `true` and this is exactly the ADR 022 path.
             if let session = sessionService, !session.allowsRearm() {
+                // The debt belonged to a session that can no longer use it
+                // (a timed session from another boot). Void it once instead
+                // of refusing it again on every tick.
                 outcome.mutation = nil
-                outcome.mutationError = "re-arm withheld: session due or from another boot"
+                outcome.mutationError = "re-arm withheld: timed session from another boot"
+                record.latch = record.latch.recordingRearm()
                 break
             }
             let result = lidService.setEnabled(true, initiator: .automatic)
