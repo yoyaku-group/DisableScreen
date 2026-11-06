@@ -19,6 +19,14 @@ as the audited baseline (see [Repository layout](#repository-layout)).
   read-back that verifies the mode actually changed.
 - **Keep awake with lid closed** — flips the `pmset disablesleep` flag with an
   ownership model (see [Safety model](#safety-model)).
+- **Timed sessions** — pick 1 h / 2 h / 4 h / 8 h (or leave the switch
+  indefinite) and the row shows "Until 14:30 · 2 h 41 left", with the remaining
+  time next to the menu-bar icon. "+30 min" extends, "End" stops. Deadlines are
+  measured on the continuous clock, which keeps counting while the Mac sleeps,
+  so an overnight session ends when its time is up rather than when you next
+  look at it. A low-battery release pauses the session instead of cancelling
+  it (ADR 023). CLI: `runclosed session start --for 2h | extend 30m | end |
+  status --json`.
 - **Low-battery guard** — on battery, warns at 20 % and, at 10 % (or ≤ 10 min
   left), turns the lid stay-awake flag off and puts the Mac to sleep so
   hibernation keeps every process; re-enables it on AC above 15 %. Never acts
@@ -53,7 +61,7 @@ SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
 Test:
 
 ```bash
-swift test        # 295+ assertions across Core / MacSystem / Persistence / UI logic
+swift test        # 262 tests across Core / MacSystem / Persistence / UI logic
 ```
 
 ## Install
@@ -87,6 +95,10 @@ State lives under `~/Library/Application Support/RunClosed/`:
 leases.json             # bounded keep-awake leases (CLI wrappers)
 owned_displays.json     # displays we disabled (re-enabled at next launch)
 owned_lid.json          # lid flag ownership record (boot-scoped)
+session.json            # current keep-awake session: id, boot, deadlines, pause
+low_battery_guard.json  # guard latch (notifications, pending re-arm)
+low_battery_audit.jsonl # one line per low-battery mutation
+lid.lock                # cross-process lock serialising every lid writer
 ```
 
 ## Safety model
@@ -110,6 +122,12 @@ flag), so the invariants are the interesting part:
   moment of the effect, not at render time.
 - **One target per command.** A brightness command for display A never touches
   display B.
+- **A session records its deadline before it touches the flag.** The session
+  is journaled first; if the flag write then fails, the record is deleted. The
+  expiry path releases through the ownership gate, and it may only release a
+  record written by the boot the session started in — never an arbitrary stale
+  one. A session that comes due while the machine slept still ends, because
+  the continuous clock keeps counting through sleep (ADR 023).
 
 ## Repository layout
 
@@ -123,7 +141,8 @@ Sources/
   RunClosedHelper*/      # privileged LaunchDaemon skeleton (registration only)
   runclosed/             # CLI: status, displays, doctor, run, disable/enable,
                          #      lid-stay-awake, restore, login-item, helper,
-                         #      low-battery (status / simulate, read-only)
+                         #      low-battery (status / simulate, read-only),
+                         #      session (start / extend / end / status)
 tests/                   # Swift test suites
 main.py, launcher.m,     # legacy Python app (audited baseline, kept in-tree)
 build.sh, test_e2e.py

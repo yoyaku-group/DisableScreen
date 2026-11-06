@@ -7,6 +7,27 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Timed keep-awake sessions (ADR 023). The lid stay-awake switch used to have
+  no end time: forgetting it left the Mac awake until the low-battery guard
+  stepped in at 10 %. The lid row now offers 1 h / 2 h / 4 h / 8 h buttons and
+  shows "Until 14:30 · 2 h 41 left" while a session runs, with "+30 min" and
+  "End"; the remaining time also appears next to the menu-bar icon. The switch
+  itself is unchanged — turning it on creates an indefinite session, so
+  existing behaviour is preserved. Deadlines are tracked on
+  `mach_continuous_time`, which keeps counting while the machine sleeps (the
+  uptime clock does not), with the wall clock as the cross-reboot fallback. A
+  timed session refuses to start on a flag RunClosed does not own, because its
+  expiry would silently fail the ownership check. A low-battery release pauses
+  the session instead of ending it, and the guard only re-arms the flag while
+  the session is still valid. Expiry runs inside the existing guard tick, in
+  the same cross-process lock section, and a wake notification triggers a tick
+  so an overnight deadline is honoured on wake.
+- `runclosed session start --for <2h|90m|1h30m> | start --indefinite | extend
+  [30m] | end | status [--json]`. Mutating subcommands take the same lock as
+  `lid-stay-awake on|off`; exit codes stay 0 / 3 (refused by policy) / 5
+  (backend failure) / 64 (usage). The session record lives in
+  `~/Library/Application Support/RunClosed/session.json`, so a future launchd
+  recovery backstop can read it.
 - Low-battery guard (ADR 022). The lid stay-awake flag (`pmset
   disablesleep 1`) also blocks macOS's emergency sleep, so a Mac left on
   battery with a heavy workload could drain to 0 % and power off hard. On
