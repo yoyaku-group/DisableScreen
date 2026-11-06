@@ -41,9 +41,15 @@ jobs:
           CLI=build/RunClosed.app/Contents/MacOS/runclosed-cli
           "$CLI" status --json || "$CLI" status
           "$CLI" lid-stay-awake status
+          # ADR 023: the session record is readable without mutating anything
+          "$CLI" session status --json
           # unknown subcommand must exit 64, not 0
           set +e
           "$CLI" definitely-not-a-command >/dev/null 2>&1
           rc=$?
+          # an unusable duration is a usage error too
+          "$CLI" session start --for nonsense >/dev/null 2>&1
+          rc2=$?
           set -e
           test "$rc" -eq 64
+          test "$rc2" -eq 64

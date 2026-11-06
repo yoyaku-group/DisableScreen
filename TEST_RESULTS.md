@@ -536,3 +536,129 @@ $ runclosed low-battery simulate battery 9 8 --ownership not-owned  → warn / c
 $ runclosed low-battery simulate battery 18 unknown --ownership stale → warn / lowBattery
 ```
 Preuve live (orchestrateur, 2026-10-15) : record 8C8825C7, boot A6CB8DFE, `recoveryPending: true`. Relâchement opérateur effectué, SleepDisabled 0 vérifié. Batterie à 9 % **sur secteur**.
+
+## ADR 023 — session de maintien éveillé minutée (2026-11-06)
+
+Aucune mutation du vrai flag d'alimentation : tous les chemins d'écriture sont couverts par des fakes. `session start` n'a pas été lancé sur la machine (il aurait flippé `disablesleep`) ; seules les surfaces en lecture seule et les codes d'usage ont été exercés sur le binaire.
+
+```
+$ arch -arm64 swift build --build-tests
+Build complete! (0 warning)
+
+$ arch -arm64 swift test
+RunClosedPersistenceTests  46 · RunClosedMacSystemTests 153 · HelperSupport 13
+RunClosedCoreTests        106 · RunClosedAppTests        11
+→ 329/329, 0 échec
+```
+
+Dont **143 nouveaux** : 43 `SessionPolicyTests`, 13 `SessionStoreTests`, 8 `AppLivenessLockTests`, 50 `SessionServiceTests`, 24 `SessionGuardTickTests`, 5 dans `LidMutationServiceTests` (initiateur `.sessionRecovery`).
+
+Relecture, tour 1 (11 tests ajoutés) :
+- Quit pendant une session mise en pause par la garde batterie : la dette de réarmement est effacée, une étape batterie suivante sur secteur à 80 % ne réarme pas. Sans session, le quit laisse la dette intacte (ADR 022 inchangé).
+- Plafond de 7 jours au démarrage et à l'extension ; durées infinies ou NaN refusées ; conversion secondes → nanosecondes et addition sur le compteur continu saturées, jamais de trap.
+
+Relecture, tour 2 (`ai-review-gate`, 0 CRITICAL, 5 WARN corrigés, 7 tests ajoutés) :
+- Extension d'une session en pause batterie : la pause reste, l'échéance bouge.
+- Interrupteur simple après un reboot : réarmé comme en ADR 022 ; session minutée d'un autre boot : dette annulée une fois, aucun refus répété au tick suivant.
+- `session.json` impossible à écrire : aucun appel `pmset` ; démarrage raté : la session échue remplacée est restaurée.
+- Non couverts par un test unitaire (code AppKit) : lecture `pmset` retirée du thread principal (cache rafraîchi hors thread), hauteur de la ligne capot avec « +30 min » / « End », titres des boutons tirés des préréglages, état « En pause » visible dans la ligne et la barre.
+
+```
+$ runclosed-cli session start --for 999999999999h   → exit 64 « a session is capped at 7 days »
+$ runclosed-cli session start --for inf             → exit 64 (usage)
+$ runclosed-cli session extend 8d                   → exit 64 (usage)
+$ runclosed-cli definitely-not-a-command            → exit 64
+```
+
+Relecture, tour 3 (`ai-review-gate`, 0 CRITICAL, 3 WARN corrigés, 10 tests ajoutés) :
+- Quit avec l'interrupteur simple (session indéfinie) mis en pause par la garde : record effacé, dette de réarmement conservée (ADR 022) ; record illisible au quit : record et dette effacés.
+- Interrupteur rallumé sur une session minutée en pause : même id, même échéance, pause levée ; session due, d'un autre boot, indéfinie ou absente : nouvelle session indéfinie.
+- `pausedReason` inconnu (`"thermal"`) : la session se charge, reste en pause, garde son échéance.
+- `save()` dans un dossier absent : `false`, aucun dossier créé.
+- Arguments de `session start` (fonction pure, sans binaire) : `--for` + `--indefinite` dans les deux ordres → usage ; aucun argument, valeur manquante ou illisible, option inconnue → usage ; `--for 200h` → plafond.
+- `session start --for … --indefinite` n'a pas été lancé sur la machine : un binaire périmé aurait démarré une session réelle. Le refus est couvert par le test pur ci-dessus.
+
+Relecture, tour 4 (`ai-review-gate`, 0 CRITICAL, 5 WARN corrigés, 12 tests ajoutés) :
+- Pause batterie levée quand l'opérateur rallume le flag lui-même, ou quand le réarmement le trouve déjà ON ; pause conservée tant que le flag reste OFF.
+- End sur une session indéfinie adoptée par-dessus un flag posé par un autre outil : flag éteint, record effacé. End sur une session minutée : flag d'un autre outil laissé intact, aucun appel `pmset`.
+- Démarrage réussi : dette de réarmement effacée ; démarrage raté : dette conservée.
+- `app.lock` : libre sans détenteur, tenu tant que l'app le tient (sonde depuis un autre descripteur, même processus), libéré quand le détenteur disparaît, second détenteur refusé, fichier impossible à ouvrir = non tenu.
+- `testTheLockIsExclusiveForTheWholeTick` sonde le verrou depuis l'étape session et l'étape batterie pendant `tick()`. Contre-épreuve : avec `tick()` modifié pour ne plus prendre le verrou, le test échoue sur les deux étapes (« locked during the session step », « locked during the battery step ») ; le code a été restauré ensuite.
+- `testTickDoesNotNestTheWriteLock` tourne sur son propre thread avec un délai de 10 s : un emboîtement devient un échec nommé, plus un job CI bloqué.
+
+Relecture, tour 5 (`ai-review-gate`, 0 CRITICAL, 3 WARN corrigés, 12 tests ajoutés) :
+- Session en cours sur un flag qui se lit OFF (crash entre le journal et le flag) : effacée au tick, aucun appel `pmset` ; flag INCONNU ou ON : session laissée ; session indéfinie : record seul effacé ; session en pause : jamais touchée.
+- Pause batterie perdue (flag OFF, dette de réarmement en attente) : pause restaurée, dette conservée.
+- Étape session seule sous `LidWriteLock` (garde batterie coupée) : une session due est terminée, flag OFF vérifié, record effacé ; une session due est expirée avant toute réconciliation.
+- `app.lock` : `hold()` échoue pendant qu'une sonde le tient, réussit au réessai une fois la sonde partie.
+- Extension d'une session d'un autre boot : même `bootID`, échéance continue retirée, échéance murale déplacée ; même boot : échéance continue déplacée.
+- Titre de barre compact : `3h`, `1h41`, `1h05`, `45m`, `<1m`, rien pour une session indéfinie.
+- `testTickDoesNotNestTheWriteLock` vérifie le résultat de l'attente avant de lire celui du thread.
+- Non couverts par un test unitaire (code AppKit) : réessai de `app.lock` à chaque tick, `runSessionOnlyTick`, cache de propriété lu hors thread principal.
+
+```
+$ runclosed-cli session status --json        → exit 0, ownership ownedThisBoot, session.present false
+$ runclosed-cli session start --for 200h      → exit 64 « a session is capped at 7 days »
+$ runclosed-cli session start --for 2h --indefinite → exit 64 (usage)
+$ runclosed-cli session bogus                 → exit 64
+$ runclosed-cli definitely-not-a-command      → exit 64
+```
+
+Relecture, tour 6 (`ai-review-gate`, 0 CRITICAL, 3 WARN corrigés, 6 tests ajoutés) :
+- Démarrage dont `pmset` a rendu 0 et déplacé le flag mais dont la relecture a échoué : échec signalé, flag remis à OFF (`[true, false]`), record retiré.
+- Démarrage dont la relecture est devenue INCONNUE : une seule écriture, record gardé ; il part dès que le flag se lit OFF.
+- Session indéfinie en pause sans réarmement dû : effacée, et un démarrage minuté n'est plus refusé.
+- Au tick : pause gardée tant que le réarmement est dû (sur secteur sous le seuil) ; pause dont le réarmement a été annulé : effacée, flag laissé OFF.
+- `app.lock` : une sonde en cours (verrou partagé) ne fait pas croire à l'app ; `release()` rend le verrou avant la fin du détenteur, idempotent, le verrou se reprend ensuite.
+- Non couverts par un test unitaire (code AppKit) : `release()` dans la section verrouillée du teardown, redessin du compte à rebours après Start, +30 min et End.
+
+Relecture, tour 7 (`ai-review-gate`, 0 CRITICAL, 3 WARN corrigés, 5 tests ajoutés, 4 attentes corrigées) :
+- Les bancs `SessionServiceTests` et `SessionGuardTickTests` passent par le vrai `LidMutationService` (`SessionService.gatedLid`, le câblage même de `live()`) au lieu d'une copie du contrôle. La copie vérifiait la propriété avant de lire le flag : 4 tests attendaient `flagNotOwned` sur un flag OFF, le vrai service rend `flagAlreadyOff`. Attentes corrigées.
+- Record de propriété perdu pendant une session minutée : à l'échéance, `.ended(.flagLeftOn)`, flag laissé ON (B2), record et dette de réarmement effacés, `stopsKeepingAwake` faux.
+- Refus relu : flag relu OFF → `flagNotOwned` ; relu INCONNU → `flagLeftOn`.
+- Démarrage abandonné dont l'annulation échoue aussi : record gardé, puis `flagLeftOn` à l'échéance au lieu d'une fin silencieuse.
+- Au tick : `flagLeftOn` n'est pas une fin normale (`sessionEndedNaturally` faux) ; une écriture en échec rend `.retained("sudo: a password is required")` et garde le record.
+- End sur une session minutée dont le flag est étranger : `.flagLeftOn`, flag intact, record effacé.
+- Non couverts par un test unitaire : refus de `session extend` quand l'app ne tourne pas (câblage CLI sous `LidWriteLock`, lecture du code), notification et message du popup pour `flagLeftOn` (AppKit).
+Relecture, tour 8 (`ai-review-gate`, 0 CRITICAL, 1 WARN corrigé, 2 tests ajoutés) :
+- Quit dont le flag ne se lit pas OFF : `finishOnQuit` garde la session et la rend ; quit qui termine la session ou sans session : rien à signaler.
+- Durées : `2h3h`, `1h1h1h`, `30m2h`, `5s1m`, `1h30m30m`, `30s5` refusées ; `1h30m15s` = 5415 s, `1m30` = 90 s.
+- Le test du plafond affirme que `999999999999h` se lit puis est refusé (`overCap`), sans branche conditionnelle.
+- Non couverts par un test unitaire (AppKit) : la notification de quit avant la sortie, le cache de session rempli hors du thread principal.
+
+Relecture, tour 9 (`ai-review-gate`, 0 CRITICAL, 2 WARN corrigés, 2 tests ajoutés, 1 test adapté) :
+- End sans opérateur sur une session indéfinie qui a adopté un flag étranger : `.flagLeftOn`, flag ON, aucune écriture. End sans opérateur sur une session indéfinie dont le flag est nôtre : `.released`, flag OFF, record effacé. End opérateur (`byOperator: true`) : flag adopté éteint, comme avant.
+- CLI sur le bundle : `session end --bogus` → 64, `session end --operator extra` → 64, `session end` sans session → 3.
+- Non couvert par un test unitaire (AppKit) : l'activité anti-App Nap limitée aux sessions minutées en cours, sans effet sur la veille.
+
+Contrats verrouillés :
+- Échéance continue sur le même boot ; une veille de 6 h dans une session de 1 h rend la session due (ce que `systemUptime` manquerait) ; non due avant l'échéance ; `remaining` à 0 une fois due.
+- Échéance murale inter-boot ; le compteur continu d'un boot précédent est ignoré et ne peut pas terminer la session immédiatement (comparaison naïve sinon).
+- Session indéfinie jamais due, jamais de libellé de temps restant, jamais extensible.
+- Refus de démarrer une session minutée quand le flag est observé ON et que l'ownership est `notOwned` ou `staleRecord` ; démarrage indéfini non bloqué (ADR 021 gouverne déjà ce cas) ; refus d'une seconde session ; une session déjà due est remplacée ; durée nulle ou négative refusée.
+- Extension depuis maintenant (pas depuis l'ancienne échéance) ; elle ranime une session due et garde une pause batterie (seul le réarmement de la garde la lève) ; no-op sur une session indéfinie et sur un pas négatif.
+- Pause/reprise : l'échéance et l'identité ne bougent pas.
+- `allowsRearm` : vrai pour une session vivante du même boot, faux si due ou d'un autre boot, vrai s'il n'y a aucune session (ADR 022 intact).
+- Libellés : `2 h 41 left`, `8 min left`, `1 h left`, `< 1 min left` ; `Until … · …` avec fuseau et locale injectés.
+- Parsing des durées : `2h`, `90m`, `1h30m`, `1h30`, `45` (= 45 min), `30s`, insensible à la casse ; `""`, `abc`, `2x`, `h`, `0`, `-5m` refusés.
+- Persistance : round-trip (dont pause et session indéfinie), `clear()` idempotent, fichier absent, quatre formes de fichier corrompu → aucune session, `load()` ne réécrit rien, `schemaVersion` rapporté, schéma futur décodé, forme nue acceptée, dates ISO-8601 lisibles en JSON, chemin canonique sous Application Support.
+- Service : le record est écrit avant le flag et supprimé si le flag échoue ; adoption d'un flag déjà ON possédé sans seconde écriture ; refus sans mutation ni journal ; expiration vérifiée → record effacé ; `notOwned` → effacé sans écriture ; échec backend → record conservé ; aucune session → no-op ; indéfinie jamais expirée ; End ; End et expiration effacent la dette de réarmement ; extension sans écriture du flag ; pause/reprise ; `allowsRearm`.
+- `sessionRecovery` : relâche notre record du boot de la session ; refuse un record d'un autre boot, l'absence de record, un record qui ne réclame plus l'ownership ; B1 reste bloquant. `releaseInitiator` = `.automatic` sur le boot de la session, `.sessionRecovery` sinon.
+- Tick partagé : **régression — le tick n'emboîte jamais `LidWriteLock`** (s'il emboîtait, `withLock` ouvrirait un second fd et le test se bloquerait) ; la section est exclusive de bout en bout ; expiration + effacement ; `notOwned` sans mutation ; relâchement batterie → pause (échéance conservée) puis réarmement → reprise ; réarmement retenu quand la session est due ; End annule la dette à travers le tick ; sans session, ADR 022 identique (relâchement + veille + verrou, puis réarmement).
+
+Bundle et CLI (binaire embarqué, lecture seule) :
+```
+$ bash scripts/build-runclosed-app.sh            → OK: build/RunClosed.app (ad-hoc, runtime)
+$ codesign --verify --strict build/RunClosed.app → exit 0
+$ runclosed-cli session status --json
+  ownership: "ownedThisBoot" ; observed: "on" ; session { present: false } ; rowLabel: null
+$ runclosed-cli session end                      → « refused: no session is running », exit 3
+$ runclosed-cli session extend 30m               → « refused: no session is running », exit 3
+$ runclosed-cli session extend 9999h             → exit 64
+$ runclosed-cli session start --for 2h3h         → usage, exit 64
+$ runclosed-cli session start --for nonsense     → usage, exit 64
+$ runclosed-cli session bogus                    → usage, exit 64
+$ runclosed-cli definitely-not-a-command         → « unknown command », exit 64
+```
+
+NOT_TESTED (matériel) : expiration réelle après une nuit capot fermé, tick au réveil, notifications macOS, rendu du popup et du titre de barre sur la build installée. Aucune de ces mesures n'a été faite ; rien n'est supposé.

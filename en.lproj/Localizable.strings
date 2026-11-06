@@ -32,4 +32,29 @@
 
 "%@%% on battery. Lid stay-awake is on but was turned on by another tool (or its state cannot be read), so RunClosed will NOT turn it off at 10%% and the Mac will not sleep by itself. Plug in, or switch \"Keep awake with lid closed\" off then on so RunClosed owns it." = "%@%% on battery. Lid stay-awake is on but was turned on by another tool (or its state cannot be read), so RunClosed will NOT turn it off at 10%% and the Mac will not sleep by itself. Plug in, or switch \"Keep awake with lid closed\" off then on so RunClosed owns it.";
 "Battery critical: emergency sleep" = "Battery critical: emergency sleep";
+
+/* Timed keep-awake session (ADR 023) */
+"%@ h" = "%@ h";
+"+30 min" = "+30 min";
+"End" = "End";
+"Indefinite — switch it off to end it" = "Indefinite — switch it off to end it";
+"Session ended" = "Session ended";
+"The keep-awake session reached its end time and lid stay-awake was turned off." = "The keep-awake session reached its end time and lid stay-awake was turned off.";
+"Lid stay-awake is on but not owned by RunClosed — switch it off then on first" = "Lid stay-awake is on but not owned by RunClosed — switch it off then on first";
+"A session is already running" = "A session is already running";
+"That is longer than 7 days" = "That is longer than 7 days";
+"Paused (low battery) · until %@" = "Paused (low battery) · until %@";
+"Paused · until %@" = "Paused · until %@";
+"No session is running" = "No session is running";
+"This session has no end time" = "This session has no end time";
+"Until %@ · %@" = "Until %@ · %@";
+"%@ min left" = "%@ min left";
+"%@ h left" = "%@ h left";
+"%@ h %@ left" = "%@ h %@ left";
+"< 1 min left" = "< 1 min left";
 "%@%% on battery: lid stay-awake was still on from before the last restart. RunClosed turned it off as an emergency and the Mac is going to sleep (hibernation keeps every process). It comes back on once charging above 15%%." = "%@%% on battery: lid stay-awake was still on from before the last restart. RunClosed turned it off as an emergency and the Mac is going to sleep (hibernation keeps every process). It comes back on once charging above 15%%.";
+"Session ended, but lid stay-awake is still on (not set by RunClosed) — use the switch to turn it off" = "Session ended, but lid stay-awake is still on (not set by RunClosed) — use the switch to turn it off";
+"Session ended — Mac still awake" = "Session ended — Mac still awake";
+"The keep-awake session reached its end time, but lid stay-awake is still on and RunClosed did not set it, so it was left on. Turn it off with the switch in RunClosed." = "The keep-awake session reached its end time, but lid stay-awake is still on and RunClosed did not set it, so it was left on. Turn it off with the switch in RunClosed.";
+"RunClosed quit — Mac still awake" = "RunClosed quit — Mac still awake";
+"Lid stay-awake could not be turned off, so the session stays on with nothing to end it at its deadline. Reopen RunClosed, or turn it off with `runclosed-cli lid-stay-awake off --operator`." = "Lid stay-awake could not be turned off, so the session stays on with nothing to end it at its deadline. Reopen RunClosed, or turn it off with `runclosed-cli lid-stay-awake off --operator`.";

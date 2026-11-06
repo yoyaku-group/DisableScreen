@@ -22,9 +22,24 @@ final class PopupPanel: NSPanel {
     private static let hSeparator: CGFloat = 1
     private static let hQuit: CGFloat = 36
     private static let hLid: CGFloat = 36
+    /// The lid row grows by one line while a session runs ("Until 14:30 ·
+    /// 2 h 41 left") and by two when the duration buttons are shown (ADR 023).
+    private static let hLidSessionLine: CGFloat = 13
+    private static let hLidSessionButtons: CGFloat = 26
     private static let hLogin: CGFloat = 36
     private static let hLeases: CGFloat = 26
     private static let pad: CGFloat = 8
+
+    /// Total height of the lid block for a given state. Kept next to the row
+    /// builder so the frame and the drawing can never disagree.
+    static func lidHeight(_ state: PopupState) -> CGFloat {
+        var h = hLid
+        if state.session.label != nil { h += hLidSessionLine }
+        // Same condition as `lidRow`: the duration buttons when idle, or
+        // "+30 min" / "End" while a timed session runs.
+        if state.session.showsDurationButtons || state.session.timed { h += hLidSessionButtons }
+        return h
+    }
 
     var onDismiss: (() -> Void)?
 
@@ -66,7 +81,7 @@ final class PopupPanel: NSPanel {
         var total = pad
         total += hQuit + hSeparator
         total += hLogin + hSeparator
-        total += hLid + hSeparator
+        total += lidHeight(state) + hSeparator
         total += hLeases + hSeparator
         for card in state.displays {
             total += cardHeight(card)
@@ -101,11 +116,12 @@ final class PopupPanel: NSPanel {
         root.addSubview(separator(at: y))
         y += hSeparator
 
-        // — Lid stay-awake
+        // — Lid stay-awake (+ its session controls, ADR 023)
+        let lidH = lidHeight(state)
         let (lidRow, _) = lidRow(state, target: target)
-        lidRow.frame = NSMakeRect(0, y, width, hLid)
+        lidRow.frame = NSMakeRect(0, y, width, lidH)
         root.addSubview(lidRow)
-        y += hLid
+        y += lidH
 
         root.addSubview(separator(at: y))
         y += hSeparator
@@ -260,8 +276,17 @@ final class PopupPanel: NSPanel {
         return view
     }
 
+    /// The lid block: the switch row (unchanged geometry), plus — when a
+    /// session exists (ADR 023) — a countdown line and, when nothing runs, the
+    /// 1 h / 2 h / 4 h / 8 h duration buttons.
     private static func lidRow(_ state: PopupState, target: AnyObject) -> (NSView, CGFloat) {
-        let view = NSView(frame: NSMakeRect(0, 0, width, hLid))
+        let h = lidHeight(state)
+        let view = NSView(frame: NSMakeRect(0, 0, width, h))
+        // The switch row keeps its original 36 pt geometry at the TOP of the
+        // block, so the existing layout does not move when session controls
+        // appear below it.
+        let rowY = h - hLid
+
         let label = NSTextField(labelWithString: L10n.t("Keep awake with lid closed"))
         label.font = .systemFont(ofSize: 12)
         view.addSubview(label)
@@ -270,24 +295,92 @@ final class PopupPanel: NSPanel {
         // wins over the generic unknown-state hint.
         let hintText: String? = state.lidError ?? (state.lid == .unknown ? L10n.t("unknown state") : nil)
         if let hintText {
-            label.frame = NSMakeRect(14, 18, width - 80, 14)
+            label.frame = NSMakeRect(14, rowY + 18, width - 80, 14)
             let hint = NSTextField(labelWithString: hintText)
-            hint.frame = NSMakeRect(14, 4, width - 80, 13)
+            hint.frame = NSMakeRect(14, rowY + 4, width - 80, 13)
             hint.font = .systemFont(ofSize: 10)
             hint.textColor = state.lidError != nil ? .systemRed : .tertiaryLabelColor
             hint.lineBreakMode = .byTruncatingTail
             view.addSubview(hint)
         } else {
-            label.frame = NSMakeRect(14, 11, width - 80, 14)
+            label.frame = NSMakeRect(14, rowY + 11, width - 80, 14)
         }
 
-        let sw = NSSwitch(frame: NSMakeRect(width - 54, 7, 44, 22))
+        let sw = NSSwitch(frame: NSMakeRect(width - 54, rowY + 7, 44, 22))
         sw.state = state.lid == .on ? .on : .off
         sw.target = target
         sw.action = #selector(AppDelegate.toggleLid(_:))
         sw.isEnabled = state.lidCanToggle && !state.busy
         view.addSubview(sw)
-        return (view, hLid)
+
+        var y = rowY
+
+        // — Session countdown ("Until 14:30 · 2 h 41 left")
+        if let sessionLabel = state.session.label {
+            y -= hLidSessionLine
+            let line = NSTextField(labelWithString: sessionLabel)
+            line.frame = NSMakeRect(14, y + 1, width - 28, 12)
+            line.font = .systemFont(ofSize: 10)
+            line.textColor = state.session.due ? .systemOrange : .secondaryLabelColor
+            line.lineBreakMode = .byTruncatingTail
+            view.addSubview(line)
+        }
+
+        // — Duration buttons / End + extend
+        if state.session.showsDurationButtons {
+            y -= hLidSessionButtons
+            addSessionControls(state, target: target, view: view, at: y)
+        } else if state.session.timed {
+            y -= hLidSessionButtons
+            addRunningSessionControls(state, target: target, view: view, at: y)
+        }
+        return (view, h)
+    }
+
+    /// 1 h / 2 h / 4 h / 8 h — only offered when no session is running.
+    private static func addSessionControls(_ state: PopupState, target: AnyObject,
+                                           view: NSView, at y: CGFloat) {
+        // Titles come from the presets themselves, so a button can never
+        // start a duration other than the one it shows.
+        let presets = SessionDuration.presets
+        let gap: CGFloat = 6
+        let available = width - 28
+        let bw = (available - gap * CGFloat(presets.count - 1)) / CGFloat(presets.count)
+        for (i, seconds) in presets.enumerated() {
+            let btn = NSButton(frame: NSMakeRect(14 + CGFloat(i) * (bw + gap), y + 2, bw, 22))
+            btn.title = L10n.t("%@ h", String(Int(seconds / 3600)))
+            btn.bezelStyle = .rounded
+            btn.font = .systemFont(ofSize: 11)
+            btn.tag = Int(seconds)
+            btn.target = target
+            btn.action = #selector(AppDelegate.startSession(_:))
+            btn.isEnabled = state.lidCanToggle && !state.busy
+            view.addSubview(btn)
+        }
+    }
+
+    /// A timed session is running: "+30 min" and "End".
+    private static func addRunningSessionControls(_ state: PopupState, target: AnyObject,
+                                                  view: NSView, at y: CGFloat) {
+        let gap: CGFloat = 6
+        let bw = (width - 28 - gap) / 2
+        let extend = NSButton(frame: NSMakeRect(14, y + 2, bw, 22))
+        extend.title = L10n.t("+30 min")
+        extend.bezelStyle = .rounded
+        extend.font = .systemFont(ofSize: 11)
+        extend.target = target
+        extend.action = #selector(AppDelegate.extendSession(_:))
+        extend.isEnabled = !state.busy
+        view.addSubview(extend)
+
+        let end = NSButton(frame: NSMakeRect(14 + bw + gap, y + 2, bw, 22))
+        end.title = L10n.t("End")
+        end.bezelStyle = .rounded
+        end.font = .systemFont(ofSize: 11)
+        end.target = target
+        end.action = #selector(AppDelegate.endSession(_:))
+        end.isEnabled = !state.busy
+        view.addSubview(end)
     }
 
     private static func loginRow(_ state: PopupState, target: AnyObject) -> (NSView, CGFloat) {

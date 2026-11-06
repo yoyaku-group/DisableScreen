@@ -7,6 +7,62 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Timed keep-awake sessions (ADR 023). The lid stay-awake switch used to have
+  no end time: forgetting it left the Mac awake until the low-battery guard
+  stepped in at 10 %. The lid row now offers 1 h / 2 h / 4 h / 8 h buttons and
+  shows "Until 14:30 · 2 h 41 left" while a session runs, with "+30 min" and
+  "End"; the remaining time also appears next to the menu-bar icon. The switch
+  itself is unchanged — turning it on creates an indefinite session, so
+  existing behaviour is preserved. Deadlines are tracked on
+  `mach_continuous_time`, which keeps counting while the machine sleeps (the
+  uptime clock does not), with the wall clock as the cross-reboot fallback. A
+  timed session refuses to start on a flag RunClosed does not own, because its
+  expiry would silently fail the ownership check. A low-battery release pauses
+  the session instead of ending it, and the guard only re-arms the flag while
+  the session is still valid. Expiry runs inside the existing guard tick, in
+  the same cross-process lock section, and a wake notification triggers a tick
+  so an overnight deadline is honoured on wake. Quitting ends the session
+  through the same path as End and expiry, so a re-arm owed to a paused
+  session cannot flip the flag back on at the next launch. A session is capped
+  at 7 days. A battery-paused session shows "Paused (low battery)" and stays
+  paused when extended; only the guard's re-arm turns the flag back on. The
+  plain switch keeps its ADR 022 re-arm after a reboot and across a quit.
+  Turning the switch on over a live timed session (for example one paused by
+  the battery guard) resumes it with its deadline instead of replacing it.
+  A pause reason written by a later version keeps the session paused. The
+  pause also ends when the flag is back on and ours by any path. End in the popup
+  on an indefinite session is the switch OFF and turns off an adopted flag;
+  `session end` keeps the ownership check like `lid-stay-awake off`, and only
+  `session end --operator` turns off a flag another tool set. End on a timed
+  session never turns off a flag another tool owns. When a deadline
+  or End finds the flag still on but not RunClosed's (for example a lost
+  ownership record), the session ends with a "Session ended — Mac still
+  awake" alert instead of a plain "Session ended", and `session end` exits 3.
+  While the app
+  runs it holds `app.lock`; until the launchd backstop ships, the CLI refuses
+  a timed session when the app is not running, since nothing would end it.
+  The check runs under the lid lock, and the app retries `app.lock` on every
+  tick if it could not take it at launch. A running session whose flag reads
+  off (a crash between the record and the flag, `lid-stay-awake off`, or
+  `pmset` by hand) is cleared on the next tick instead of counting down for
+  nothing. Switching the low-battery guard off no longer stops session
+  deadlines: the app then runs the session step on its own. A paused session
+  whose re-arm was cancelled is cleared too. A start whose `pmset` write
+  failed its readback checks the flag again and turns it back off if the
+  write landed anyway. Quitting gives `app.lock` up inside the lid lock, so a
+  CLI start queued behind the quit is refused. `session extend` is refused
+  the same way when the app is not running. A quit whose flag release fails
+  keeps the session, logs it and, for a timed session, warns "RunClosed quit
+  — Mac still awake" before exiting. The menu bar no longer reads
+  `session.json` on the main thread. A duration whose units repeat or do not
+  get smaller (`2h3h`, `30m2h`) is a usage error instead of a sum.
+- `runclosed session start --for <2h|90m|1h30m> | start --indefinite | extend
+  [30m] | end | status [--json]`. `--for` together with `--indefinite` is a
+  usage error; a timed start or an extend without the menu-bar app running exits 3. Mutating subcommands take the same lock as
+  `lid-stay-awake on|off`; exit codes stay 0 / 3 (refused by policy) / 5
+  (backend failure) / 64 (usage). The session record lives in
+  `~/Library/Application Support/RunClosed/session.json`, so a future launchd
+  recovery backstop can read it.
 - Low-battery guard (ADR 022). The lid stay-awake flag (`pmset
   disablesleep 1`) also blocks macOS's emergency sleep, so a Mac left on
   battery with a heavy workload could drain to 0 % and power off hard. On

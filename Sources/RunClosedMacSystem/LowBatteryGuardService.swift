@@ -84,6 +84,12 @@ public struct LowBatteryGuardService {
     public let lock: LidWriteLock
     /// Persisted audit line for every guard mutation (ADR 022).
     public let auditLog: LowBatteryAuditLog
+    /// Optional timed-session layer (ADR 023). `nil` = ADR 022 behaviour
+    /// unchanged, byte for byte: no session file is read, no extra branch runs.
+    /// When present, the SAME locked tick (one `LidWriteLock` section) also
+    /// expires a due session, pauses it on a battery release, and resumes it
+    /// on the re-arm.
+    public var sessionService: SessionService?
 
     public init(
         lidService: LidMutationService,
@@ -91,7 +97,8 @@ public struct LowBatteryGuardService {
         batteryProvider: @escaping @Sendable () -> BatteryState,
         sleeper: any SystemSleeper,
         lock: LidWriteLock = LidWriteLock(),
-        auditLog: LowBatteryAuditLog = LowBatteryAuditLog()
+        auditLog: LowBatteryAuditLog = LowBatteryAuditLog(),
+        sessionService: SessionService? = nil
     ) {
         self.lidService = lidService
         self.latchStore = latchStore
@@ -99,6 +106,7 @@ public struct LowBatteryGuardService {
         self.sleeper = sleeper
         self.lock = lock
         self.auditLog = auditLog
+        self.sessionService = sessionService
     }
 
     public struct Evaluation: Equatable, Sendable {
@@ -132,6 +140,19 @@ public struct LowBatteryGuardService {
         /// Whether the caller should notify about `mutation`. Failures are
         /// notified once per discharge episode, never every 30 s.
         public var shouldNotify: Bool = false
+        /// What the session step did this tick (ADR 023). `nil` when no session
+        /// layer is wired or nothing happened.
+        public var session: SessionService.ExpiryOutcome?
+        /// Set when the operator should be told a session ended by itself, at
+        /// most once (the record is gone afterwards). `false` for
+        /// `.flagLeftOn`: the session ended but the Mac is still awake.
+        public var sessionEndedNaturally: Bool = false
+        /// Set when the flag was re-armed on AC for a still-live session, so
+        /// the menu bar can refresh without polling the record.
+        public var sessionResumed: Bool = false
+        /// Set when the session step reconciled a record whose flag reads OFF
+        /// (ADR 023): cleared as an orphan, or a lost battery pause restored.
+        public var sessionReconciled: SessionService.ReconcileOutcome?
     }
 
     /// Read-only evaluation: no mutation, no persistence write. Used by
@@ -168,14 +189,34 @@ public struct LowBatteryGuardService {
     }
 
     private mutating func lockedTick() -> TickOutcome {
+        // ADR 023 — session expiry runs FIRST, inside this same lock section:
+        // a session whose deadline passed must never be re-armed by the very
+        // tick that noticed the deadline. It is a separate step from the
+        // battery one so the ADR 022 decision below is computed from an
+        // observation taken AFTER any release.
+        // The same step also reconciles a running session whose flag reads
+        // OFF, before the battery step reads the latch it may have cleared.
+        let sessionStep = sessionService?.step()
+        let sessionExpiry = sessionStep?.expiry
         let evaluation = evaluate()
         // Which boot wrote the ownership record, captured before any write
         // (an emergency release replaces a stale record with this boot's).
         let recordBootIDBefore = lidService.store.load().bootID
         var outcome = TickOutcome(evaluation: evaluation)
+        outcome.session = sessionExpiry
+        outcome.sessionReconciled = sessionStep?.reconciled
         var record = latchStore.load()
         let before = record
         record.latch = evaluation.latchAfter
+
+        if case .ended(let end)? = sessionExpiry {
+            // A finished session owes no re-arm: drop any pending one so the
+            // guard cannot flip the flag back on for a deadline that is gone
+            // (ADR 023 §4). `SessionService.finish` already cleared the latch
+            // on disk; this keeps the in-memory copy from re-saving it.
+            record.latch = record.latch.recordingRearm()
+            outcome.sessionEndedNaturally = end.stopsKeepingAwake
+        }
 
         switch evaluation.decision.action {
         case .none, .warn:
@@ -193,6 +234,12 @@ public struct LowBatteryGuardService {
                 outcome.shouldNotify = true
                 record.latch = record.latch.recordingRelease()
                 record.releasedBootID = lidService.bootID
+                // ADR 023 §4: a low-battery release PAUSES the session instead
+                // of ending it — the operator's deadline is not the battery's
+                // to cancel, and the re-arm below may revive it. A pause that
+                // fails to save is restored by the next tick's reconciliation
+                // (flag OFF + re-arm debt pending = a battery pause).
+                sessionService?.pauseForBattery()
                 // Persist the re-arm debt and the audit line BEFORE asking
                 // for sleep: the Mac may go down right after `sleepnow`.
                 latchStore.save(record)
@@ -219,15 +266,29 @@ public struct LowBatteryGuardService {
             }
 
         case .rearm:
+            // ADR 023 §4: re-arm only while the session is still valid (not
+            // due) AND on the boot that owns it. With no session the answer is
+            // `true` and this is exactly the ADR 022 path.
+            if let session = sessionService, !session.allowsRearm() {
+                // The debt belonged to a timed session that can no longer use
+                // it (due, or from another boot). Void it once instead of
+                // refusing it again on every tick.
+                outcome.mutation = nil
+                outcome.mutationError = "re-arm withheld: session no longer valid (due or from another boot)"
+                record.latch = record.latch.recordingRearm()
+                break
+            }
             let result = lidService.setEnabled(true, initiator: .automatic)
             switch result {
             case .success(let op) where op.state == .verified:
                 outcome.mutation = .rearmed
                 outcome.shouldNotify = true
                 record.latch = record.latch.recordingRearm()
+                outcome.sessionResumed = sessionService?.resumeAfterRearm() ?? false
             case .failure(.noChangeRequested(target: true)):
                 outcome.mutation = .rearmAlreadyOn
                 record.latch = record.latch.recordingRearm()
+                outcome.sessionResumed = sessionService?.resumeAfterRearm() ?? false
             case .success(let op):
                 outcome.mutation = .rearmFailed
                 outcome.mutationError = op.error ?? "rearm not verified (state=\(op.state.rawValue))"
@@ -236,6 +297,14 @@ public struct LowBatteryGuardService {
                 outcome.mutation = .rearmFailed
                 outcome.mutationError = String(describing: error)
             }
+        }
+
+        // ADR 023 §4: a battery pause ends when the flag is ON and ours again,
+        // whichever path turned it back on. Observed before this tick's own
+        // writes; a release in this tick keeps the pause.
+        if outcome.mutation != .released, !outcome.sessionResumed,
+           evaluation.input.lidFlag == true, evaluation.input.ownership == .ownedThisBoot {
+            outcome.sessionResumed = sessionService?.resumeIfFlagIsBack() ?? false
         }
 
         if record != before {

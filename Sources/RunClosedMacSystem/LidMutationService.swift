@@ -103,6 +103,42 @@ public struct LidMutationService {
         /// tool set it) is still refused `notOwned`. The service checks this
         /// itself rather than trusting the caller.
         case lowBatteryEmergency
+        /// Session expiry (ADR 023). Same protective direction as the battery
+        /// emergency, for the same reason: leaving `disablesleep 1` behind
+        /// after a session ends is the failure mode, so a release of OUR OWN
+        /// record from a previous boot is allowed — but ONLY when that record's
+        /// boot matches the session's own boot id (`sessionBootID`). That
+        /// scoping is what keeps this from becoming a generic "turn off any
+        /// flag whose record looks old" escape hatch: a record written by a
+        /// boot that never had a session is still refused `notOwned`.
+        case sessionRecovery(bootID: String)
+    }
+
+    /// Whether this initiator may release the given ownership record.
+    /// Pure, so the rule can be tested without a store — and read without
+    /// guessing which caller widened what.
+    ///
+    /// ADR 015 says a stale record never grants automatic ownership. This is
+    /// the deliberate, narrow amendment: an OWN record whose boot is the boot
+    /// the session was started in is releasable by the session path, because
+    /// leaving the global flag on is the strictly worse outcome. Everything
+    /// else keeps the old refusal.
+    static func mayRelease(initiator: Initiator, record: OwnedLidAssertion.Record, currentBootID: String) -> Bool {
+        let weOwn = record.bootID == currentBootID && record.ownedEnabled
+        let ourStaleRecord = record.ownedEnabled && record.bootID != currentBootID
+        switch initiator {
+        case .operatorCommand:
+            return true    // the operator is the authority over the global flag
+        case .automatic:
+            return weOwn
+        case .lowBatteryEmergency:
+            return weOwn || ourStaleRecord
+        case .sessionRecovery(let sessionBootID):
+            if weOwn { return true }
+            // Cross-boot: only our own record, and only from the boot the
+            // session was started in.
+            return ourStaleRecord && record.bootID == sessionBootID
+        }
     }
 
     /// Set the lid stay-awake flag.
@@ -134,13 +170,12 @@ public struct LidMutationService {
         // not active ownership — reconcileCrossBoot either cleared it after an
         // OFF observation or kept it pending; either way not ours to flip).
         // An operator command resolves recovery-pending by itself: the
-        // verified write below replaces the stale record (ADR 021).
+        // verified write below replaces the stale record (ADR 021). The two
+        // emergency initiators widen this by exactly one record each
+        // (`mayRelease`, ADR 022 / ADR 023).
         if !enabled && initiator != .operatorCommand {
             let rec = store.load()
-            let weOwn = rec.bootID == bootID && rec.ownedEnabled
-            let ourStaleRecord = rec.ownedEnabled && rec.bootID != bootID
-            let allowed = weOwn || (initiator == .lowBatteryEmergency && ourStaleRecord)
-            if !allowed {
+            if !Self.mayRelease(initiator: initiator, record: rec, currentBootID: bootID) {
                 return .failure(.notOwned)
             }
         }
