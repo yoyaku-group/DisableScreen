@@ -546,12 +546,12 @@ $ arch -arm64 swift build --build-tests
 Build complete! (0 warning)
 
 $ arch -arm64 swift test
-RunClosedPersistenceTests  46 · RunClosedMacSystemTests 151 · HelperSupport 13
+RunClosedPersistenceTests  46 · RunClosedMacSystemTests 153 · HelperSupport 13
 RunClosedCoreTests        106 · RunClosedAppTests        11
-→ 327/327, 0 échec
+→ 329/329, 0 échec
 ```
 
-Dont **141 nouveaux** : 43 `SessionPolicyTests`, 13 `SessionStoreTests`, 8 `AppLivenessLockTests`, 48 `SessionServiceTests`, 24 `SessionGuardTickTests`, 5 dans `LidMutationServiceTests` (initiateur `.sessionRecovery`).
+Dont **143 nouveaux** : 43 `SessionPolicyTests`, 13 `SessionStoreTests`, 8 `AppLivenessLockTests`, 50 `SessionServiceTests`, 24 `SessionGuardTickTests`, 5 dans `LidMutationServiceTests` (initiateur `.sessionRecovery`).
 
 Relecture, tour 1 (11 tests ajoutés) :
 - Quit pendant une session mise en pause par la garde batterie : la dette de réarmement est effacée, une étape batterie suivante sur secteur à 80 % ne réarme pas. Sans session, le quit laisse la dette intacte (ADR 022 inchangé).
@@ -625,6 +625,11 @@ Relecture, tour 8 (`ai-review-gate`, 0 CRITICAL, 1 WARN corrigé, 2 tests ajout�
 - Durées : `2h3h`, `1h1h1h`, `30m2h`, `5s1m`, `1h30m30m`, `30s5` refusées ; `1h30m15s` = 5415 s, `1m30` = 90 s.
 - Le test du plafond affirme que `999999999999h` se lit puis est refusé (`overCap`), sans branche conditionnelle.
 - Non couverts par un test unitaire (AppKit) : la notification de quit avant la sortie, le cache de session rempli hors du thread principal.
+
+Relecture, tour 9 (`ai-review-gate`, 0 CRITICAL, 2 WARN corrigés, 2 tests ajoutés, 1 test adapté) :
+- End sans opérateur sur une session indéfinie qui a adopté un flag étranger : `.flagLeftOn`, flag ON, aucune écriture. End sans opérateur sur une session indéfinie dont le flag est nôtre : `.released`, flag OFF, record effacé. End opérateur (`byOperator: true`) : flag adopté éteint, comme avant.
+- CLI sur le bundle : `session end --bogus` → 64, `session end --operator extra` → 64, `session end` sans session → 3.
+- Non couvert par un test unitaire (AppKit) : l'activité anti-App Nap limitée aux sessions minutées en cours, sans effet sur la veille.
 
 Contrats verrouillés :
 - Échéance continue sur le même boot ; une veille de 6 h dans une session de 1 h rend la session due (ce que `systemUptime` manquerait) ; non due avant l'échéance ; `remaining` à 0 une fois due.

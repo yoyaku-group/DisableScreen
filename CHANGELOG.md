@@ -30,9 +30,11 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Turning the switch on over a live timed session (for example one paused by
   the battery guard) resumes it with its deadline instead of replacing it.
   A pause reason written by a later version keeps the session paused. The
-  pause also ends when the flag is back on and ours by any path. End on an
-  indefinite session is the switch OFF and turns off an adopted flag; End on
-  a timed session never turns off a flag another tool owns. When a deadline
+  pause also ends when the flag is back on and ours by any path. End in the popup
+  on an indefinite session is the switch OFF and turns off an adopted flag;
+  `session end` keeps the ownership check like `lid-stay-awake off`, and only
+  `session end --operator` turns off a flag another tool set. End on a timed
+  session never turns off a flag another tool owns. When a deadline
   or End finds the flag still on but not RunClosed's (for example a lost
   ownership record), the session ends with a "Session ended — Mac still
   awake" alert instead of a plain "Session ended", and `session end` exits 3.

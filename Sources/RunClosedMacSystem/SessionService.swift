@@ -238,9 +238,16 @@ public struct SessionService {
     /// go while the Mac stays awake with no deadline. A timed End refused
     /// with the flag still ON reports `.flagLeftOn`, so the popup and the CLI
     /// tell the operator to turn it off with the switch.
-    public mutating func end() -> Result<SessionEndOutcome, SessionError> {
+    ///
+    /// `byOperator` says a human asked (the popup's End, `session end
+    /// --operator`). Only then does an indefinite End skip the ownership
+    /// gate, exactly like `lid-stay-awake off --operator`: otherwise a script
+    /// refused by the plain `off` could adopt a foreign flag with
+    /// `start --indefinite` and turn it off with `end`. An automatic End
+    /// still releases a flag RunClosed owns.
+    public mutating func end(byOperator: Bool = false) -> Result<SessionEndOutcome, SessionError> {
         guard let session = store.load() else { return .failure(.noSession) }
-        let initiator: LidMutationService.Initiator = session.isIndefinite
+        let initiator: LidMutationService.Initiator = session.isIndefinite && byOperator
             ? .operatorCommand
             : Self.releaseInitiator(for: session, currentBootID: continuous.bootID)
         return .success(release(session, initiator: initiator, clearingRecord: true))

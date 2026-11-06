@@ -336,21 +336,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Hold `beginActivity` while the flag is ours so App Nap cannot stretch
-    /// the guard timer with the lid closed (ADR 023 §5). `idleSystemSleepDisabled`
-    /// is redundant with `disablesleep` and deliberately included: the flag can
-    /// be flipped OFF by someone else, and the assertion is released the moment
-    /// we notice.
+    /// Hold `beginActivity` while a TIMED session runs on a flag that is ours,
+    /// so App Nap cannot stretch the timer that enforces its deadline with
+    /// the lid closed (ADR 023). The activity opts out of App Nap only: it
+    /// never keeps the Mac awake by itself (`AllowingIdleSystemSleep`), so an
+    /// OFF set by someone else takes effect at once even before the next 5 s
+    /// readback ends it. The plain switch (indefinite session) and a paused
+    /// session hold nothing, as before this ADR (ADR 022 unchanged).
     private func syncKeepAwakeActivity() {
-        // The cached readback and ownership (refreshed off the main thread
-        // every 5 s), never a fresh `pmset -g` or file read here: this runs on
-        // every icon refresh.
+        // The cached readback, ownership and session (refreshed off the main
+        // thread every 5 s), never a fresh `pmset -g` or file read here: this
+        // runs on every icon refresh.
         let observed: Bool? = lidCache ?? nil
-        let ours = lidOwnedCache && observed == true
+        let timedSessionRuns = sessionCache.map { !$0.isIndefinite && !$0.isPaused } ?? false
+        let ours = timedSessionRuns && lidOwnedCache && observed == true
         if ours, keepAwakeActivity == nil {
             keepAwakeActivity = ProcessInfo.processInfo.beginActivity(
-                options: [.userInitiated, .idleSystemSleepDisabled],
-                reason: "RunClosed keep-awake session")
+                options: .userInitiatedAllowingIdleSystemSleep,
+                reason: "RunClosed timed keep-awake session")
         } else if !ours, let activity = keepAwakeActivity {
             ProcessInfo.processInfo.endActivity(activity)
             keepAwakeActivity = nil
@@ -748,7 +751,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func endSession(_ sender: Any?) {
         withBusy {
             var service = self.makeSessionService()
-            guard let result = LidWriteLock().tryWithLock({ service.end() }) else {
+            // The click IS the operator (ADR 021).
+            guard let result = LidWriteLock().tryWithLock({ service.end(byOperator: true) }) else {
                 self.lidError = L10n.t("Busy, try again")
                 return
             }

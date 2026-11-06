@@ -496,7 +496,7 @@ let sessionUsage = """
 usage: runclosed session start --for <2h|90m|1h30m>   (bare number = minutes)
        runclosed session start --indefinite          (the plain switch)
        runclosed session extend [30m]
-       runclosed session end
+       runclosed session end [--operator]            (--operator: a human turning off a flag RunClosed did not set)
        runclosed session status [--json]
 """
 
@@ -707,8 +707,15 @@ func cmdSession(_ rest: [String]) -> Int32 {
             return renderSessionError(e)
         }
     case "end":
+        // Same contract as `lid-stay-awake off`: only `--operator` may turn
+        // off a flag RunClosed did not set (ADR 021).
+        guard args.isEmpty || args == ["--operator"] else {
+            FileHandler.err(sessionUsage)
+            return 64
+        }
+        let byOperator = args == ["--operator"]
         var svc = makeSessionService()
-        let result = LidWriteLock().withLock { svc.end() }
+        let result = LidWriteLock().withLock { svc.end(byOperator: byOperator) }
         switch result {
         case .success(let outcome):
             emitJSON([
@@ -720,7 +727,7 @@ func cmdSession(_ rest: [String]) -> Int32 {
             ])
             if outcome == .flagLeftOn {
                 // The record is gone, but B2 kept the flag ON: not ours.
-                FileHandler.err("refused: the session ended, but lid stay-awake is still on and RunClosed does not own it, so it was left on. Turn it off with `lid-stay-awake off --operator`.")
+                FileHandler.err("refused: the session ended, but lid stay-awake is still on and RunClosed does not own it, so it was left on. A human can turn it off with `lid-stay-awake off --operator`.")
                 return 3
             }
             return outcome.isFailure ? 5 : 0

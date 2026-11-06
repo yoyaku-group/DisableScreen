@@ -578,6 +578,31 @@ final class SessionServiceTests: XCTestCase {
         guard case .success(.adoptedRunningFlag) = rig.service.start(for: nil) else {
             return XCTFail("expected adoption")
         }
+        XCTAssertEqual(rig.service.end(byOperator: true), .success(.released))
+        XCTAssertEqual(rig.flag.value, false)
+        XCTAssertNil(rig.sessionStore.load())
+    }
+
+    /// Review round 9: without the operator, End on an indefinite session
+    /// keeps the ownership gate. A script cannot get past `lid-stay-awake
+    /// off`'s refusal by adopting a foreign flag (`start --indefinite`) and
+    /// ending it.
+    func testAutomaticEndOfAnAdoptedForeignFlagLeavesItOn() {
+        var rig = makeRig(flag: true, ownedBoot: nil)
+        guard case .success(.adoptedRunningFlag) = rig.service.start(for: nil) else {
+            return XCTFail("expected adoption")
+        }
+        XCTAssertEqual(rig.service.end(), .success(.flagLeftOn))
+        XCTAssertEqual(rig.flag.value, true, "B2: not ours, never turned off automatically")
+        XCTAssertEqual(rig.lid.calls, [], "no write at all")
+    }
+
+    /// An automatic End still releases a plain switch RunClosed set itself.
+    func testAutomaticEndOfAnOwnedIndefiniteSessionReleasesIt() {
+        var rig = makeRig(flag: false, ownedBoot: nil)
+        guard case .success(.started) = rig.service.start(for: nil) else {
+            return XCTFail("expected a started session")
+        }
         XCTAssertEqual(rig.service.end(), .success(.released))
         XCTAssertEqual(rig.flag.value, false)
         XCTAssertNil(rig.sessionStore.load())
