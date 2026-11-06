@@ -25,7 +25,7 @@ import Foundation
 /// `disablesleep` is a global, invisible flag whose reboot persistence is
 /// UNDOCUMENTED and must be measured (Phase 4 hardware protocol) — the model
 /// must be fail-closed in BOTH observed outcomes until then.
-public struct OwnedLidAssertion {
+public struct OwnedLidAssertion: Sendable {
     public let url: URL
     public let currentBootID: String
 
