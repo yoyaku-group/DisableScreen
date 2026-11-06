@@ -490,4 +490,77 @@ final class LidMutationServiceTests: XCTestCase {
         XCTAssertEqual(r, .failure(.notOwned))
         XCTAssertTrue(fake.calls.isEmpty)
     }
+
+    // MARK: — ADR 023: session recovery initiator
+
+    /// The session's own boot wrote the record and the flag survived the
+    /// restart: the expiry path may release it. This is the deliberate,
+    /// narrow amendment to ADR 015 — leaving the global flag on after the
+    /// deadline is the strictly worse outcome.
+    func testSessionRecoveryOffAllowedOnRecordFromTheSessionBoot() {
+        let url = makeTempURL()
+        OwnedLidAssertion(currentBootID: "boot-OLD", url: url)
+            .save(.init(bootID: "boot-OLD", ownedEnabled: true, referenceState: "on"))
+        let fake = FakeLidAssertion()
+        fake.readbackAfterWrite = false
+        var svc = makeService(prior: true, mutator: fake, storeURL: url, bootID: "boot-NEW")
+        let r = svc.setEnabled(false, initiator: .sessionRecovery(bootID: "boot-OLD"))
+        guard case .success(let op) = r else { return XCTFail("expected success, got \(r)") }
+        XCTAssertEqual(op.state, .verified)
+        XCTAssertEqual(fake.calls, [.init(enabled: false)])
+        let rec = OwnedLidAssertion(currentBootID: "boot-NEW", url: url).load()
+        XCTAssertEqual(rec.bootID, "boot-NEW")
+        XCTAssertFalse(rec.ownedEnabled)
+    }
+
+    /// A record from a boot that never had the session is NOT ours to flip —
+    /// the initiator would otherwise become a general "any old record" escape.
+    func testSessionRecoveryOffRefusedWhenTheRecordIsFromAnotherBoot() {
+        let url = makeTempURL()
+        OwnedLidAssertion(currentBootID: "boot-ELSEWHERE", url: url)
+            .save(.init(bootID: "boot-ELSEWHERE", ownedEnabled: true, referenceState: "on"))
+        let fake = FakeLidAssertion()
+        fake.readbackAfterWrite = false
+        var svc = makeService(prior: true, mutator: fake, storeURL: url, bootID: "boot-NEW")
+        let r = svc.setEnabled(false, initiator: .sessionRecovery(bootID: "boot-OLD"))
+        XCTAssertEqual(r, .failure(.notOwned))
+        XCTAssertTrue(fake.calls.isEmpty)
+    }
+
+    /// No record at all: another tool owns the flag, and the session path must
+    /// not become a way around B2.
+    func testSessionRecoveryOffRefusedWithoutAnyRecord() {
+        let url = makeTempURL()
+        let fake = FakeLidAssertion()
+        fake.readbackAfterWrite = false
+        var svc = makeService(prior: true, mutator: fake, storeURL: url, bootID: "boot-NEW")
+        let r = svc.setEnabled(false, initiator: .sessionRecovery(bootID: "boot-NEW"))
+        XCTAssertEqual(r, .failure(.notOwned))
+        XCTAssertTrue(fake.calls.isEmpty)
+    }
+
+    /// A record that no longer claims ownership is releasable by nobody.
+    func testSessionRecoveryOffRefusedWhenTheRecordDoesNotClaimOwnership() {
+        let url = makeTempURL()
+        OwnedLidAssertion(currentBootID: "boot-OLD", url: url)
+            .save(.init(bootID: "boot-OLD", ownedEnabled: false, referenceState: "off"))
+        let fake = FakeLidAssertion()
+        fake.readbackAfterWrite = false
+        var svc = makeService(prior: true, mutator: fake, storeURL: url, bootID: "boot-NEW")
+        let r = svc.setEnabled(false, initiator: .sessionRecovery(bootID: "boot-OLD"))
+        XCTAssertEqual(r, .failure(.notOwned))
+        XCTAssertTrue(fake.calls.isEmpty)
+    }
+
+    /// B1 still binds the session path: an unknown prior blocks the release.
+    func testSessionRecoveryOffStillRefusedOnUnknownPrior() {
+        let url = makeTempURL()
+        OwnedLidAssertion(currentBootID: "boot-OLD", url: url)
+            .save(.init(bootID: "boot-OLD", ownedEnabled: true, referenceState: "on"))
+        let fake = FakeLidAssertion()
+        var svc = makeService(prior: nil, mutator: fake, storeURL: url, bootID: "boot-NEW")
+        let r = svc.setEnabled(false, initiator: .sessionRecovery(bootID: "boot-OLD"))
+        XCTAssertEqual(r, .failure(.preconditionUnknown))
+        XCTAssertTrue(fake.calls.isEmpty)
+    }
 }

@@ -1,0 +1,301 @@
+import XCTest
+@testable import RunClosedCore
+@testable import RunClosedMacSystem
+@testable import RunClosedPersistence
+
+/// The single shared tick (ADR 023 §5): session expiry runs INSIDE the same
+/// `LidWriteLock` section as the low-battery step, and that section never
+/// nests the lock. Both facts are asserted here rather than described.
+final class SessionGuardTickTests: XCTestCase {
+
+    private final class FakeLid: LidAssertion, @unchecked Sendable {
+        var calls: [Bool] = []
+        let flag: FlagBox
+        init(flag: FlagBox) { self.flag = flag }
+        func setEnabled(_ enabled: Bool) -> OperationResult {
+            calls.append(enabled)
+            flag.value = enabled
+            return OperationResult(requestID: "t", action: .sleepAll, state: .verified,
+                                   nativeRC: 0, readbackOK: true)
+        }
+    }
+
+    private final class FlagBox: @unchecked Sendable {
+        var value: Bool?
+        init(_ v: Bool?) { value = v }
+    }
+
+    private final class FakeSleeper: SystemSleeper, @unchecked Sendable {
+        var count = 0
+        func sleepNow() -> (rc: Int32, output: String?) {
+            count += 1
+            return (0, nil)
+        }
+    }
+
+    private final class ClockBox: ContinuousClock, @unchecked Sendable {
+        var wall: Date
+        var continuous: UInt64
+        let bootID: String
+        init(wall: Date, continuous seconds: Double, bootID: String = "A") {
+            self.wall = wall
+            self.continuous = ContinuousClockTimebase.nanoseconds(fromSeconds: seconds)
+            self.bootID = bootID
+        }
+        var nowContinuousNanoseconds: UInt64 { continuous }
+        func advance(_ seconds: TimeInterval) {
+            wall = wall.addingTimeInterval(seconds)
+            continuous += ContinuousClockTimebase.nanoseconds(fromSeconds: seconds)
+        }
+    }
+
+    private final class BatteryBox: @unchecked Sendable {
+        var state: BatteryState
+        init(_ s: BatteryState) { state = s }
+    }
+
+    private struct Rig {
+        var guardService: LowBatteryGuardService
+        var session: SessionService
+        let lid: FakeLid
+        let sleeper: FakeSleeper
+        let flag: FlagBox
+        let clock: ClockBox
+        let sessionStore: SessionStore
+        let latchStore: LowBatteryLatchStore
+        let battery: BatteryBox
+        let lockURL: URL
+    }
+
+    private let epoch = Date(timeIntervalSince1970: 1_800_000_000)
+
+    private static func reading(_ onBattery: Bool?, _ pct: Int?, _ minutes: Int? = nil) -> BatteryState {
+        BatteryState(onBattery: onBattery, chargePercent: pct, minutesRemaining: minutes,
+                     isCharging: onBattery == false, batteryPresent: true)
+    }
+
+    private func makeRig(flag: Bool?, ownedBoot: String?, battery: BatteryState) -> Rig {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("runclosed-tick-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let lidStore = OwnedLidAssertion(currentBootID: "A",
+                                         url: dir.appendingPathComponent("owned_lid.json"))
+        if let b = ownedBoot {
+            lidStore.save(.init(bootID: b, ownedEnabled: true, referenceState: "on"))
+        }
+        let sessionStore = SessionStore(url: dir.appendingPathComponent("session.json"))
+        let latchStore = LowBatteryLatchStore(url: dir.appendingPathComponent("latch.json"))
+        let flagBox = FlagBox(flag)
+        let lid = FakeLid(flag: flagBox)
+        let sleeper = FakeSleeper()
+        let batteryBox = BatteryBox(battery)
+        let clock = ClockBox(wall: epoch, continuous: 1_000)
+        let lockURL = dir.appendingPathComponent("lid.lock")
+
+        let apply: (Bool, LidMutationService.Initiator) -> Result<OperationResult, LidMutationError> = { enabled, initiator in
+            let rec = lidStore.load()
+            if !enabled, initiator != .operatorCommand,
+               !LidMutationService.mayRelease(initiator: initiator, record: rec, currentBootID: "A") {
+                return .failure(.notOwned)
+            }
+            let prior = flagBox.value
+            guard LidMutationPolicy.canSet(enabled: enabled, observedPrior: prior) else {
+                if prior == nil { return .failure(.preconditionUnknown) }
+                return .failure(.noChangeRequested(target: enabled))
+            }
+            let result = lid.setEnabled(enabled)
+            if result.state == .verified {
+                var next = lidStore.load()
+                next.bootID = "A"
+                next.ownedEnabled = enabled
+                next.referenceState = enabled ? "on" : "off"
+                lidStore.save(next)
+            }
+            return .success(result)
+        }
+
+        let sessionService = SessionService(
+            store: sessionStore, latchStore: latchStore, continuous: clock,
+            wallClock: { clock.wall }, observedFlag: { flagBox.value },
+            ownershipRecord: {
+                let rec = lidStore.load()
+                return (rec.bootID, rec.ownedEnabled)
+            },
+            applyLid: apply)
+
+        let guardService = LowBatteryGuardService(
+            lidService: LidMutationService(bootID: "A", mutator: lid, store: lidStore,
+                                           priorProvider: { flagBox.value }),
+            latchStore: latchStore,
+            batteryProvider: { batteryBox.state },
+            sleeper: sleeper,
+            lock: LidWriteLock(url: lockURL),
+            auditLog: LowBatteryAuditLog(url: dir.appendingPathComponent("audit.jsonl")),
+            sessionService: sessionService)
+
+        return Rig(guardService: guardService, session: sessionService, lid: lid,
+                   sleeper: sleeper, flag: flagBox, clock: clock,
+                   sessionStore: sessionStore, latchStore: latchStore,
+                   battery: batteryBox, lockURL: lockURL)
+    }
+
+    /// A live 2 h session starting from the rig's clock.
+    private func saveSession(_ rig: Rig, duration: TimeInterval = 2 * 3600) {
+        rig.sessionStore.save(KeepAwakeSession(
+            startedAt: epoch,
+            endsAtWall: epoch.addingTimeInterval(duration),
+            endsAtContinuous: ContinuousClockTimebase.nanoseconds(fromSeconds: 1_000 + duration),
+            bootID: "A"))
+    }
+
+    // MARK: — One tick, one lock section
+
+    /// THE regression: the tick holds `LidWriteLock` for its whole body. If the
+    /// session step took the lock again, `withLock` would open a second fd on
+    /// the same file and block forever. A second non-blocking acquisition from
+    /// another fd must also fail while the tick runs.
+    func testTickDoesNotNestTheWriteLock() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 60))
+        saveSession(rig, duration: 60)
+        rig.clock.advance(111)
+
+        // If the tick nests, this call never returns and the test hangs —
+        // exactly the app-freezing deadlock the rule prevents.
+        let outcome = rig.guardService.tick()
+        XCTAssertEqual(outcome.session, .ended(.released))
+
+        // Nothing is still holding the lock afterwards.
+        let other = LidWriteLock(url: rig.lockURL)
+        var ran = false
+        let acquired: Int? = other.tryWithLock { () -> Int in ran = true; return 1 }
+        XCTAssertEqual(acquired, 1)
+        XCTAssertTrue(ran)
+    }
+
+    /// The session expiry and the battery step share ONE section: while the
+    /// tick runs, no other writer can get in.
+    func testTheLockIsExclusiveForTheWholeTick() {
+        var rig = makeRig(flag: false, ownedBoot: nil, battery: Self.reading(false, 60))
+        let lock = rig.guardService.lock
+        let other = LidWriteLock(url: lock.url)
+        final class Seen: @unchecked Sendable { var entered = 0 }
+        let seen = Seen()
+        var insideProbe: Int? = -1
+        _ = lock.withLock { () -> Bool in
+            insideProbe = other.tryWithLock { () -> Int in seen.entered += 1; return 1 }
+            return true
+        }
+        XCTAssertNil(insideProbe, "the section the tick takes excludes every other fd")
+        XCTAssertEqual(seen.entered, 0)
+        XCTAssertEqual(other.tryWithLock { 2 }, 2, "and it is released afterwards")
+    }
+
+    // MARK: — Expiry end order
+
+    func testTickExpiryReleasesAutomaticAndClears() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 60))
+        saveSession(rig, duration: 60)
+        rig.clock.advance(111)
+        let outcome = rig.guardService.tick()
+        XCTAssertEqual(outcome.session, .ended(.released))
+        XCTAssertTrue(outcome.sessionEndedNaturally)
+        XCTAssertEqual(rig.lid.calls, [false], "the session release is the only write")
+        XCTAssertNil(rig.sessionStore.load())
+    }
+
+    func testTickExpiryNotOwnedClearsWithoutMutation() {
+        var rig = makeRig(flag: false, ownedBoot: nil, battery: Self.reading(false, 60))
+        saveSession(rig, duration: 60)
+        rig.clock.advance(111)
+        // No ownership, flag observed OFF: the session has nothing to protect.
+        let outcome = rig.guardService.tick()
+        XCTAssertEqual(outcome.session, .ended(.flagNotOwned))
+        XCTAssertTrue(rig.lid.calls.isEmpty, "no release write on an already-off flag")
+        XCTAssertNil(rig.sessionStore.load())
+    }
+
+    func testTickIsSilentWithNoSession() {
+        var rig = makeRig(flag: false, ownedBoot: nil, battery: Self.reading(false, 60))
+        let outcome = rig.guardService.tick()
+        XCTAssertEqual(outcome.session, .noSession)
+        XCTAssertFalse(outcome.sessionEndedNaturally)
+    }
+
+    // MARK: — Battery release pauses, re-arm resumes
+
+    func testBatteryReleasePausesTheSessionRatherThanEndingIt() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 8))
+        saveSession(rig)
+        let outcome = rig.guardService.tick()
+        XCTAssertEqual(outcome.mutation, .released)
+        XCTAssertEqual(rig.sleeper.count, 1)
+        let paused = rig.sessionStore.load()
+        XCTAssertEqual(paused?.pausedReason, .lowBattery, "the session is paused, not ended")
+        XCTAssertNotNil(paused?.endsAtWall, "the deadline survives a battery episode")
+        XCTAssertTrue(rig.latchStore.load().latch.releasedByGuard)
+    }
+
+    func testRearmResumesAStillValidSession() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 8))
+        saveSession(rig)
+        _ = rig.guardService.tick()                       // release + pause
+        XCTAssertEqual(rig.sessionStore.load()?.pausedReason, .lowBattery)
+
+        rig.battery.state = Self.reading(false, 40)       // back on AC above 15%
+        let outcome = rig.guardService.tick()
+        XCTAssertEqual(outcome.mutation, .rearmed)
+        XCTAssertTrue(outcome.sessionResumed)
+        XCTAssertNil(rig.sessionStore.load()?.pausedReason, "the countdown resumes")
+        XCTAssertEqual(rig.lid.calls, [false, true])
+    }
+
+    /// The re-arm happens only while the session is still valid: once the
+    /// deadline passed, the guard must not bring the flag back on.
+    func testRearmIsWithheldWhenTheSessionIsDue() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 8))
+        saveSession(rig, duration: 600)
+        _ = rig.guardService.tick()                       // release + sleep
+        // The Mac stayed asleep past the deadline, then came back on AC.
+        rig.clock.advance(3 * 3600)
+        rig.battery.state = Self.reading(false, 40)
+        let outcome = rig.guardService.tick()
+        XCTAssertNil(outcome.mutation, "no re-arm for a session that is over")
+        XCTAssertEqual(rig.lid.calls, [false], "the flag stays off")
+        XCTAssertNil(rig.sessionStore.load(), "the due session ended on this tick")
+    }
+
+    func testSessionEndCancelsAPendingRearmAcrossTheTick() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 8))
+        saveSession(rig)
+        _ = rig.guardService.tick()                       // release, latch armed
+        XCTAssertTrue(rig.latchStore.load().latch.releasedByGuard)
+        _ = rig.session.end()                             // the operator presses End
+        XCTAssertFalse(rig.latchStore.load().latch.releasedByGuard)
+        rig.battery.state = Self.reading(false, 60)
+        let outcome = rig.guardService.tick()
+        XCTAssertNil(outcome.mutation)
+        XCTAssertEqual(rig.lid.calls, [false], "no re-arm after End")
+    }
+
+    // MARK: — ADR 022 unchanged without a session
+
+    func testTickWithoutASessionKeepsADR022Behaviour() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 9, 8))
+        let outcome = rig.guardService.tick()
+        XCTAssertEqual(outcome.mutation, .released)
+        XCTAssertEqual(outcome.session, .noSession)
+        XCTAssertEqual(rig.sleeper.count, 1)
+        XCTAssertTrue(rig.latchStore.load().latch.releasedByGuard)
+        XCTAssertFalse(rig.sessionStore.exists, "no session file is invented")
+    }
+
+    func testTickWithoutASessionStillRearms() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 8))
+        _ = rig.guardService.tick()
+        rig.battery.state = Self.reading(false, 40)
+        let outcome = rig.guardService.tick()
+        XCTAssertEqual(outcome.mutation, .rearmed)
+        XCTAssertFalse(outcome.sessionResumed, "nothing to resume without a session")
+        XCTAssertEqual(rig.lid.calls, [false, true])
+    }
+}
