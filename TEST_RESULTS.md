@@ -1053,3 +1053,21 @@ Le second est une limite d'architecture, consignée et non prétendue corrigée 
 
 Suite : **453/453**, 0 warning. Bundle reconstruit, `plutil -lint` OK, `codesign --verify --strict`
 OK.
+
+## Relecture tour 14 — un register explicite qui ne voit pas l'agent n'est pas un succès (2026-11-07)
+
+- `Sources/RunClosedHelperSupport/BackstopRegistration.swift` — `registerAndReport()` traitait
+  `lastOperationSucceeded == nil` comme un succès. Ce `nil` est ce que `registerIfNeeded` rapporte
+  quand le statut est `.unknown` (« ce process ne voit pas l'agent »), état dans lequel il ne tente
+  délibérément AUCUN enregistrement. Effacer l'opt-out et sortir en 0 disait donc à l'opérateur que
+  le filet était rétabli alors que rien n'avait été fait — le seul test d'échec du CLI étant
+  `== false`, `nil` passait pour 0. Une preuve positive est désormais exigée : soit l'appel a réussi,
+  soit le statut lit `enabled`/`requiresApproval`.
+
+  Test : `testAnExplicitRegisterThatCannotSeeTheAgentIsNotASuccess`. **Contre-épreuve mesurée** —
+  sans le correctif, il échoue sur les deux assertions (`nil` accepté comme succès, opt-out écrasé).
+
+Le second WARN (chemins de diagnostic liés au compte de build) est la limite consignée au tour 13,
+non corrigée et documentée dans le plist, PROGRESS, cet onglet et l'ADR.
+
+Suite : **454/454**, 0 warning.

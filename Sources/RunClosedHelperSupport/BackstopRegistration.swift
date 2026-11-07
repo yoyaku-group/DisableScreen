@@ -323,9 +323,25 @@ public struct BackstopLifecycleService {
     /// "off", so the next app launch would silently register the agent they had
     /// turned off, for an operation they were told had failed. On failure the
     /// opt-out stays, and `lastOperationSucceeded: false` says so.
+    ///
+    /// `lastOperationSucceeded == nil` is NOT a success here. It is what
+    /// `registerIfNeeded` reports when the status is `.unknown` — "this process
+    /// cannot see the agent" — a state in which it deliberately attempts no
+    /// registration at all. Treating that as success cleared the opt-out and
+    /// exited 0, telling the operator the net was back while nothing had been
+    /// done; the CLI's only failure test is `== false`, so nil read as 0 (review
+    /// round 14). Positive evidence is required: either the registration call
+    /// reported success, or the status itself now reads registered/awaiting
+    /// approval (the "nothing to do" case).
     public func registerAndReport() -> Report {
         let r = registerIfNeeded()
         guard r.lastOperationSucceeded != false else { return r }
+        guard r.lastOperationSucceeded == true
+                || r.status == .enabled || r.status == .requiresApproval else {
+            var unknown = r
+            unknown.lastOperationSucceeded = false
+            return unknown
+        }
         registrar.setOperatorOptedOut(false)
         // Re-read so the returned report reflects the state it now reports:
         // a report built before the clear would still say "opted out" about

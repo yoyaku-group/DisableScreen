@@ -70,6 +70,25 @@ final class BackstopRegistrationTests: XCTestCase {
     /// it overrides a revocation — and it clears the opt-out only when the
     /// registration actually happened: a failed register that also erased the
     /// recorded "off" would silently re-register on the next launch.
+    /// Review round 14 (WARNING): `.unknown` means "this process cannot see the
+    /// agent", and `registerIfNeeded` deliberately attempts NOTHING there. That
+    /// left `lastOperationSucceeded` at `nil`, which `registerAndReport` read as
+    /// success: it cleared the operator's opt-out and the CLI exited 0, telling
+    /// them the net was back while nothing had been done.
+    func testAnExplicitRegisterThatCannotSeeTheAgentIsNotASuccess() {
+        let fake = FakeRegistrar()
+        fake.current = .unknown
+        fake.optedOut = true
+        let svc = BackstopLifecycleService(registrar: fake)
+        let r = svc.registerAndReport()
+        XCTAssertEqual(fake.registerCalls, 0, "an unreadable probe proves nothing to register against")
+        XCTAssertEqual(r.lastOperationSucceeded, false,
+                       "nil must not read as a success for an explicit register")
+        XCTAssertTrue(fake.optedOut,
+                      "and it must not erase the operator's recorded off")
+    }
+
+    /// A failed explicit register keeps the opt-out.
     func testAFailedExplicitRegisterKeepsTheOptOut() {
         let fake = FakeRegistrar()
         fake.current = .notRegistered
