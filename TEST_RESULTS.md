@@ -1165,7 +1165,7 @@ $ arch -arm64 swift build --build-tests
 
 ```
 $ arch -arm64 swift test
-cas de test passés : 560
+cas de test passés : 561
 suites en échec    : 0
 ```
 
@@ -1173,7 +1173,7 @@ Répartition des tests ajoutés par ce lot :
 
 | Fichier | Tests | Ce qu'ils prouvent |
 |---|---|---|
-| `tests/RunClosedCoreTests/ThermalGraceHoldTests.swift` | 6 | Une interruption (capot rouvert, écran branché, propriété perdue) remet le compteur à zéro sans ré-alerter ; le scénario 5 min fermé / 15 min ouvert / refermé ne relâche pas ; l'avertissement n'est pas répété ; le refroidissement réinitialise tout le latch |
+| `tests/RunClosedCoreTests/ThermalGraceHoldTests.swift` | 7 | Une interruption (capot rouvert, écran branché, propriété perdue) remet le compteur à zéro sans ré-alerter ; le scénario 5 min fermé / 15 min ouvert / refermé ne relâche pas ; l'avertissement n'est pas répété ; le refroidissement réinitialise tout le latch |
 | `tests/RunClosedCoreTests/ThermalPolicyTests.swift` | 28 | La grille complète ; 9 min ne relâche pas / 10 min relâche ; borne inclusive ; retour à `fair` et à `nominal` qui remettent le compteur à zéro ; les trois refus à chaque sévérité ; INCONNU ≠ OFF ; l'horloge qui ne démarre qu'à l'enceinte ; un `seriousSince` d'un autre boot écarté ; deux balayages exhaustifs (1 296 combinaisons sans `enable`, et aucun relâchement demandé hors flag ON + à nous + capot fermé + aucun écran) |
 | `tests/RunClosedMacSystemTests/ThermalGuardServiceTests.swift` | 28 | Relâchement critique puis sommeil ; `serious` soutenu ; les refus sans aucune écriture (asserté sur `FakeLid.calls`) ; `nil` qui refuse ; échec qui ne marque pas `releasedForHeat` ; latch qui survit à un redémarrage sans ré-alerter ni redémarrer le décompte ; `releasedForHeat` qui survit puis s'efface au refroidissement ; balayage sans `enable` ; pas de `LidWriteLock` emboîté (échec nommé après 10 s) ; section tenue pendant tout le tick ; coupe-circuit |
 | `tests/RunClosedMacSystemTests/RecoveryBackstopServiceTests.swift` | +16 | Chaleur critique avec session indéfinie ; aucune dette de réarmement laissée ; l'étape batterie qui ne tourne pas sur un tick chaleur ; les deux switches indépendants dans les deux sens ; les trois refus ; ligne d'audit `thermalRelease` ; échec ⇒ exit 5 ; minute nominale gratuite qui n'écrit pas le latch ; balayage sans `enable` ; étape dans la section verrouillée du backstop |

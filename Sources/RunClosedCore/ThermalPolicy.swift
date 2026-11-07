@@ -236,7 +236,16 @@ public enum ThermalPolicy {
 
         // A hot machine with the flag OFF is already as cool as it can get:
         // macOS's own thermal management sleeps and throttles freely.
+        //
+        // It also STOPS the sustained-heat clock, and that is not a detail: the
+        // flag being off means the condition this rule exists for (we are
+        // holding a hot machine awake) is over, so the ten minutes must
+        // restart if it comes back. Without the clear, a session released for
+        // heat, re-armed on AC, and still hot would be released again
+        // immediately instead of getting its own grace period.
         if input.lidFlag == false {
+            next.seriousSince = nil
+            next.seriousSinceBootID = nil
             return (Decision(action: .none, reason: .lidFlagOff, state: input.state), next)
         }
         // B1: cannot release a flag we cannot observe.

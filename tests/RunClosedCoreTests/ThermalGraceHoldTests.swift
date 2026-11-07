@@ -86,6 +86,29 @@ final class ThermalGraceHoldTests: XCTestCase {
         XCTAssertEqual(foreign.decision.action, .none)
     }
 
+    /// The flag going OFF is the end of the condition this rule exists for: it
+    /// stops the clock too, so a flag released for heat, re-armed on AC and
+    /// still hot gets its own ten minutes rather than being released instantly.
+    func testTheClockStopsWhenTheFlagGoesOff() {
+        let start = ThermalPolicy.step(input(true, at: t0), latch: ThermalPolicy.Latch())
+        XCTAssertEqual(start.latch.seriousSince, t0)
+
+        let released = ThermalPolicy.step(
+            ThermalPolicy.Input(state: .serious, lidClosed: true,
+                                externalDisplayConnected: false, lidFlag: false,
+                                ownership: .ownedThisBoot, monotonic: t0 + 5 * 60,
+                                bootID: "A"),
+            latch: start.latch)
+        XCTAssertEqual(released.decision.reason, .lidFlagOff)
+        XCTAssertNil(released.latch.seriousSince, "the clock stops while the flag is off")
+
+        // The flag comes back ON five minutes later (a battery re-arm): the
+        // clock restarts HERE, it does not resume the old one.
+        let back = ThermalPolicy.step(input(true, at: t0 + 10 * 60), latch: released.latch)
+        XCTAssertEqual(back.latch.seriousSince, t0 + 10 * 60)
+        XCTAssertEqual(back.decision.action, .none, "not an instant release")
+    }
+
     /// The warning latch is NOT cleared by an interruption: the operator has
     /// already been told about this episode, and re-alerting on every lid
     /// flutter would be the flood the latch exists to prevent.
