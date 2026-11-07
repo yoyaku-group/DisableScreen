@@ -485,13 +485,24 @@ public struct LowBatteryGuardService {
                                               protective: Bool) {
         if protective {
             guard !record.latch.protectiveSleepTried else { return }
-            record.latch.protectiveSleepTried = true
         } else {
             guard !record.latch.failedReleaseSleepTried else { return }
             record.latch.failedReleaseSleepTried = true
             outcome.shouldNotify = true
         }
         attemptSleep(&outcome)
+        // The protective latch records a sleep the Mac actually TOOK, not one
+        // that was merely requested. `pmset sleepnow` can refuse — another
+        // process holding the display, a wedged power daemon — and consuming
+        // the latch on a failed attempt means the Mac is never asked again for
+        // the rest of the discharge episode: exactly the "awake until the
+        // battery dies" class this backstop exists to close (review round 17).
+        // A failed protective attempt therefore retries next minute; that is a
+        // real attempt to protect, not a log loop (the audit line for the
+        // repeating release failure is already deduped by key).
+        if protective, outcome.sleepRC == 0 {
+            record.latch.protectiveSleepTried = true
+        }
     }
 
     private func attemptSleep(_ outcome: inout TickOutcome) {

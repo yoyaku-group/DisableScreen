@@ -35,9 +35,12 @@ final class RecoveryBackstopServiceTests: XCTestCase {
 
     private final class FakeSleeper: SystemSleeper, @unchecked Sendable {
         var count = 0
+        /// What `pmset sleepnow` answers. A real call can refuse (another
+        /// process holding the display, a wedged power daemon).
+        var rc: Int32 = 0
         func sleepNow() -> (rc: Int32, output: String?) {
             count += 1
-            return (0, nil)
+            return (rc, nil)
         }
     }
 
@@ -1109,6 +1112,42 @@ final class RecoveryBackstopServiceTests: XCTestCase {
         XCTAssertEqual(rig.auditLog.load().filter {
             $0.step == "sessionExpiry" && $0.outcome == "retained"
         }.count, 2)
+    }
+
+    /// Review round 17 (WARNING): the protective sleep latch recorded a sleep
+    /// that was REQUESTED, not one the Mac took.
+    ///
+    /// `pmset sleepnow` can refuse, and consuming the latch on a failed attempt
+    /// meant the Mac was never asked again for the rest of the discharge
+    /// episode — exactly the "awake until the battery dies" class this backstop
+    /// exists to close. A failed attempt must retry next minute.
+    func testAFailedProtectiveSleepIsNotTreatedAsDone() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 6))
+        rig.lid.failWrites = true
+        rig.sleeper.rc = 1   // pmset refused
+
+        _ = rig.service.run()
+        XCTAssertEqual(rig.sleeper.count, 1)
+        XCTAssertFalse(rig.latchStore.load().latch.protectiveSleepTried,
+                       "a refused sleep must not consume the once-per-episode latch")
+
+        // Next minute: the failure persists, so the sleep is attempted again.
+        rig.clock.advance(60)
+        _ = rig.service.run()
+        XCTAssertEqual(rig.sleeper.count, 2,
+                       "the Mac must keep being asked to sleep while the battery is critical")
+
+        // Once a sleep actually succeeds, the episode is done.
+        rig.sleeper.rc = 0
+        rig.clock.advance(60)
+        _ = rig.service.run()
+        XCTAssertEqual(rig.sleeper.count, 3)
+        XCTAssertTrue(rig.latchStore.load().latch.protectiveSleepTried,
+                      "a sleep the Mac took IS the episode's end")
+
+        rig.clock.advance(60)
+        _ = rig.service.run()
+        XCTAssertEqual(rig.sleeper.count, 3, "and it is not re-attempted")
     }
 
     // MARK: — Exit codes

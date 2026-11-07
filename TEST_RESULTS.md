@@ -1127,3 +1127,22 @@ l'agent sous son propre home.
 
 Suite : **457/457**, 0 warning. Bundle reconstruit, `plutil -lint` OK, `codesign --verify --strict`
 OK, aucune clé de log ni `__HOME__` dans le plist livré.
+
+## Relecture tour 17 — un sommeil refusé n'est pas un sommeil pris (2026-11-07)
+
+- `Sources/RunClosedMacSystem/LowBatteryGuardService.swift` — le verrou de sommeil protecteur
+  enregistrait un sommeil DEMANDÉ, pas un sommeil PRIS. `pmset sleepnow` peut refuser (un autre
+  process tient l'écran, un démon d'alimentation bloqué), et consommer le verrou sur un échec
+  signifiait que le Mac n'était plus jamais invité à dormir du reste de l'épisode de décharge —
+  exactement la classe « éveillé jusqu'à ce que la batterie meure » que ce filet existe pour fermer,
+  et l'incident du 2026-10-14. Le verrou n'est posé que si `sleepRC == 0`.
+
+  Une tentative refusée réessaie donc à la minute suivante. C'est une vraie tentative de protection,
+  pas une boucle de log : la ligne d'audit du relâchement qui se répète est déjà dédoublonnée par clé
+  (tours 9 et 15).
+
+  Test : `testAFailedProtectiveSleepIsNotTreatedAsDone` (refus → verrou non posé → nouvelle tentative
+  la minute suivante → succès → verrou posé → plus de tentative). **Contre-épreuve mesurée** — sans
+  le correctif, il échoue sur les QUATRE assertions : un seul appel au sommeil pour tout l'épisode.
+
+Suite : **458/458**, 0 warning.
