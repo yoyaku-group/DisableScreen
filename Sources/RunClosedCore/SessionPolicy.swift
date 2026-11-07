@@ -255,6 +255,12 @@ public enum SessionPolicy {
     }
 
     /// `"Until 14:30 · 2 h 41 left"` — the lid row's session line.
+    ///
+    /// A session can last up to 7 days, so a deadline that is NOT today also
+    /// names the day (`"Until Tue 14:30 · …"`): "Until 14:30" on a Tuesday
+    /// deadline would read as "today" and is a claim the CLI should not make.
+    /// The popup has always done this; this is the same rule for
+    /// `session status --json`'s `rowLabel`.
     public static func rowLabel(
         _ session: KeepAwakeSession,
         now: Now,
@@ -262,10 +268,13 @@ public enum SessionPolicy {
         locale: Locale = .current
     ) -> String? {
         guard let endsAtWall = session.endsAtWall else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        let sameDay = calendar.isDate(endsAtWall, inSameDayAs: now.wall)
         let formatter = DateFormatter()
         formatter.timeZone = timeZone
         formatter.locale = locale
-        formatter.setLocalizedDateFormatFromTemplate("HH:mm")
+        formatter.setLocalizedDateFormatFromTemplate(sameDay ? "HH:mm" : "EEE HH:mm")
         let until = formatter.string(from: endsAtWall)
         guard let left = remainingLabel(session, now: now) else {
             return "Until \(until)"

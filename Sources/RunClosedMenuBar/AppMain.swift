@@ -676,8 +676,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         existing: sessionStore.load(), now: now))
                 }
                 switch r {
-                case .success where target:
+                case .success(let op) where target && op.state == .verified:
                     switchedOn()
+                case .success(let op) where target:
+                    // The write reported success but its readback did not
+                    // confirm the flag ON (`pending`/`unknown`/`conflict`): for
+                    // the session record this is a FAILURE, like the `.failure`
+                    // branch below. Recording an indefinite session here would
+                    // put a deadline-less "running session" on every surface
+                    // for a flag that is not observed ON — and the record is
+                    // what `status`, the popup and the log read.
+                    FileHandle.standardError.write(Data(
+                        "[RunClosed] lid -> on: state=\(op.state.rawValue) readback not verified; no session recorded\n".utf8))
                 case .success:
                     sessionStore.clear()
                 case .failure(.noChangeRequested(let requested)) where requested:

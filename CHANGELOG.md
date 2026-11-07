@@ -5,6 +5,18 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- ADR 023 follow-ups. Turning the lid switch on now records an indefinite
+  session only when the read-back verified the flag ON: a write that reported
+  success without confirming it used to leave a deadline-less "running
+  session" on every surface for a flag nobody observed on, so it now behaves as
+  a failure for the session record. `runclosed session status --json` names the
+  day when the deadline is not today ("Until Tue 14:30"), as the popup already
+  did — a 7-day session read as "Until 14:30" claims today. The
+  `SessionService.end(byOperator:)` documentation now matches the code: an
+  indefinite End is an operator command only when `byOperator` is true.
+
 ### Added
 
 - Timed keep-awake sessions (ADR 023). The lid stay-awake switch used to have

@@ -228,23 +228,24 @@ public struct SessionService {
         return .success(next)
     }
 
-    /// Operator pressed End (or ran `session end`).
+    /// End the running session: the popup's End button, `session end`, or
+    /// `session end --operator`.
     ///
-    /// A TIMED session ends through the same ownership gate as expiry, so End
-    /// never turns off a flag another tool owns (a timed start refuses a
-    /// foreign flag in the first place). An INDEFINITE session is the plain
-    /// switch, which may have adopted a flag another tool set: End is then the
-    /// switch OFF, an operator command (ADR 021). Otherwise the record would
-    /// go while the Mac stays awake with no deadline. A timed End refused
-    /// with the flag still ON reports `.flagLeftOn`, so the popup and the CLI
-    /// tell the operator to turn it off with the switch.
+    /// A TIMED session always ends through the same ownership gate as expiry,
+    /// so End never turns off a flag another tool owns (a timed start refuses
+    /// a foreign flag in the first place). A timed End refused with the flag
+    /// still ON reports `.flagLeftOn`, so the popup and the CLI tell the
+    /// operator to turn it off with the switch.
     ///
-    /// `byOperator` says a human asked (the popup's End, `session end
-    /// --operator`). Only then does an indefinite End skip the ownership
-    /// gate, exactly like `lid-stay-awake off --operator`: otherwise a script
-    /// refused by the plain `off` could adopt a foreign flag with
-    /// `start --indefinite` and turn it off with `end`. An automatic End
-    /// still releases a flag RunClosed owns.
+    /// An INDEFINITE session is the plain switch, which may have adopted a
+    /// flag another tool set. `byOperator` says a human asked (the popup's End,
+    /// `session end --operator`): ONLY THEN does an indefinite End run as
+    /// `.operatorCommand` and skip the ownership gate (ADR 021) — otherwise the
+    /// record would go while the Mac stays awake with no deadline. The reason
+    /// is the same as for `lid-stay-awake off`: without it a script refused by
+    /// the plain `off` could adopt a foreign flag with `start --indefinite` and
+    /// turn it off with `end`. An AUTOMATIC End (`byOperator: false`) is not a
+    /// human and still releases only a flag RunClosed owns.
     public mutating func end(byOperator: Bool = false) -> Result<SessionEndOutcome, SessionError> {
         guard let session = store.load() else { return .failure(.noSession) }
         let initiator: LidMutationService.Initiator = session.isIndefinite && byOperator

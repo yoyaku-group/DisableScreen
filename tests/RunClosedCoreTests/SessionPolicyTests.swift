@@ -274,6 +274,38 @@ final class SessionPolicyTests: XCTestCase {
         XCTAssertTrue(label!.hasSuffix("· 2 h 41 left"), label!)
     }
 
+    /// ADR 024 follow-up: a 7-day session can end on another DAY. "Until 14:30"
+    /// would then be a false claim (it reads as today), so the day is named —
+    /// the rule the popup has always used.
+    func testRowLabelNamesTheDayWhenTheDeadlineIsNotToday() {
+        let paris = TimeZone(identifier: "Europe/Paris")!
+        let en = Locale(identifier: "en_GB")
+        // A deadline two days out: the epoch instant is mid-afternoon in Paris.
+        let session = timed(2 * 24 * 3600 + 1800)
+        let label = SessionPolicy.rowLabel(session, now: now(continuousSeconds: 1_000),
+                                           timeZone: paris, locale: en)
+        let unwrapped = try! XCTUnwrap(label)
+        XCTAssertTrue(unwrapped.hasPrefix("Until "), unwrapped)
+        // "Until Sat 14:30 · …" — a three-letter weekday, then the time.
+        let until = unwrapped.replacingOccurrences(of: "Until ", with: "")
+            .components(separatedBy: " · ")[0]
+        XCTAssertEqual(until.split(separator: " ").count, 2,
+                       "weekday + time, not a bare time: \(until)")
+    }
+
+    /// Same day: no weekday, exactly as before (no regression in the popup's
+    /// wording for the ordinary 1 h / 2 h case).
+    func testRowLabelOmitsTheDayWhenTheDeadlineIsToday() {
+        let session = timed(2 * 3600)
+        let label = SessionPolicy.rowLabel(session, now: now(continuousSeconds: 1_000),
+                                           timeZone: TimeZone(identifier: "Europe/Paris")!,
+                                           locale: Locale(identifier: "en_GB"))
+        let unwrapped = try! XCTUnwrap(label)
+        let until = unwrapped.replacingOccurrences(of: "Until ", with: "")
+            .components(separatedBy: " · ")[0]
+        XCTAssertFalse(until.contains(" "), "same-day label stays a bare time: \(until)")
+    }
+
     // MARK: — Duration parsing
 
     func testDurationParsing() {
