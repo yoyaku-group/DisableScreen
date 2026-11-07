@@ -229,6 +229,86 @@ final class RecoveryPolicyTests: XCTestCase {
         }
     }
 
+    // MARK: — Proof of execution (ADR 024 §5)
+
+    private let nowDate = Date(timeIntervalSince1970: 1_800_000_000)
+
+    private func freshness(at offset: TimeInterval,
+                          bootID: String = Boot.now,
+                          exitCode: Int32 = 0,
+                          now: Date? = nil) -> RecoveryPolicy.RunFreshness {
+        RecoveryPolicy.runFreshness(
+            heartbeat: (at: nowDate.addingTimeInterval(offset), bootID: bootID, exitCode: exitCode),
+            currentBootID: Boot.now,
+            now: now ?? nowDate)
+    }
+
+    /// A run one minute ago on this boot is proof the agent fires.
+    func testAFreshRunOnThisBootEnforces() {
+        let f = freshness(at: -60)
+        XCTAssertTrue(f.isEnforcing)
+        XCTAssertEqual(f, .fresh(ageSeconds: 60))
+    }
+
+    /// No heartbeat at all: the agent has never proven it runs.
+    func testAMissingHeartbeatDoesNotEnforce() {
+        let f = RecoveryPolicy.runFreshness(heartbeat: nil, currentBootID: Boot.now, now: nowDate)
+        XCTAssertEqual(f, .never)
+        XCTAssertFalse(f.isEnforcing)
+        XCTAssertFalse(f.refusalHint.isEmpty)
+    }
+
+    /// Registered and approved proves registration, not execution.
+    func testAnotherBootsHeartbeatDoesNotEnforce() {
+        let f = freshness(at: -10, bootID: Boot.old)
+        XCTAssertEqual(f, .otherBoot(recordBootID: Boot.old))
+        XCTAssertFalse(f.isEnforcing)
+    }
+
+    /// Exactly at the limit is fresh; a second past it is not.
+    func testStalenessBoundaryIsInclusiveAndConservative() {
+        XCTAssertTrue(freshness(at: -RecoveryPolicy.maximumHeartbeatAge).isEnforcing)
+        XCTAssertFalse(freshness(at: -RecoveryPolicy.maximumHeartbeatAge - 1).isEnforcing)
+    }
+
+    /// A Mac back from a long sleep wakes with a stale heartbeat: refuse until
+    /// the next launchd fire restores it (conservative, and the point of the
+    /// rule).
+    func testAStaleHeartbeatAfterAWakeDoesNotEnforce() {
+        let f = freshness(at: -6 * 3600)
+        guard case .stale = f else { return XCTFail("expected stale, got \(f)") }
+        XCTAssertFalse(f.isEnforcing)
+    }
+
+    /// A failing backstop is not an enforcer, however recent its run.
+    func testALastRunThatFailedDoesNotEnforce() {
+        let f = freshness(at: -5, exitCode: RecoveryPolicy.backendFailureExitCode)
+        XCTAssertEqual(f, .lastRunFailed(exitCode: 5))
+        XCTAssertFalse(f.isEnforcing)
+    }
+
+    /// A clock that moved backwards is not evidence of a recent run.
+    func testAFutureTimestampDoesNotEnforce() {
+        let f = freshness(at: +600)
+        guard case .stale = f else { return XCTFail("a future timestamp must not read as fresh, got \(f)") }
+        XCTAssertFalse(f.isEnforcing)
+    }
+
+    /// The refusal hint names the actual situation — the operator's next move
+    /// differs per case.
+    func testEveryNonFreshCaseExplainsItself() {
+        let cases: [RecoveryPolicy.RunFreshness] = [
+            .never,
+            .otherBoot(recordBootID: "x"),
+            .stale(ageSeconds: 400),
+            .lastRunFailed(exitCode: 5),
+        ]
+        for c in cases {
+            XCTAssertFalse(c.refusalHint.isEmpty, "\(c) must say why")
+        }
+        XCTAssertTrue(RecoveryPolicy.RunFreshness.fresh(ageSeconds: 10).refusalHint.isEmpty)
+    }
+
     /// The plan's verdict follows the supplied reading, and stays `.unread` on
     /// the file-only fast path (no battery read).
     func testPlanCarriesTheBatteryVerdictWhenAReadingIsSupplied() {

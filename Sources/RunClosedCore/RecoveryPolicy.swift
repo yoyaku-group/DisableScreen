@@ -149,4 +149,90 @@ public enum RecoveryPolicy {
             return .noRelease(decision.reason)
         }
     }
+
+    // MARK: — Proof the agent actually RUNS (ADR 024 §5)
+
+    /// The exit code a failing backstop run reports (5 in
+    /// `RecoveryBackstopService.ExitCode`). Kept here because the freshness
+    /// rule needs it and Core cannot depend on MacSystem.
+    public static let backendFailureExitCode: Int32 = 5
+
+    /// A registration state is not proof of execution. `SMAppService` reporting
+    /// `enabled` means the agent is registered and approved; it says nothing
+    /// about whether a single protective minute ever ran — an approved agent
+    /// whose `BundleProgram` does not resolve still reads `enabled`.
+    ///
+    /// The CLI may only treat the backstop as the thing that will end a timed
+    /// session when a run is PROVEN recent on the CURRENT boot. Anything the
+    /// file cannot prove is "not running" — the conservative answer, and the
+    /// one that keeps ADR 023's refusal intact rather than trading it for a
+    /// silent unenforced deadline.
+    public enum RunFreshness: Equatable, Sendable {
+        /// No heartbeat file, or it does not decode.
+        case never
+        /// The heartbeat was written by another boot: it proves nothing about
+        /// whether launchd will fire on this one.
+        case otherBoot(recordBootID: String)
+        /// The last run finished more than `maximumAge` ago. Deliberately
+        /// conservative: a Mac that slept for hours wakes with a stale
+        /// heartbeat, and launchd fires the missed interval on wake, so the
+        /// next minute restores the proof. Until then, refuse.
+        case stale(ageSeconds: TimeInterval)
+        /// The last run FAILED. A backstop that cannot do its job is not an
+        /// enforcer, whatever its registration says.
+        case lastRunFailed(exitCode: Int32)
+        /// A run finished recently on this boot and did not fail.
+        case fresh(ageSeconds: TimeInterval)
+
+        /// Only a fresh, successful run makes the agent an enforcer.
+        public var isEnforcing: Bool {
+            if case .fresh = self { return true }
+            return false
+        }
+
+        /// The precise cause, for the CLI refusal message — a generic "not
+        /// running" would hide which of the five situations the operator is in.
+        public var refusalHint: String {
+            switch self {
+            case .fresh: return ""
+            case .never: return "it has never run"
+            case .otherBoot: return "its last recorded run was before this restart"
+            case .stale(let age):
+                return "its last run was \(Int(age)) s ago (more than \(Int(RecoveryPolicy.maximumHeartbeatAge)) s)"
+            case .lastRunFailed(let code): return "its last run failed (exit \(code))"
+            }
+        }
+    }
+
+    /// How old a heartbeat may be and still count as proof. Three minutes:
+    /// three missed 60 s intervals, which tolerates a busy machine and one
+    /// dropped launchd fire without ever being true of an agent that is not
+    /// running at all.
+    public static let maximumHeartbeatAge: TimeInterval = 180
+
+    /// Grade a heartbeat. Pure, so every case is a test rather than a claim.
+    ///
+    /// A timestamp in the FUTURE is not fresh: it means the wall clock moved
+    /// backwards, so the age is not evidence of anything.
+    public static func runFreshness(
+        heartbeat: (at: Date, bootID: String, exitCode: Int32)?,
+        currentBootID: String,
+        now: Date,
+        maximumAge: TimeInterval = maximumHeartbeatAge
+    ) -> RunFreshness {
+        guard let heartbeat else { return .never }
+        guard heartbeat.bootID == currentBootID else {
+            return .otherBoot(recordBootID: heartbeat.bootID)
+        }
+        // Checked before the age: a failed run is not made good by recency.
+        guard heartbeat.exitCode != backendFailureExitCode else {
+            return .lastRunFailed(exitCode: heartbeat.exitCode)
+        }
+        let age = now.timeIntervalSince(heartbeat.at)
+        // A negative age means the wall clock moved backwards. That is not
+        // evidence of a recent run, so it is graded stale rather than fresh.
+        guard age >= 0 else { return .stale(ageSeconds: age) }
+        guard age <= maximumAge else { return .stale(ageSeconds: age) }
+        return .fresh(ageSeconds: age)
+    }
 }

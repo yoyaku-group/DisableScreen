@@ -188,16 +188,6 @@ public struct LowBatteryGuardService {
         return lock.withLock { lockedTick() }
     }
 
-    /// Non-blocking tick (ADR 024): `nil` when another writer holds the lock.
-    ///
-    /// The recovery backstop runs every 60 s from launchd and must never queue
-    /// behind the app or a CLI — a minute spent waiting is a minute where
-    /// launchd's own retry would have been better. The caller exits 75 and
-    /// tries again next interval.
-    public mutating func tryTick() -> TickOutcome? {
-        return lock.tryWithLock { lockedTick() }
-    }
-
     /// What a protective-only caller did. There is no `rearmed` case: the
     /// re-arm is the app's, so a decision that asks for one is WITHHELD and
     /// reported as such.

@@ -31,8 +31,16 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   unregister`. `session start --for` and `session extend` are now allowed while
   the app is closed, provided the agent reports `enabled`; a merely pending
   approval enforces nothing and keeps the refusal, whose message names both
-  ways out. Known limit, stated in the README: nothing protects the Mac while
-  no user is logged in.
+  ways out. Being registered is also not enough: every run writes
+  `backstop_heartbeat.json`, and the CLI only treats the agent as an enforcer
+  when that record proves a successful run on this boot within the last 3
+  minutes — an approved agent whose program never actually runs (a
+  `BundleProgram` that does not resolve) therefore keeps the refusal instead of
+  letting a deadline go unenforced. A run that failed, a heartbeat from before
+  a restart, or a stale one after a wake all refuse; `backstop status`,
+  `status` and `doctor` report `lastRunAt`, `lastExitCode`, `recentRun` and
+  `enforcing`. Known limit, stated in the README: nothing protects the Mac
+  while no user is logged in.
 
 ### Fixed
 

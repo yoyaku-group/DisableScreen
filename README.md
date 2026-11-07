@@ -70,7 +70,7 @@ SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
 Test:
 
 ```bash
-swift test        # 391 tests across Core / MacSystem / Persistence / UI logic
+swift test        # 422 tests across Core / MacSystem / Persistence / UI logic
 ```
 
 ## Install
@@ -108,6 +108,7 @@ session.json            # current keep-awake session: id, boot, deadlines, pause
 low_battery_guard.json  # guard latch (notifications, pending re-arm)
 low_battery_audit.jsonl # one line per low-battery mutation
 recovery_audit.jsonl    # one line per recovery-backstop action or failure (never per no-op)
+backstop_heartbeat.json # proof the recovery agent RUNS: last run time, boot, exit code
 lid.lock                # cross-process lock serialising every lid writer
 app.lock                # held while the menu-bar app runs (it enforces session deadlines)
 ```
@@ -151,7 +152,10 @@ flag), so the invariants are the interesting part:
   idempotent and read-back confirmed. The agent is registered through
   `SMAppService.agent(plistName:)`, so it dies with the bundle; approval
   happens in System Settings → Login Items, and the popup says so with a
-  one-click link while it is pending (ADR 024).
+  one-click link while it is pending. Being approved is not enough for the CLI
+  to rely on it: every run writes `backstop_heartbeat.json`, and a timed
+  session only starts (or extends) with the app closed when that record proves
+  a successful run on this boot within the last 3 minutes (ADR 024).
 
 ## Repository layout
 

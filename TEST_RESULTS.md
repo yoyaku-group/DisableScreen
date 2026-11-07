@@ -675,23 +675,24 @@ Build et suite complète :
 $ arch -arm64 swift build --build-tests
   Build complete, 0 error, 0 warning
 $ arch -arm64 swift test
-  RunClosedCoreTests           46 tests, 0 failures
-  RunClosedMacSystemTests     183 tests, 0 failures
-  RunClosedPersistenceTests    27 tests, 0 failures
-  RunClosedHelperSupportTests 124 tests, 0 failures
-  RunClosedAppTests            11 tests, 0 failures
+  RunClosedCoreTests           124 tests, 0 failures
+  RunClosedMacSystemTests      183 tests, 0 failures
+  RunClosedPersistenceTests     46 tests, 0 failures
+  RunClosedHelperSupportTests   27 tests, 0 failures
+  RunClosedAppTests             11 tests, 0 failures
   → 391 tests, 0 failures (329 avant ce lot : +62)
 ```
 
 Suites ajoutées ou étendues, exécutées séparément :
 
 ```
-$ arch -arm64 swift test --filter RunClosedCoreTests.RecoveryPolicyTests               → 16 tests, 0 failures
-$ arch -arm64 swift test --filter RunClosedMacSystemTests.RecoveryBackstopServiceTests → 20 tests, 0 failures
-$ arch -arm64 swift test --filter RunClosedHelperSupportTests.BackstopRegistrationTests→ 14 tests, 0 failures
-$ arch -arm64 swift test --filter RunClosedMacSystemTests.RecoverCommandTests          →  8 tests, 0 failures
-$ arch -arm64 swift test --filter RunClosedMacSystemTests.SessionGuardTickTests        → 26 tests, 0 failures (24 + 2)
 $ arch -arm64 swift test --filter RunClosedCoreTests.SessionPolicyTests               → 45 tests, 0 failures (43 + 2)
+$ arch -arm64 swift test --filter RunClosedCoreTests.RecoveryPolicyTests              → 24 tests, 0 failures (16 au tour 1, +7 `runFreshness`)
+$ arch -arm64 swift test --filter RunClosedMacSystemTests.SessionGuardTickTests        → 26 tests, 0 failures (24 + 2)
+$ arch -arm64 swift test --filter RunClosedMacSystemTests.RecoveryBackstopServiceTests → 31 tests, 0 failures (20 au tour 1)
+$ arch -arm64 swift test --filter RunClosedMacSystemTests.RecoverCommandTests          → 13 tests, 0 failures (8 au tour 1)
+$ arch -arm64 swift test --filter RunClosedPersistenceTests.BackstopHeartbeatStoreTests→  7 tests, 0 failures
+$ arch -arm64 swift test --filter RunClosedHelperSupportTests.BackstopRegistrationTests→ 14 tests, 0 failures
 ```
 
 Bundle et CLI (binaire embarqué) :
@@ -751,3 +752,47 @@ Système → Items d'ouverture, cadence réelle de 60 s, résolution de `SMAppSe
 `runclosed-cli` dans `Contents/MacOS`, relâchement réel et `pmset sleepnow` du backstop, rendu de la ligne de popup
 et du bouton « Ouvrir les items d'ouverture… » sur la build installée. Rien de tout cela n'a été mesuré ; rien n'est
 supposé.
+
+### Relecture tour 2 (`ai-review-gate` 0 CRITICAL / 2 WARN + 2 constats du Lord) — 2026-11-07
+
+```
+$ arch -arm64 swift build --build-tests     → 0 error, 0 warning
+$ arch -arm64 swift test
+  RunClosedCoreTests           132 tests, 0 failures   (124 → 132)
+  RunClosedMacSystemTests      199 tests, 0 failures   (183 → 199)
+  RunClosedPersistenceTests     53 tests, 0 failures   (46 → 53)
+  RunClosedHelperSupportTests   27 tests, 0 failures   (inchangé)
+  RunClosedAppTests             11 tests, 0 failures   (inchangé)
+  → 422 tests, 0 failures (391 avant ce tour : +30)
+```
+
+Corrections et contrats ajoutés :
+
+- **WARN `RecoveryBackstopService.Report.exitCode`** — un relâchement critique ÉCHOUÉ sortait 0.
+  Désormais `releaseFailed` ⇒ 5, `releaseRefused` ⇒ 3, `released` / `rearmWithheld` / étape absente
+  inchangés, et l'échec de session reste prioritaire. Le rendu JSON et le code de sortie ont été
+  déplacés dans `RecoveryBackstopService.describe`, donc les 4 tests du map assertent le corps ET le
+  code que launchd reçoit réellement (0 relâchement vérifié, 5 échec avec `batteryMutation:
+  releaseFailed`, 0 chemin rapide, 75 verrou tenu) — pas seulement l'accesseur du service.
+- **WARN `backstopIsProtecting()`** — `SMAppService` `enabled` ne prouve pas que l'agent tourne.
+  `backstop_heartbeat.json` est écrit à la fin de CHAQUE run (chemin rapide, app vivante et minute
+  occupée compris : 3 tests), hors verrou et sans `pmset`. `RecoveryPolicy.runFreshness` exige le même
+  boot, un âge ≤ 180 s et un dernier code ≠ 5 : 7 tests (frais, absent, autre boot, borne inclusive,
+  périmé après réveil, dernier run en échec, horodatage futur). Un test relie l'écrivain et le lecteur :
+  un run réel du service produit un heartbeat que la règle accepte, et qu'un autre boot refuse.
+  `backstop status --json`, `status` et `doctor` gagnent `lastRunAt`, `lastExitCode`, `recentRun`,
+  `enforcing` ; le test CLI vérifie sur la machine réelle que `recentRun` est `false` (rien n'a jamais
+  tourné ici) et que `enforcing == protecting && recentRun`. Persistance : 7 tests.
+- **Lord, inondation du journal** — `rearmWithheld` est audité une fois par épisode (l'état vit dans
+  le heartbeat, donc il survit à un redémarrage du processus), et de nouveau après être sorti de
+  l'épisode : 3 tests (trois minutes consécutives ⇒ 1 ligne ; sortie puis retour ⇒ 2 ; une minute
+  occupée au milieu ne rouvre pas l'épisode).
+- **Lord, API morte** — `LowBatteryGuardService.tryTick()` supprimé : aucun appelant, aucun test, et sa
+  documentation laissait croire que le backstop l'utilise alors que `tick()` réarme, ce que le backstop
+  ne doit jamais faire.
+
+NOT_TESTED (matériel), inchangé par ce tour : l'écriture réelle du heartbeat par launchd dépend de la
+résolution de l'agent dans le bundle, qui n'a pas été mesurée. Les chemins de mutation et la règle de
+fraîcheur sont couverts par fakes et par un store temporaire ; `recover --backstop`, `backstop
+register`, `session start` et `lid-stay-awake on|off` n'ont toujours pas été lancés sur la machine
+réelle.

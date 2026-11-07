@@ -78,6 +78,12 @@ public struct RecoveryBackstopService {
             case .completed: return "completed"
             }
         }
+
+        /// What the battery step did, when it ran at all.
+        public var batteryMutation: String? {
+            if case .completed(let report) = self { return report.batteryMutation }
+            return nil
+        }
     }
 
     /// What the protected section did. `nil` fields are steps that did not run.
@@ -92,13 +98,29 @@ public struct RecoveryBackstopService {
         public var sleepRC: Int32?
         /// Whether anything at all was written to the audit log.
         public var audited = false
+        /// Whether a `rearmWithheld` episode is currently OPEN, i.e. this run
+        /// saw the condition and it has now been reported. Carried into the
+        /// heartbeat so the next minute does not report it again.
+        public var rearmWithheldEpisode = false
 
         public init(plan: RecoveryPolicy.Plan) {
             self.plan = plan
         }
 
         public var exitCode: ExitCode {
+            // A failed session release wins: the record stayed on disk and the
+            // deadline is NOT enforced, which is the most serious outcome a
+            // backstop minute can produce.
             if let session, session.expiry.isFailure { return .backendFailure }
+            // The battery step maps its own outcome. Previously only a nil
+            // mutation with an error yielded 5, so a critical-battery release
+            // that FAILED reported success — a protective action that did not
+            // happen, announced as fine.
+            switch batteryMutation {
+            case "releaseFailed": return .backendFailure
+            case "releaseRefused": return .refused
+            default: break
+            }
             if let error = batteryError, !error.isEmpty, batteryMutation == nil {
                 return .backendFailure
             }
@@ -110,6 +132,10 @@ public struct RecoveryBackstopService {
     public var guardService: LowBatteryGuardService
     public let lock: LidWriteLock
     public let auditLog: RecoveryAuditLog
+    /// Proof-of-execution record, written at the END of every run (ADR 024 §5).
+    /// It is what lets the CLI tell an agent that is merely registered from one
+    /// that actually fires.
+    public let heartbeatStore: BackstopHeartbeatStore
     /// `app.lock` probe (ADR 023 `AppLivenessLock`, shared-lock probe).
     public let appIsAlive: @Sendable () -> Bool
     public var wallClock: @Sendable () -> Date
@@ -119,6 +145,7 @@ public struct RecoveryBackstopService {
         guardService: LowBatteryGuardService,
         lock: LidWriteLock = LidWriteLock(),
         auditLog: RecoveryAuditLog = RecoveryAuditLog(),
+        heartbeatStore: BackstopHeartbeatStore = BackstopHeartbeatStore(),
         appIsAlive: @escaping @Sendable () -> Bool,
         wallClock: @escaping @Sendable () -> Date = { Date() }
     ) {
@@ -126,6 +153,7 @@ public struct RecoveryBackstopService {
         self.guardService = guardService
         self.lock = lock
         self.auditLog = auditLog
+        self.heartbeatStore = heartbeatStore
         self.appIsAlive = appIsAlive
         self.wallClock = wallClock
     }
@@ -180,14 +208,48 @@ public struct RecoveryBackstopService {
             battery: nil,
             latch: guardService.latchStore.load().latch)
         let plan = RecoveryPolicy.plan(facts)
-        // 1 — nothing is ours and nothing is scheduled: no lock, no pmset.
-        guard plan.needsWork else { return .nothingToDo }
-        // 2 — the app is running: it owns enforcement, and the probe is free.
-        guard !appIsAlive() else { return .appAlive }
-        // 3 — never queue behind the app or a CLI.
-        guard let report = lock.tryWithLock({ lockedRun(plan: plan, recordBootID: record.bootID) })
-        else { return .busy }
-        return .completed(report)
+        let outcome: Outcome
+        if !plan.needsWork {
+            // 1 — nothing is ours and nothing is scheduled: no lock, no pmset.
+            outcome = .nothingToDo
+        } else if appIsAlive() {
+            // 2 — the app is running: it owns enforcement, and the probe is free.
+            outcome = .appAlive
+        } else if let report = lock.tryWithLock({ lockedRun(plan: plan, recordBootID: record.bootID) }) {
+            outcome = .completed(report)
+        } else {
+            // 3 — never queue behind the app or a CLI.
+            outcome = .busy
+        }
+        // Proof of execution (ADR 024 §5), written for EVERY outcome —
+        // including the fast path and a busy minute. A minute that legitimately
+        // did nothing still proves the agent itself is running, which is what
+        // the CLI needs before trusting it to end a session deadline. One small
+        // atomic file, outside the lock: the fast path stays free of `pmset`
+        // and of `LidWriteLock`.
+        writeHeartbeat(for: outcome, bootID: now.bootID)
+        return outcome
+    }
+
+    /// Record that this agent ran, carrying the `rearmWithheld` episode flag so
+    /// the audit stays once-per-episode (round 2 review).
+    ///
+    /// `nil` means this minute did not evaluate the battery at all (fast path,
+    /// app alive, busy): the previous flag is carried forward untouched, so a
+    /// busy minute in the middle of an episode does not re-audit it.
+    private func writeHeartbeat(for outcome: Outcome, bootID: String) {
+        let reported: Bool
+        switch outcome {
+        case .completed(let report):
+            reported = report.rearmWithheldEpisode
+        case .nothingToDo, .appAlive, .busy:
+            reported = heartbeatStore.load()?.rearmWithheldReported ?? false
+        }
+        heartbeatStore.save(.init(
+            at: wallClock(),
+            bootID: bootID,
+            exitCode: outcome.exitCode.rawValue,
+            rearmWithheldReported: reported))
     }
 
     /// The ONE `LidWriteLock` section. It must not take the lock again:
@@ -195,6 +257,9 @@ public struct RecoveryBackstopService {
     /// both run on the caller's section by contract.
     private mutating func lockedRun(plan: RecoveryPolicy.Plan, recordBootID: String) -> Report {
         var report = Report(plan: plan)
+        // The episode flag is read BEFORE this run's battery step, and only
+        // meaningful when the battery step runs at all.
+        let rearmAlreadyReported = heartbeatStore.load()?.rearmWithheldReported ?? false
 
         // — Session step: expire a due session (`.sessionRecovery` for its own
         // previous-boot record), or reconcile an orphan. Same decisions as the
@@ -225,22 +290,66 @@ public struct RecoveryBackstopService {
             report.audited = true
         case .rearmWithheld:
             // The app owes a re-arm and the backstop will not do it. Recording
-            // it keeps "nothing happened" from being the only trace.
-            audit(.init(
-                ts: timestamp(),
-                bootID: sessionService.continuous.bootID,
-                step: "batteryRearm",
-                outcome: "withheld",
-                reason: battery.decision.reason.rawValue,
-                detail: "a re-arm is the app's; the backstop never turns the flag on",
-                chargePercent: battery.chargePercent,
-                minutesRemaining: battery.minutesRemaining,
-                recordBootID: recordBootID.isEmpty ? nil : recordBootID))
-            report.audited = true
+            // it keeps "nothing happened" from being the only trace — but ONCE
+            // PER EPISODE: the condition (our record claims the flag, the flag
+            // reads OFF, a re-arm is owed, AC above 15 %) holds for every
+            // minute it lasts, so auditing each minute would be a flood. The
+            // flag lives in the heartbeat, which survives process restarts.
+            report.rearmWithheldEpisode = true
+            if !rearmAlreadyReported {
+                audit(.init(
+                    ts: timestamp(),
+                    bootID: sessionService.continuous.bootID,
+                    step: "batteryRearm",
+                    outcome: "withheld",
+                    reason: battery.decision.reason.rawValue,
+                    detail: "a re-arm is the app's; the backstop never turns the flag on (reported once per episode)",
+                    chargePercent: battery.chargePercent,
+                    minutesRemaining: battery.minutesRemaining,
+                    recordBootID: recordBootID.isEmpty ? nil : recordBootID))
+                report.audited = true
+            }
         case .none:
+            // Out of the episode: the next rearmWithheld run reports again.
             break
         }
         return report
+    }
+
+    /// The JSON body `recover --backstop` prints, plus the exit code.
+    ///
+    /// It lives HERE, not in `main.swift`, because it is the command the
+    /// LaunchAgent actually runs: a test that asserts `Report.exitCode` while
+    /// the CLI prints something else proves nothing about the agent. The CLI is
+    /// a thin printer over this.
+    public static func describe(_ outcome: Outcome, bootID: String) -> (json: [String: Any], exitCode: Int32) {
+        var obj: [String: Any] = [
+            "schemaVersion": 1,
+            "bootID": bootID,
+            "action": "recover",
+            "backstop": true,
+            "outcome": outcome.rawValue,
+            "exitCode": Int(outcome.exitCode.rawValue),
+        ]
+        if case .completed(let report) = outcome {
+            obj["ownership"] = report.plan.ownership.rawValue
+            obj["steps"] = [
+                "session": report.plan.session,
+                "sessionDue": report.plan.sessionDue,
+                "battery": report.plan.battery,
+            ]
+            if let step = report.session {
+                obj["sessionExpiry"] = String(describing: step.expiry)
+                obj["sessionReconciled"] = step.reconciled.map { String(describing: $0) } as Any? ?? NSNull()
+            }
+            obj["batteryReason"] = report.batteryReason?.rawValue as Any? ?? NSNull()
+            obj["batteryMutation"] = report.batteryMutation as Any? ?? NSNull()
+            obj["batteryError"] = report.batteryError as Any? ?? NSNull()
+            obj["sleepAttempted"] = report.sleepAttempted
+            obj["sleepRC"] = report.sleepRC as Any? ?? NSNull()
+            obj["audited"] = report.audited
+        }
+        return (obj, outcome.exitCode.rawValue)
     }
 
     // MARK: — Audit

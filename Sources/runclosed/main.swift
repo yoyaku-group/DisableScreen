@@ -66,16 +66,32 @@ func backstopService() -> BackstopLifecycleService {
     BackstopLifecycleService(registrar: SMAppServiceAgentRegistrar())
 }
 
-/// The registration state, for `status`/`doctor` and for the CLI's own
-/// refusals. Read-only: `status()` performs no registration.
+/// The registration state — and, crucially, the PROOF OF EXECUTION — for
+/// `status`/`doctor` and for the CLI's own refusals (ADR 024 §5).
+///
+/// `protecting` deliberately stays the registration fact (`enabled`), because
+/// that is what it says. `enforcing` is the stronger claim: registered AND a
+/// successful run on this boot within the last 3 minutes. Only `enforcing` may
+/// relax a safety rule. Read-only: `status()` performs no registration.
 func backstopJSON() -> [String: Any] {
     let report = backstopService().report()
+    let heartbeat = BackstopHeartbeatStore().load()
+    let freshness = RecoveryPolicy.runFreshness(
+        heartbeat: heartbeat.map { (at: $0.at, bootID: $0.bootID, exitCode: $0.exitCode) },
+        currentBootID: clock.bootID,
+        now: Date())
+    let iso = ISO8601DateFormatter()
     return [
         "status": report.status.rawValue,
         "protecting": report.isProtecting,
+        "enforcing": report.isProtecting && freshness.isEnforcing,
         "summary": report.status.summary,
         "boundedAction": report.boundedAction,
         "intervalSeconds": report.intervalSeconds,
+        "lastRunAt": heartbeat.map { iso.string(from: $0.at) } as Any? ?? NSNull(),
+        "lastExitCode": heartbeat.map { Int($0.exitCode) } as Any? ?? NSNull(),
+        "recentRun": freshness.isEnforcing,
+        "runFreshness": String(describing: freshness),
     ]
 }
 
@@ -148,12 +164,52 @@ func cmdBackstop(_ rest: [String]) -> Int32 {
 
 /// ADR 024 §5 — may a CLI command that needs an enforcer rely on the backstop?
 ///
-/// The launchd agent must report `enabled` (approved AND registered). A pending
-/// approval is surfaced, not trusted: it enforces nothing yet. Called under
-/// `LidWriteLock`, as today — the state can change between the check and the
-/// write otherwise.
+/// Registration alone is NOT enough: `SMAppService` reports `enabled` for an
+/// approved agent whose program never actually runs (a `BundleProgram` that
+/// does not resolve, a binary removed from the bundle). Trusting that would let
+/// `session start --for` through with nothing enforcing the deadline — the
+/// silent failure ADR 023 refuses.
+///
+/// So the agent must be `enabled` AND have written a heartbeat on THIS boot
+/// within `RecoveryPolicy.maximumHeartbeatAge` AND that run must not have
+/// failed. A pending approval still fails, and so does a stale heartbeat after
+/// a wake — conservative, and launchd fires the missed interval on wake, so the
+/// next minute restores it.
+///
+/// Called under `LidWriteLock`, as today — the state can change between the
+/// check and the write otherwise.
+func backstopEnforcement() -> RecoveryPolicy.RunFreshness? {
+    guard backstopService().report().isProtecting else { return nil }
+    let heartbeat = BackstopHeartbeatStore().load()
+    return RecoveryPolicy.runFreshness(
+        heartbeat: heartbeat.map { (at: $0.at, bootID: $0.bootID, exitCode: $0.exitCode) },
+        currentBootID: clock.bootID,
+        now: Date())
+}
+
+/// `true` only when the backstop is provably running. See `backstopEnforcement`.
 func backstopIsProtecting() -> Bool {
-    backstopService().report().isProtecting
+    backstopEnforcement()?.isEnforcing ?? false
+}
+
+/// The precise reason the backstop cannot be relied on, for the CLI refusal.
+///
+/// Naming one of five situations beats a generic "not running": the operator's
+/// next move differs (approve it / wait a minute / open the app).
+func backstopRefusalReason() -> String {
+    let status = backstopService().report().status
+    guard status.isProtecting else {
+        return "the recovery backstop is not enabled (status: \(status.rawValue)) — approve it in System Settings → Login Items, or open RunClosed"
+    }
+    let heartbeat = BackstopHeartbeatStore().load()
+    let freshness = RecoveryPolicy.runFreshness(
+        heartbeat: heartbeat.map { (at: $0.at, bootID: $0.bootID, exitCode: $0.exitCode) },
+        currentBootID: clock.bootID,
+        now: Date())
+    if freshness.isEnforcing {
+        return "the recovery backstop is enabled and running"
+    }
+    return "the recovery backstop is enabled but not provably running — \(freshness.refusalHint). Wait a minute, or open RunClosed"
 }
 
 func cmdDoctor() {
@@ -735,17 +791,22 @@ func cmdSession(_ rest: [String]) -> Int32 {
         // Same lock as `lid-stay-awake on|off`: the session writes the record
         // and the flag, so it must not interleave with a guard tick.
         var svc = makeSessionService()
+        // The precise reason the enforcer check refused, captured inside the
+        // lock so the message describes the state it actually saw.
+        var refusal: String?
         let locked = LidWriteLock().withLock { () -> Result<SessionService.StartOutcome, SessionError>? in
             // A timed session needs something to end it at its deadline. Two
             // enforcers qualify (ADR 023, amended by ADR 024): the menu-bar app
-            // (`app.lock`) or the launchd recovery backstop, once it is
-            // APPROVED and enabled. A backstop that merely exists is not enough
-            // — a pending approval enforces nothing, so the refusal stands.
+            // (`app.lock`) or the launchd recovery backstop — and for the
+            // backstop, being APPROVED is not enough: it must have PROVEN it
+            // runs (a heartbeat on this boot, recent, not a failed run). An
+            // approved agent whose program never resolves enforces nothing.
             // Both checks run INSIDE the lock: the app's quit teardown gives up
             // `app.lock` in this same section, so a start queued behind a
             // teardown finds the app gone, and an app seen alive here runs its
             // teardown (which ends the session) only after this start.
             if duration != nil, !AppLivenessLock().isHeld(), !backstopIsProtecting() {
+                refusal = backstopRefusalReason()
                 return nil
             }
             // `start` itself clears a pending low-battery re-arm on success,
@@ -753,7 +814,7 @@ func cmdSession(_ rest: [String]) -> Int32 {
             return svc.start(for: duration)
         }
         guard let result = locked else {
-            FileHandler.err("refused: nothing would end this session at its deadline — RunClosed.app is not running and the recovery backstop is not enabled. Open RunClosed, or approve the backstop in System Settings → Login Items (`runclosed-cli backstop register`, then `runclosed-cli backstop login-items`).")
+            FileHandler.err("refused: nothing would end this session at its deadline — RunClosed.app is not running, and \(refusal ?? "the recovery backstop cannot be relied on"). Open RunClosed, or see `runclosed-cli backstop status`.")
             return 3
         }
         switch result {
@@ -786,18 +847,20 @@ func cmdSession(_ rest: [String]) -> Int32 {
             step = parsed
         }
         var svc = makeSessionService()
+        var refusal: String?
         let locked = LidWriteLock().withLock { () -> Result<KeepAwakeSession, SessionError>? in
             // Same refusal as `start --for`, same place, same two enforcers
             // (ADR 024): a new deadline that nothing would enforce must not be
             // reported as "extended" (the app crashed during a timed session).
             // No session on record falls through to `extend`'s own `noSession`.
             if svc.load() != nil, !AppLivenessLock().isHeld(), !backstopIsProtecting() {
+                refusal = backstopRefusalReason()
                 return nil
             }
             return svc.extend(by: step)
         }
         guard let result = locked else {
-            FileHandler.err("refused: nothing would enforce this session's new deadline — RunClosed.app is not running and the recovery backstop is not enabled. Open RunClosed, or approve the backstop in System Settings → Login Items (`runclosed-cli backstop register`, then `runclosed-cli backstop login-items`).")
+            FileHandler.err("refused: nothing would enforce this session's new deadline — RunClosed.app is not running, and \(refusal ?? "the recovery backstop cannot be relied on"). Open RunClosed, or see `runclosed-cli backstop status`.")
             return 3
         }
         switch result {
@@ -877,34 +940,11 @@ func cmdRecover(_ rest: [String]) -> Int32 {
 func renderRecover(_ service: RecoveryBackstopService) -> Int32 {
     var service = service
     let outcome = service.run()
-    var obj: [String: Any] = [
-        "schemaVersion": kSchemaVersion,
-        "bootID": clock.bootID,
-        "action": "recover",
-        "backstop": true,
-        "outcome": outcome.rawValue,
-        "exitCode": Int(outcome.exitCode.rawValue),
-    ]
-    if case .completed(let report) = outcome {
-        obj["ownership"] = report.plan.ownership.rawValue
-        obj["steps"] = [
-            "session": report.plan.session,
-            "sessionDue": report.plan.sessionDue,
-            "battery": report.plan.battery,
-        ]
-        if let step = report.session {
-            obj["sessionExpiry"] = String(describing: step.expiry)
-            obj["sessionReconciled"] = step.reconciled.map { String(describing: $0) } as Any? ?? NSNull()
-        }
-        obj["batteryReason"] = report.batteryReason?.rawValue as Any? ?? NSNull()
-        obj["batteryMutation"] = report.batteryMutation as Any? ?? NSNull()
-        obj["batteryError"] = report.batteryError as Any? ?? NSNull()
-        obj["sleepAttempted"] = report.sleepAttempted
-        obj["sleepRC"] = report.sleepRC as Any? ?? NSNull()
-        obj["audited"] = report.audited
-    }
-    emitJSON(obj)
-    return outcome.exitCode.rawValue
+    // The body AND the exit code come from the library, so the tests can
+    // assert exactly what this prints.
+    let described = RecoveryBackstopService.describe(outcome, bootID: clock.bootID)
+    emitJSON(described.json)
+    return described.exitCode
 }
 
 // ── G2b — display mutation subcommands ───────────────────────────────────────

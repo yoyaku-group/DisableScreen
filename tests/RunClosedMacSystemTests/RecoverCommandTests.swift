@@ -113,6 +113,18 @@ final class RecoverCommandTests: XCTestCase {
                                          "\(command) has no backstop block")
             XCTAssertNotNil(backstop["status"], command)
             XCTAssertNotNil(backstop["protecting"], command)
+            // Round 2: registration is not proof of execution, so the blocks
+            // must also say whether a run is PROVEN recent — and on this
+            // machine no agent has ever run, so recentRun is false.
+            XCTAssertNotNil(backstop["enforcing"], command)
+            XCTAssertNotNil(backstop["lastRunAt"], command)
+            XCTAssertNotNil(backstop["lastExitCode"], command)
+            XCTAssertEqual(backstop["recentRun"] as? Bool, false,
+                           "\(command): nothing proves the agent ever ran on this machine")
+            XCTAssertEqual(backstop["enforcing"] as? Bool,
+                           (backstop["protecting"] as? Bool == true)
+                           && (backstop["recentRun"] as? Bool == true),
+                           "\(command): enforcing = enabled AND a proven recent run")
         }
     }
 
@@ -120,10 +132,18 @@ final class RecoverCommandTests: XCTestCase {
 
     private final class FakeLid: LidAssertion, @unchecked Sendable {
         var calls: [Bool] = []
+        /// When true, every write reports `.failed` with no read-back — the
+        /// `sudo -n` failure path.
+        var failWrites = false
         let flag: Flags
         init(_ flag: Flags) { self.flag = flag }
         func setEnabled(_ enabled: Bool) -> OperationResult {
             calls.append(enabled)
+            if failWrites {
+                return OperationResult(requestID: "t", action: .sleepAll, state: .failed,
+                                       nativeRC: 1, readbackOK: false,
+                                       error: "sudo: a password is required")
+            }
             flag.value = enabled
             return OperationResult(requestID: "t", action: .sleepAll, state: .verified,
                                    nativeRC: 0, readbackOK: true)
@@ -192,6 +212,12 @@ final class RecoverCommandTests: XCTestCase {
             guardService: guardService,
             lock: LidWriteLock(url: dir.appendingPathComponent("lid.lock")),
             auditLog: RecoveryAuditLog(url: dir.appendingPathComponent("recovery_audit.jsonl")),
+            // MUST be injected: the default is the real
+            // `~/Library/Application Support/RunClosed/backstop_heartbeat.json`,
+            // and a test that wrote there would forge proof of execution on the
+            // developer's machine.
+            heartbeatStore: BackstopHeartbeatStore(
+                url: dir.appendingPathComponent("backstop_heartbeat.json")),
             appIsAlive: { false },
             wallClock: { Date(timeIntervalSince1970: 1_800_000_000) })
         return (service, lid, sleeper)
@@ -229,5 +255,84 @@ final class RecoverCommandTests: XCTestCase {
         XCTAssertEqual(rc, 75)
         XCTAssertTrue(lid.calls.isEmpty)
         XCTAssertEqual(sleeper.count, 0)
+    }
+
+    // MARK: — No test may touch the real Application Support directory
+
+    /// Regression: a fixture that forgets to inject the heartbeat store writes
+    /// to the developer's REAL `RunClosed/backstop_heartbeat.json`, forging
+    /// proof of execution on the machine — a safety record must never be
+    /// produced by a test. The fixture above injects it; this pins the intent.
+    func testTheFixtureNeverWritesTheRealHeartbeatPath() {
+        let dir = tempDir()
+        var (service, _, _) = makeService(dir: dir, flagOn: nil, record: nil)
+        _ = service.run()
+        let injected = dir.appendingPathComponent("backstop_heartbeat.json")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: injected.path),
+                      "the run wrote to the injected store")
+        XCTAssertNotEqual(service.heartbeatStore.url, BackstopHeartbeatStore().url,
+                          "a test must never share the production heartbeat path")
+    }
+
+    // MARK: — The exit-code map, through the REAL renderer
+
+    /// `renderRecover` is what the LaunchAgent's argv actually runs, so the
+    /// mapping is asserted here rather than only on the service: a test that
+    /// proves `Report.exitCode` while the CLI prints something else proves
+    /// nothing about the agent.
+
+    /// One `describe` call, so the exit code and the JSON come from the same
+    /// outcome — asserting them on two separate runs would let them drift.
+    private func render(_ service: inout RecoveryBackstopService) -> (rc: Int32, json: [String: Any]) {
+        let d = RecoveryBackstopService.describe(service.run(), bootID: "A")
+        return (d.exitCode, d.json)
+    }
+
+    /// Battery release verified → 0, JSON says released.
+    func testReleasedBatteryStepExits0ThroughTheRecoverCommand() throws {
+        var (service, lid, sleeper) = makeService(dir: tempDir(), flagOn: true, record: ("A", true))
+        let out = render(&service)
+        XCTAssertEqual(out.rc, 0)
+        XCTAssertEqual(out.json["outcome"] as? String, "completed")
+        XCTAssertEqual(out.json["exitCode"] as? Int, 0)
+        XCTAssertEqual(out.json["batteryMutation"] as? String, "released")
+        XCTAssertEqual(out.json["batteryReason"] as? String, "criticalOwned")
+        XCTAssertEqual(out.json["sleepAttempted"] as? Bool, true)
+        XCTAssertEqual(lid.calls, [false], "the release happened")
+        XCTAssertEqual(sleeper.count, 1, "a verified release is followed by sleepnow")
+    }
+
+    /// A failing battery release → 5. This is the round-2 fix: it used to
+    /// report success while the Mac stayed awake at critical battery.
+    func testFailedBatteryReleaseExits5ThroughTheRecoverCommand() {
+        var (service, lid, _) = makeService(dir: tempDir(), flagOn: true, record: ("A", true))
+        lid.failWrites = true
+        let out = render(&service)
+        XCTAssertEqual(out.rc, 5, "a protective action that did not happen is not a success")
+        XCTAssertEqual(out.json["exitCode"] as? Int, 5)
+        XCTAssertEqual(out.json["batteryMutation"] as? String, "releaseFailed")
+        XCTAssertNotNil(out.json["batteryError"] as? String)
+        XCTAssertEqual(lid.calls, [false], "the release was attempted")
+    }
+
+    /// Battery step absent (fast path) → 0, and no battery fields invented.
+    func testFastPathExits0ThroughTheRecoverCommand() {
+        var (service, _, _) = makeService(dir: tempDir(), flagOn: nil, record: nil)
+        let out = render(&service)
+        XCTAssertEqual(out.rc, 0)
+        XCTAssertEqual(out.json["outcome"] as? String, "nothingToDo")
+        XCTAssertEqual(out.json["exitCode"] as? Int, 0)
+    }
+
+    /// Busy → 75 through the same rendering path, so launchd's retry contract
+    /// holds for the command it actually invokes.
+    func testBusyExits75ThroughTheRecoverCommand() {
+        let dir = tempDir()
+        var (service, _, _) = makeService(dir: dir, flagOn: true, record: ("A", true))
+        let other = LidWriteLock(url: dir.appendingPathComponent("lid.lock"))
+        let out = other.tryWithLock { render(&service) }
+        XCTAssertEqual(out?.rc, 75)
+        XCTAssertEqual(out?.json["outcome"] as? String, "busy")
+        XCTAssertEqual(out?.json["exitCode"] as? Int, 75)
     }
 }
