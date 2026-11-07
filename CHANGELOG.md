@@ -18,7 +18,10 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   has **no enable case at all**: a `critical` state with the lid closed, no
   display attached and the flag provably ours releases and sleeps immediately;
   `serious` in that same situation gives a ten-minute grace period so a
-  compiler burst does not end a session, then releases. Three refusals make it
+  compiler burst does not end a session, then releases. The clock measures ten
+  minutes of heat that COULD be released: any interruption (the lid reopened,
+  a display attached, ownership lost) resets it, so a Mac that ran hot and then
+  cooled does not release the instant the lid comes back down. Three refusals make it
   safe: an open lid (the air circulates and the operator is there), an attached
   display (the machine is in use), and a flag that is not ours (B2 — alert
   only, never mutated; a record from a previous boot is not active ownership
@@ -45,8 +48,8 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   gets one line per ACTION, never one per minute without effect. The CLI gains
   read-only `thermal status [--json]` and pure `thermal simulate <state>` with
   `--lid`, `--external-display`, `--lid-flag`, `--ownership` and `--since`; the
-  popup says "Session ended — heat" and the menu bar `ended: heat`. 97 new tests (policy grid, service on
-  fakes, backstop, shared tick, persistence, simulate), 554/554 total.
+  popup says "Session ended — heat" and the menu bar `ended: heat`. 103 new tests (policy grid, grace hold,
+  service on fakes, backstop, shared tick, persistence, simulate), 560/560 total.
 
 - Recovery backstop (ADR 024). Until now only the running app enforced a
   session deadline and the low-battery guard, so a crash or a quit left

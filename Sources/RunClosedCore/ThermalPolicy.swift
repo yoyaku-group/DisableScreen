@@ -284,7 +284,9 @@ public enum ThermalPolicy {
             return (Decision(action: .releaseAndSleep, reason: .seriousSustained,
                              state: input.state), next)
         }
-        return refusal(.seriousWarn, input: input, latch: &next)
+        // `holdsClock: false`: this tick is INSIDE the grace period with the
+        // release possible, so the timer keeps running.
+        return refusal(.seriousWarn, input: input, latch: &next, holdsClock: false)
     }
 
     /// The machine is hot and this tick cannot release it. `critical` always
@@ -292,9 +294,26 @@ public enum ThermalPolicy {
     /// says so when the operator can do something about it — the heads-up, and
     /// a flag that is not ours. `serious` with a display attached or the lid
     /// open stays silent: that is the ordinary shape of heavy work, not news.
+    ///
+    /// `holdsClock: false` is the ONE refusal that must not touch the
+    /// sustained-heat timer: `.seriousWarn` is emitted from inside the grace
+    /// period, on a tick where the release IS possible. Clearing there would
+    /// restart the clock every tick and the guard would never release at all.
     private static func refusal(
-        _ reason: Reason, input: Input, latch: inout Latch
+        _ reason: Reason, input: Input, latch: inout Latch, holdsClock: Bool = true
     ) -> (decision: Decision, latch: Latch) {
+        if holdsClock {
+            // Ten minutes of heat that COULD be released, never ten minutes of
+            // heat somewhere in the machine's past. Without this, a Mac that
+            // ran `serious` for five minutes with the lid closed, sat open for
+            // fifteen (cooling, the workload settling), and then closed again
+            // released the instant the lid came down — ending the operator's
+            // session on a spike that had already been cooled. The clock only
+            // advances while a release is actually possible, which is what the
+            // comment on `seriousSince` always claimed.
+            latch.seriousSince = nil
+            latch.seriousSinceBootID = nil
+        }
         let notify: Bool
         if input.state.isCritical {
             notify = !latch.warnedCritical
