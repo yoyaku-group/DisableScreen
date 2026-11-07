@@ -435,6 +435,16 @@ public struct LowBatteryGuardService {
             // for sleep: the Mac may go down right after `sleepnow`.
             latchStore.save(record)
             audit(outcome, evaluation: evaluation, recordBootID: recordBootIDBefore)
+            // Best effort, and NOT retried — deliberately (review round 18).
+            // The protective action already happened: `disablesleep` is at 0,
+            // so the Mac follows its normal power management and sleeps on
+            // idle / lid close by itself. This call only accelerates that.
+            // Retrying it would mean calling `pmset sleepnow` every 30 s on a
+            // machine whose flag is no longer ours — a sleep loop against an
+            // operator who is using the Mac, which is worse than the missed
+            // acceleration. (Contrast `attemptSleepOnceAfterFailure` below: a
+            // FAILED release leaves the flag ON, so there a retry IS the
+            // protective act, and it is worth one per episode.)
             attemptSleep(&outcome)
         case .success(let op):
             // Not refused, not verified: treat as a backend failure.
