@@ -866,10 +866,12 @@ $ arch -arm64 swift test
   vérifier le contrat exit-64, `backstop status --json` ni les blocs `doctor`/`status`. Pire en local :
   un bundle périmé était testé à la place du code. Les trois chemins sont maintenant essayés du plus
   frais au plus ancien, et l'absence de binaire en CI **échoue** au lieu de skipper.
-- **`noLockedRunYet` (suggestion, retenue)** — une minute `nothingToDo`/`appAlive` sort avant le verrou
-  et avant `pmset` : elle prouve que l'agent démarre, pas qu'il peut agir. `completedLockedRun` est
-  enregistré dans le heartbeat (collant sur le même boot seulement) et `runFreshnessFull` refuse tant
-  qu'aucune section verrouillée n'a abouti sur ce boot. 3 tests.
+- **`noLockedRunYet` (suggestion, RETIRÉE au tour 6)** — une minute `nothingToDo`/`appAlive` sort avant le verrou
+  et avant `pmset` : elle prouve que l'agent démarre, pas qu'il peut agir. Exiger une section verrouillée a été
+  essayé puis **retiré** : sur une machine vierge toutes les minutes sont `nothingToDo`, et le seul acte qui
+  donnerait du travail à la minute suivante est le `session start --for` que la règle conditionne — preuve
+  circulaire. `completedLockedRun` et `runFreshnessFull` n'existent plus dans le code ; la règle est
+  `runFreshness` seule, et seul un code de sortie exactement 0 vaut preuve.
 - **`unregister` sur `notFound`** — macOS 26 rapporte l'état jamais-enregistré comme `notFound`, donc
   `unregister()` y échouait et la CLI annonçait un faux échec pour un démontage sans effet. Traité
   comme `notRegistered`.
@@ -910,13 +912,13 @@ $ CI=true swift test --filter RunClosedMacSystemTests.RecoverCommandTests → 13
   dette de réarmement (`releasedByGuard`) est désormais écrite par ce chemin — c'est le signal de
   réactivation pour l'app, pas une affirmation que quelqu'un a été prévenu. 2 tests.
 - **Test contre la mauvaise règle (WARN)** — `testARealRunProducesAHeartbeatTheCLIAcceptsAsEnforcing`
-  notait un run de chemin rapide avec `runFreshness`, le wrapper qui forçait la preuve de section
-  verrouillée ; la production utilise `runFreshnessFull`. Le test passait donc sur une règle que
-  personne n'applique. Il utilise maintenant `runFreshnessFull` + `freshnessInput()` sur un run qui a
-  réellement pris le verrou.
-- **Wrapper dangereux** — `runFreshness(heartbeat:…)` codait `completedLockedRun: true` en dur ; un
-  futur appelant aurait pu lever le refus ADR 023 pour un agent dont le chemin verrouillé n'a jamais
-  tourné. Le paramètre est maintenant requis.
+  notait un run de chemin rapide avec un wrapper plus permissif que la règle de production. Le test
+  passait donc sur une règle que personne n'applique. Il note désormais avec `runFreshness`, la SEULE
+  règle (le wrapper et le paramètre de preuve verrouillée ont été retirés au tour 6, avec la règle
+  qu'ils servaient).
+- **Preuve verrouillée retirée (tour 6)** — `runFreshness` n'exige plus de section verrouillée : la
+  seule preuve est un code de sortie exactement 0, sur le même boot, il y a moins de 180 s. Exiger
+  davantage rendait la preuve inatteignable sur une machine vierge.
 - **Échec d'écriture du heartbeat silencieux** — `save` était ignoré ; en cas d'échec,
   `rearmWithheldReported` ne persistait pas (retour du flood) et le CLI refusait sans explication. Une
   ligne stderr rend la panne diagnosticable (l'action protectrice, elle, a déjà eu lieu).

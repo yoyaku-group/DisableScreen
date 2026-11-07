@@ -86,6 +86,11 @@ func backstopJSON() -> [String: Any] {
         "protecting": report.isProtecting,
         "enforcing": report.isProtecting && freshness.isEnforcing,
         "summary": report.status.summary,
+        // Why the app will not register the agent at launch, when it will not.
+        // Without this an operator who once ran `backstop unregister` reads
+        // "off — not registered" forever and is told to approve an agent that
+        // will never appear in System Settings.
+        "operatorOptedOut": report.operatorOptedOut,
         "boundedAction": report.boundedAction,
         "intervalSeconds": report.intervalSeconds,
         "lastRunAt": heartbeat.map { iso.string(from: $0.at) } as Any? ?? NSNull(),
@@ -128,6 +133,10 @@ func cmdBackstop(_ rest: [String]) -> Int32 {
         } else {
             let report = svc.report()
             print("recovery backstop: \(report.status.rawValue) — \(report.status.summary)")
+            if report.operatorOptedOut {
+                print("  you turned it off (`backstop unregister`); the app will not re-register it at launch. "
+                      + "`backstop register` turns it back on.")
+            }
         }
         return 0
     case "register":
@@ -198,6 +207,12 @@ func backstopIsProtecting() -> Bool {
 func backstopRefusalReason() -> String {
     let status = backstopService().report().status
     guard status.isProtecting else {
+        // Name the operator's own decision when that is the reason: telling
+        // someone to approve an agent in System Settings that will never be
+        // registered there sends them to a screen with nothing to approve.
+        if backstopService().report().operatorOptedOut {
+            return "you turned the recovery backstop off (`backstop unregister`), so the app will not register it — `runclosed-cli backstop register` turns it back on"
+        }
         return "the recovery backstop is not enabled (status: \(status.rawValue)) — approve it in System Settings → Login Items, or open RunClosed"
     }
     let freshness = RecoveryPolicy.runFreshness(
@@ -789,9 +804,6 @@ func cmdSession(_ rest: [String]) -> Int32 {
         // Same lock as `lid-stay-awake on|off`: the session writes the record
         // and the flag, so it must not interleave with a guard tick.
         var svc = makeSessionService()
-        // The precise reason the enforcer check refused, captured inside the
-        // lock so the message describes the state it actually saw.
-        var refusal: String?
         let locked = LidWriteLock().withLock { () -> Result<SessionService.StartOutcome, SessionError>? in
             // A timed session needs something to end it at its deadline. Two
             // enforcers qualify (ADR 023, amended by ADR 024): the menu-bar app

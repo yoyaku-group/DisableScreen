@@ -197,6 +197,13 @@ final class RecoveryPolicyTests: XCTestCase {
     /// Exhaustive guard over the policy's whole output space: NO combination
     /// produces an enable. The verdict type has no "enable" case at all, which
     /// this test pins from the outside.
+    ///
+    /// Two things are checked, and the second is the one that matters. The
+    /// per-combination assertions below only see `releasesFlag`, so a verdict
+    /// that ASKED FOR AN ENABLE would pass them (it is not a release). The
+    /// exhaustive `switch` after the loops is what actually pins the type: a
+    /// new case — an `.enable`, or a renamed re-arm that is no longer withheld —
+    /// stops the file from compiling until it is classified here.
     func testNoInputEverAsksTheBackstopToTurnTheFlagOn() {
         let flags: [Bool?] = [true, false, nil]
         let pcts: [Int?] = [nil, 0, 5, 10, 20, 40, 100]
@@ -205,6 +212,9 @@ final class RecoveryPolicyTests: XCTestCase {
         let latches = [LowBatteryPolicy.Latch(),
                        LowBatteryPolicy.Latch(releasedByGuard: true),
                        LowBatteryPolicy.Latch(warnedLow: true, warnedCritical: true)]
+        var sawRelease = false
+        var sawNoRelease = false
+        var sawWithheld = false
         for flag in flags {
             for pct in pcts {
                 for source in sources {
@@ -222,11 +232,34 @@ final class RecoveryPolicyTests: XCTestCase {
                             if verdict.releasesFlag, flag != true {
                                 XCTFail("a release without an observed ON flag: \(input) → \(verdict)")
                             }
+                            // Exhaustive over the VERDICT, not just the input:
+                            // an `.enable` added to the type stops this file
+                            // from compiling until it is classified, which is
+                            // the guard the input sweep alone never gave.
+                            switch verdict {
+                            case .release:
+                                sawRelease = true
+                                XCTAssertTrue(verdict.releasesFlag)
+                            case .noRelease:
+                                sawNoRelease = true
+                                XCTAssertFalse(verdict.releasesFlag)
+                            case .rearmWithheld:
+                                sawWithheld = true
+                                XCTAssertFalse(verdict.releasesFlag,
+                                               "a withheld re-arm must never read as a release: \(input)")
+                            case .unread:
+                                XCTFail("a battery step that never read the battery: \(input)")
+                            }
                         }
                     }
                 }
             }
         }
+        // Every shape the battery step can take is reachable here, so the
+        // exhaustive switch above is not vacuous.
+        XCTAssertTrue(sawRelease, "the sweep never produced a release")
+        XCTAssertTrue(sawNoRelease, "the sweep never produced a noRelease")
+        XCTAssertTrue(sawWithheld, "the sweep never produced a withheld re-arm")
     }
 
     // MARK: — Proof of execution (ADR 024 §5)
@@ -308,11 +341,27 @@ final class RecoveryPolicyTests: XCTestCase {
     /// A busy minute proves the agent STARTED, not that it could ACT. If the
     /// lock were held across every interval, grading those fresh would let the
     /// CLI trust an enforcer that has enforced nothing.
+    ///
+    /// It is named `.lastRunBusy` rather than `.lastRunFailed` because it is
+    /// not a failure: another RunClosed writer held the lock. Telling the
+    /// operator "its last run failed" sent them chasing a broken net that had
+    /// merely been pre-empted (review round 7) — but the direction is
+    /// unchanged, it still does not enforce.
     func testABusyLastRunDoesNotEnforce() {
         let f = freshness(at: -30, exitCode: RecoveryPolicy.busyExitCode)
-        XCTAssertEqual(f, .lastRunFailed(exitCode: 75))
-        XCTAssertFalse(f.isEnforcing)
+        XCTAssertEqual(f, .lastRunBusy(ageSeconds: 30))
+        XCTAssertFalse(f.isEnforcing, "a minute that never entered its locked section is not a proof")
         XCTAssertFalse(f.refusalHint.isEmpty)
+    }
+
+    /// A busy minute OLDER than the window is stale like any other: the agent
+    /// stopped running, whatever the last code was.
+    func testAStaleBusyMinuteIsStale() {
+        let f = freshness(at: -600, exitCode: RecoveryPolicy.busyExitCode)
+        guard case .stale = f else {
+            return XCTFail("an old busy minute must read stale, got \(f)")
+        }
+        XCTAssertFalse(f.isEnforcing)
     }
 
     /// A REFUSAL (exit 3) is the round-5 CRITICAL: the agent started, the

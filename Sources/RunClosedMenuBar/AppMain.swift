@@ -287,9 +287,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         return PopupState.BackstopRow(
             status: status.rawValue,
-            summary: status == .requiresApproval
-                ? L10n.t("Recovery backstop off — approve it in System Settings")
-                : L10n.t("Recovery backstop off (see log)"),
+            // The operator's own "off" is named. Without it the row reads
+            // "off (see log)" forever and points at a System Settings screen
+            // where nothing will ever be waiting (review round 7).
+            summary: report.operatorOptedOut
+                ? L10n.t("Recovery backstop off — you turned it off")
+                : (status == .requiresApproval
+                   ? L10n.t("Recovery backstop off — approve it in System Settings")
+                   : L10n.t("Recovery backstop off (see log)")),
             needsApproval: status == .requiresApproval)
     }
 

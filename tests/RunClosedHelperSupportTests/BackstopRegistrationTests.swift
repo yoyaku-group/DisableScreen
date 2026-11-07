@@ -184,6 +184,32 @@ final class BackstopRegistrationTests: XCTestCase {
         XCTAssertEqual(r.status, .requiresApproval)
     }
 
+    /// The opt-out must be VISIBLE, not merely honoured. Without it the state
+    /// is indistinguishable from "never registered": the app skips the
+    /// registration, `status` reports `notRegistered`/`notFound`, and every
+    /// surface tells the operator to approve an agent in System Settings that
+    /// will never appear there. The net ADR 024 exists for then never exists,
+    /// silently (review round 7).
+    func testTheReportSurfacesAnOperatorOptOut() {
+        let fake = FakeRegistrar()
+        fake.current = .notRegistered
+        fake.optedOut = true
+        let r = BackstopLifecycleService(registrar: fake).report()
+        XCTAssertTrue(r.operatorOptedOut,
+                      "a report that hides the operator's own decision sends them to an empty Settings screen")
+        // Nothing is normalized: the status stays the registry fact.
+        XCTAssertEqual(r.status, .notRegistered)
+        XCTAssertFalse(r.isProtecting)
+    }
+
+    /// No opt-out means no claim: a fresh machine must not read as if the
+    /// operator had refused the net.
+    func testAFreshMachineReportsNoOptOut() {
+        let fake = FakeRegistrar()
+        fake.current = .notRegistered
+        XCTAssertFalse(BackstopLifecycleService(registrar: fake).report().operatorOptedOut)
+    }
+
     /// Unregistering records the opt-out — otherwise the next launch undoes it.
     func testUnregisterRecordsTheOptOut() {
         let fake = FakeRegistrar()
@@ -271,6 +297,22 @@ final class BackstopRegistrationTests: XCTestCase {
         // the net is not protecting the operator.
         XCTAssertNotNil(dict["StandardErrorPath"], "a silent launchd agent hides its own failures")
         XCTAssertNotNil(dict["StandardOutPath"], "a silent launchd agent hides its own failures")
+        // NEVER /tmp. It is world-writable and sticky, so another local account
+        // could pre-create these names as symlinks and launchd would open them
+        // AS THIS USER — an arbitrary-write primitive against a shell profile
+        // or an authorized_keys (review round 7). The build script substitutes
+        // __HOME__; launchd does not expand `~`.
+        for key in ["StandardErrorPath", "StandardOutPath"] {
+            let path = dict[key] as? String ?? ""
+            XCTAssertFalse(path.isEmpty, "\(key) must not be empty")
+            XCTAssertFalse(path.hasPrefix("/tmp"),
+                           "\(key) must never live in world-writable /tmp: \(path)")
+            // The shipped source is a template; the build script substitutes
+            // __HOME__ with the absolute home before it enters the bundle.
+            XCTAssertTrue(path.hasPrefix("__HOME__") || path.hasPrefix("/"),
+                          "\(key) must be absolute, or the __HOME__ template "
+                          + "the build script substitutes: \(path)")
+        }
     }
 
     /// The argv carries the protective subcommand: a plist that lost

@@ -70,8 +70,16 @@ cp Resources/com.benjaminbelaga.runclosed.helper.plist \
 # plistName:)` resolves it against this bundle's LaunchAgents directory, and
 # its BundleProgram points back at the runclosed-cli copied above, so the job
 # dies with the app instead of surviving a deleted bundle.
-cp Resources/com.benjaminbelaga.runclosed.backstop.plist \
-   "$APP/Contents/Library/LaunchAgents/"
+#
+# `__HOME__` is substituted here because launchd does NOT expand `~` in
+# StandardOutPath/StandardErrorPath, and the template must not carry a /tmp
+# path: /tmp is world-writable and sticky, so another local account could
+# pre-create the name as a symlink and launchd would open it AS THIS USER.
+sed "s|__HOME__|$HOME|g" Resources/com.benjaminbelaga.runclosed.backstop.plist \
+   > "$APP/Contents/Library/LaunchAgents/com.benjaminbelaga.runclosed.backstop.plist"
+# launchd creates the file but not the directory; without this the agent's
+# diagnostics vanish into a failed open.
+mkdir -p "$HOME/Library/Logs/RunClosed"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

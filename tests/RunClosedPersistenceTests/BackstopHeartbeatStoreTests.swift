@@ -7,9 +7,14 @@ import Foundation
 final class BackstopHeartbeatStoreTests: XCTestCase {
 
     private func tempURL() -> URL {
-        URL(fileURLWithPath: NSTemporaryDirectory())
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("runclosed-heartbeat-\(UUID().uuidString)", isDirectory: true)
-            .appendingPathComponent("backstop_heartbeat.json")
+        // Every test leaves its own directory behind otherwise: the suite runs
+        // repeatedly in CI and on dev machines, and the orphaned trees in
+        // NSTemporaryDirectory grow without any cleanup (review round 7). The
+        // sibling RecoveryBackstopServiceTests already tears its rigs down.
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        return dir.appendingPathComponent("backstop_heartbeat.json")
     }
 
     private let when = Date(timeIntervalSince1970: 1_800_000_000)

@@ -56,32 +56,42 @@ final class RecoverCommandTests: XCTestCase {
         throw XCTSkip("no runclosed binary yet (looked in \(searched)) — run `swift build`")
     }
 
-    /// Run the CLI with `args`, returning (exit code, stdout+stderr).
+    /// Run the CLI with `args`, returning (exit code, stdout, stderr).
+    ///
+    /// stdout and stderr stay SEPARATE. Merging them let any diagnostic line
+    /// break a `JSONSerialization` parse of a perfectly healthy run (a sudo
+    /// notice, a runtime warning, a subprocess message), which is a red that
+    /// says nothing about the code under test and is painful to diagnose
+    /// (review round 7). The JSON assertions read stdout; stderr is available
+    /// to the tests that actually care what was complained about.
     @discardableResult
-    private func runCLI(_ args: [String]) throws -> (rc: Int32, output: String) {
+    private func runCLI(_ args: [String]) throws -> (rc: Int32, out: String, err: String) {
         let exe = try Self.cliURL()
         let p = Process()
         p.executableURL = exe
         p.arguments = args
-        let out = Pipe()
+        let out = Pipe(), err = Pipe()
         p.standardOutput = out
-        p.standardError = out
+        p.standardError = err
         try p.run()
-        // Drain BEFORE waiting: a CLI that writes more than the 64 KiB pipe
-        // buffer blocks on write() forever, and `waitUntilExit()` would then
-        // wait for a process that can never finish. Reading to EOF first lets
-        // the child complete, and terminates when it exits.
-        let data = out.fileHandleForReading.readDataToEndOfFile()
+        // Drain BOTH before waiting: a child that writes more than the 64 KiB
+        // pipe buffer blocks on write() forever, and `waitUntilExit()` would
+        // then wait for a process that can never finish. Reading to EOF first
+        // lets the child complete, and terminates when it exits.
+        let outData = out.fileHandleForReading.readDataToEndOfFile()
+        let errData = err.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
-        return (p.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+        return (p.terminationStatus,
+                String(data: outData, encoding: .utf8) ?? "",
+                String(data: errData, encoding: .utf8) ?? "")
     }
 
     /// `recover` without `--backstop` is a usage error: this command is the
     /// agent's, and a bare `recover` must never be reachable as a mutation.
     func testRecoverWithoutBackstopExits64() throws {
-        let (rc, output) = try runCLI(["recover"])
-        XCTAssertEqual(rc, 64, output)
-        XCTAssertTrue(output.contains("--backstop"), output)
+        let (rc, out, err) = try runCLI(["recover"])
+        XCTAssertEqual(rc, 64, out + err)
+        XCTAssertTrue(err.contains("--backstop"), err)
     }
 
     /// An unknown flag is a usage error too — `--backstop` is a fixed argv, so
@@ -89,8 +99,8 @@ final class RecoverCommandTests: XCTestCase {
     func testRecoverWithABogusFlagExits64() throws {
         for args in [["recover", "--bogus"], ["recover", "--backstop", "--force"],
                      ["recover", "--backstop", "extra"]] {
-            let (rc, output) = try runCLI(args)
-            XCTAssertEqual(rc, 64, "\(args): \(output)")
+            let (rc, out, err) = try runCLI(args)
+            XCTAssertEqual(rc, 64, "\(args): \(out + err)")
         }
     }
 
@@ -98,8 +108,8 @@ final class RecoverCommandTests: XCTestCase {
     func testBackstopUnknownSubcommandExits64() throws {
         for args in [["backstop"], ["backstop", "definitely-not-a-command"],
                      ["backstop", "status", "--bogus"], ["backstop", "register", "extra"]] {
-            let (rc, output) = try runCLI(args)
-            XCTAssertEqual(rc, 64, "\(args): \(output)")
+            let (rc, out, err) = try runCLI(args)
+            XCTAssertEqual(rc, 64, "\(args): \(out + err)")
         }
     }
 
@@ -107,12 +117,12 @@ final class RecoverCommandTests: XCTestCase {
     /// READ. Every state is surfaced, and `protecting` is exactly true when the
     /// agent is enabled.
     func testBackstopStatusJSONIsReadOnlyAndSurfaced() throws {
-        let (rc, output) = try runCLI(["backstop", "status", "--json"])
-        XCTAssertEqual(rc, 0, output)
-        guard let data = output.data(using: .utf8),
+        let (rc, out, err) = try runCLI(["backstop", "status", "--json"])
+        XCTAssertEqual(rc, 0, out + err)
+        guard let data = out.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let backstop = obj["backstop"] as? [String: Any] else {
-            return XCTFail("expected a JSON backstop block, got: \(output)")
+            return XCTFail("expected a JSON backstop block on stdout, got: \(out) / stderr: \(err)")
         }
         let status = backstop["status"] as? String
         XCTAssertNotNil(status)
@@ -124,6 +134,9 @@ final class RecoverCommandTests: XCTestCase {
                        "com.benjaminbelaga.runclosed.backstop.plist")
         XCTAssertEqual(obj["programArguments"] as? [String],
                        ["runclosed-cli", "recover", "--backstop"])
+        // The operator's own "off" is surfaced, not just the registry fact: an
+        // opt-out is otherwise indistinguishable from "never registered".
+        XCTAssertNotNil(backstop["operatorOptedOut"], "the opt-out must be reported")
     }
 
     /// `doctor` and `status` both carry the backstop block (ADR 024 §6): a
@@ -131,11 +144,11 @@ final class RecoverCommandTests: XCTestCase {
     /// diagnostic that lies about coverage.
     func testDoctorAndStatusCarryTheBackstopBlock() throws {
         for command in ["doctor", "status"] {
-            let (rc, output) = try runCLI([command])
-            XCTAssertEqual(rc, 0, output)
-            guard let data = output.data(using: .utf8),
+            let (rc, out, err) = try runCLI([command])
+            XCTAssertEqual(rc, 0, out + err)
+            guard let data = out.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                return XCTFail("\(command): expected JSON, got \(output)")
+                return XCTFail("\(command): expected JSON on stdout, got \(out) / stderr: \(err)")
             }
             let backstop = try XCTUnwrap(obj["backstop"] as? [String: Any],
                                          "\(command) has no backstop block")
@@ -309,8 +322,21 @@ final class RecoverCommandTests: XCTestCase {
     /// Checking only that the URLs differ is not enough: a service that ignored
     /// the injected store and wrote BOTH would pass. The real path's existence
     /// and mtime are captured before the run and must be unchanged after it.
+    ///
+    /// Gated on the agent not being provably live: on a Mac where the backstop
+    /// IS registered, launchd runs `recover --backstop` every 60 s and that run
+    /// rewrites exactly this file, so an unconditional comparison would fail on
+    /// a perfectly healthy machine whenever the firing lands inside the test
+    /// window — a red that measures the machine rather than the code (review
+    /// round 7).
     func testTheFixtureNeverWritesTheRealHeartbeatPath() throws {
         let real = BackstopHeartbeatStore().url
+        // Is a real agent writing this file right now? If so the mtime is not
+        // ours to assert on.
+        let agentIsLive = RecoveryPolicy.runFreshness(
+            heartbeat: BackstopHeartbeatStore().freshnessInput(),
+            currentBootID: BootID.current(),
+            now: Date()).isEnforcing
         let before = (try? FileManager.default.attributesOfItem(atPath: real.path))?[.modificationDate] as? Date
         let existedBefore = FileManager.default.fileExists(atPath: real.path)
 
@@ -324,6 +350,9 @@ final class RecoverCommandTests: XCTestCase {
         XCTAssertNotEqual(service.heartbeatStore.url, real,
                           "a test must never share the production heartbeat path")
 
+        // The assertion that always holds: OUR run went to the injected path.
+        // The real-path guard only adds evidence when launchd is not racing us.
+        guard !agentIsLive else { return }
         let after = (try? FileManager.default.attributesOfItem(atPath: real.path))?[.modificationDate] as? Date
         XCTAssertEqual(FileManager.default.fileExists(atPath: real.path), existedBefore,
                        "the real heartbeat path must not be created by a test")

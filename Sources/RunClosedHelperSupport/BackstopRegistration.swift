@@ -198,6 +198,18 @@ public struct BackstopLifecycleService {
         /// Result of the last mutating call; nil when only observing. A failed
         /// call is surfaced, never swallowed into a bare status.
         public var lastOperationSucceeded: Bool?
+        /// The operator explicitly turned the backstop off (`backstop
+        /// unregister`), and the app therefore no longer re-registers it at
+        /// launch.
+        ///
+        /// Surfaced because it is otherwise INVISIBLE and indistinguishable
+        /// from "never registered": the app skips registration, `status`
+        /// reports `notRegistered`/`notFound`, and the popup tells the operator
+        /// to approve an agent in System Settings that will never appear there.
+        /// The net ADR 024 exists for then never exists, silently (review round
+        /// 7). Nothing is normalized: the status stays the registry fact and
+        /// this says WHY it stays that way.
+        public var operatorOptedOut: Bool
 
         public var isProtecting: Bool { status.isProtecting }
     }
@@ -206,7 +218,8 @@ public struct BackstopLifecycleService {
         Report(status: registrar.status(),
                boundedAction: RunClosedBackstopDescriptor.boundedAction,
                intervalSeconds: RunClosedBackstopDescriptor.startInterval,
-               lastOperationSucceeded: nil)
+               lastOperationSucceeded: nil,
+               operatorOptedOut: registrar.operatorOptedOut())
     }
 
     /// Register when nothing is registered, and ONLY then: an existing

@@ -689,7 +689,9 @@ final class RecoveryBackstopServiceTests: XCTestCase {
         let freshness = RecoveryPolicy.runFreshness(
             heartbeat: rig.heartbeat.freshnessInput(),
             currentBootID: "A", now: rig.clock.wall)
-        XCTAssertEqual(freshness, .lastRunFailed(exitCode: 75))
+        // Named as busy, not failed: the agent was pre-empted by another
+        // RunClosed writer, it did not break. Still not a proof (review 7).
+        XCTAssertEqual(freshness, .lastRunBusy(ageSeconds: 0))
         XCTAssertFalse(freshness.isEnforcing)
     }
 

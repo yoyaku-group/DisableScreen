@@ -49,13 +49,21 @@
     <true/>
 
     <!-- launchd owns the agent's stdout/stderr; without these two keys a
-         refused scribe (the macOS 26 `notFound` state, a `pmset` that fails in
+         refused run (the macOS 26 `notFound` state, a `pmset` that fails in
          this context) is DISCARDED, and the operator has no way to see why the
-         net is not protecting them. Diagnostics go to a rotated-by-size file
-         rather than the audit log, which only records actions. -->
+         net is not protecting them. Diagnostics go to a file rather than the
+         audit log, which only records actions.
+
+         NOT /tmp: that directory is world-writable and sticky, so another
+         local account could pre-create the name as a symlink to any file this
+         user can write (a shell profile, an authorized_keys) — launchd opens
+         the path AS THIS USER, so the write lands with our privileges. An
+         absolute path under ~/Library/Logs is not pre-creatable by anyone
+         else. launchd does not expand `~` in these keys, so the absolute form
+         is required; a unit test pins it. -->
     <key>StandardErrorPath</key>
-    <string>/tmp/com.benjaminbelaga.runclosed.backstop.err</string>
+    <string>__HOME__/Library/Logs/RunClosed/backstop.err.log</string>
     <key>StandardOutPath</key>
-    <string>/tmp/com.benjaminbelaga.runclosed.backstop.out</string>
+    <string>__HOME__/Library/Logs/RunClosed/backstop.out.log</string>
 </dict>
 </plist>

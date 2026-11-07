@@ -192,12 +192,24 @@ public enum RecoveryPolicy {
         /// next minute restores the proof. Until then, refuse.
         case stale(ageSeconds: TimeInterval)
         /// The last run exited non-zero: it started and could not do its job
-        /// (5 a failed release, 75 a lock it never got, 3 a refusal that
-        /// protected nothing). Not an enforcer, whatever its registration
-        /// says.
+        /// (5 a failed release, 3 a refusal that protected nothing). Not an
+        /// enforcer, whatever its registration says.
         case lastRunFailed(exitCode: Int32)
         /// A run finished recently on this boot and did not fail.
         case fresh(ageSeconds: TimeInterval)
+        /// The last run exited 75: another RunClosed writer (the app's guard
+        /// tick, a CLI command) held `LidWriteLock`, so the minute did nothing
+        /// and must not be read as a failure either.
+        ///
+        /// Kept apart from `.fresh` on purpose. It is NOT a proof — the agent
+        /// never entered its locked section, so this minute establishes
+        /// nothing about whether it can end a deadline — but calling it "the
+        /// last run failed" told the operator the net was broken when it had
+        /// simply been pre-empted, and that message cost them a `session
+        /// extend` (review round 7). The direction stays fail-safe: it does
+        /// not lift the ADR 023 refusal, exactly like `.lastRunFailed`, which
+        /// is the rule round 5 turned into a CRITICAL.
+        case lastRunBusy(ageSeconds: TimeInterval)
 
         /// Only a fresh, successful run makes the agent an enforcer.
         public var isEnforcing: Bool {
@@ -215,6 +227,8 @@ public enum RecoveryPolicy {
             case .stale(let age):
                 return "its last run was \(Int(age)) s ago (more than \(Int(RecoveryPolicy.maximumHeartbeatAge)) s)"
             case .lastRunFailed(let code): return "its last run failed (exit \(code))"
+            case .lastRunBusy:
+                return "its last run found another RunClosed writer holding the lock (exit 75), so it did nothing"
             }
         }
     }
@@ -252,10 +266,11 @@ public enum RecoveryPolicy {
     /// hardware qualification (PR5) measures.
     ///
     /// Only a clean exit counts. Every non-zero code means the agent started
-    /// and then could not do its job: 5 a failed release, 75 a lock it never
-    /// got, 3 a refusal (the flag is not provably ours, so nothing was
-    /// protected — grading that "enforcing" would lift the ADR 023 refusal on
-    /// the strength of a run that did nothing, the round-5 CRITICAL).
+    /// and then could not do its job: 5 a failed release, 3 a refusal (the flag
+    /// is not provably ours, so nothing was protected — grading that
+    /// "enforcing" would lift the ADR 023 refusal on the strength of a run that
+    /// did nothing, the round-5 CRITICAL). Exit 75 gets its own name because it
+    /// is not a failure but is still not a proof (see `.lastRunBusy`).
     public static func runFreshness(
         heartbeat: (at: Date, bootID: String, exitCode: Int32)?,
         currentBootID: String,
@@ -266,11 +281,20 @@ public enum RecoveryPolicy {
         guard heartbeat.bootID == currentBootID else {
             return .otherBoot(recordBootID: heartbeat.bootID)
         }
+        let age = now.timeIntervalSince(heartbeat.at)
         // Checked before the age: a failed run is not made good by recency.
         guard heartbeat.exitCode == 0 else {
+            // 75 is the ONE non-zero code that is not a failure: another
+            // RunClosed writer held the lock, so the agent was pre-empted, not
+            // broken. It is named as such (and still not a proof), so the
+            // operator is not told the net is down when it merely waited. Too
+            // old to be news, it is stale like any other old minute.
+            if heartbeat.exitCode == busyExitCode {
+                guard age >= 0, age <= maximumAge else { return .stale(ageSeconds: age) }
+                return .lastRunBusy(ageSeconds: age)
+            }
             return .lastRunFailed(exitCode: heartbeat.exitCode)
         }
-        let age = now.timeIntervalSince(heartbeat.at)
         // A negative age means the wall clock moved backwards. That is not
         // evidence of a recent run, so it is graded stale rather than fresh.
         guard age >= 0 else { return .stale(ageSeconds: age) }
