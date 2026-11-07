@@ -51,4 +51,25 @@ public enum RunClosedBackstopDescriptor {
     /// it can only ever make the Mac LESS awake.
     public static let boundedAction =
         "turn lid stay-awake OFF when a session deadline passed or the battery is critical; never ON"
+
+    /// Where launchd writes the agent's stdout/stderr (relative to the user's
+    /// home, like the plist's `__HOME__` template).
+    ///
+    /// Never `/tmp`: it is world-writable and sticky, so another local account
+    /// could pre-create the name as a symlink and launchd would open it AS THIS
+    /// USER. launchd creates the FILE but not the DIRECTORY, and a bundle built
+    /// on one machine can be installed on another — so the app and the CLI
+    /// create it at runtime instead of trusting the build (review round 9).
+    public static let logDirectoryRelativePath = "Library/Logs/RunClosed"
+
+    /// Create the log directory launchd will write into. Idempotent; a failure
+    /// is not fatal (the agent still runs, only its diagnostics are lost).
+    @discardableResult
+    public static func prepareLogDirectory(
+        home: URL = URL(fileURLWithPath: NSHomeDirectory())
+    ) -> Bool {
+        let dir = home.appendingPathComponent(logDirectoryRelativePath, isDirectory: true)
+        return (try? FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true)) != nil
+    }
 }

@@ -141,6 +141,10 @@ func cmdBackstop(_ rest: [String]) -> Int32 {
         return 0
     case "register":
         guard rest.count == 1 else { FileHandler.err(backstopUsage); return 64 }
+        // launchd creates the log FILE but not its directory, and the bundle
+        // may have been built on another machine: register is the moment the
+        // agent starts writing, so this is where the directory must exist.
+        RunClosedBackstopDescriptor.prepareLogDirectory()
         let r = svc.registerAndReport()
         emitJSON([
             "schemaVersion": kSchemaVersion,

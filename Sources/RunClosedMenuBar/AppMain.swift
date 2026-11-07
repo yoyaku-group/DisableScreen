@@ -239,6 +239,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// a phantom "enabled".
     private func registerBackstop() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
+            // launchd writes the agent's diagnostics into this directory but
+            // creates only the FILE, and the bundle may have been built on
+            // another machine — so it is prepared here, at runtime, not only
+            // in the build script.
+            RunClosedBackstopDescriptor.prepareLogDirectory()
             // `automatic: true` — an app launch must never undo an explicit
             // `runclosed backstop unregister`.
             let report = BackstopLifecycleService(registrar: SMAppServiceAgentRegistrar())

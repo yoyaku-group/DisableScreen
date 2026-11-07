@@ -92,6 +92,13 @@ public struct RecoveryBackstopService {
             if case .completed(let report) = self { return report.batteryMutation }
             return nil
         }
+
+        /// The repeating-failure key already audited, when this outcome carried
+        /// one. `nil` means "leave the heartbeat's value alone".
+        public var auditedFailureKey: String? {
+            if case .completed(let report) = self { return report.auditedFailureKey }
+            return nil
+        }
     }
 
     /// What the protected section did. `nil` fields are steps that did not run.
@@ -113,6 +120,9 @@ public struct RecoveryBackstopService {
         /// saw the condition and it has now been reported. Carried into the
         /// heartbeat so the next minute does not report it again.
         public var rearmWithheldEpisode = false
+        /// The identifier of a repeating failure this run audited, carried into
+        /// the heartbeat so the next minute with the SAME failure stays quiet.
+        public var auditedFailureKey: String?
 
         public init(plan: RecoveryPolicy.Plan) {
             self.plan = plan
@@ -278,11 +288,17 @@ public struct RecoveryBackstopService {
         // battery (fast path, app alive, busy), so the log stays
         // once-per-episode instead of re-reporting on every no-op minute.
         let reported = outcome.rearmWithheldEpisode ?? previous?.rearmWithheldReported ?? false
+        // A repeating failure keeps its key until a DIFFERENT outcome replaces
+        // it: a minute that never reached the battery step (fast path, app
+        // alive, busy) must not clear the memory, or the next failing minute
+        // would re-audit the same failure.
+        let auditedKey = outcome.auditedFailureKey ?? previous?.lastAuditedFailureKey
         let saved = heartbeatStore.save(.init(
             at: wallClock(),
             bootID: bootID,
             exitCode: outcome.exitCode.rawValue,
-            rearmWithheldReported: reported))
+            rearmWithheldReported: reported,
+            lastAuditedFailureKey: auditedKey))
         guard !saved else { return }
         // Not fatal — the protective action already happened — but a heartbeat
         // that cannot be written silently breaks two things: the CLI refuses
@@ -302,7 +318,9 @@ public struct RecoveryBackstopService {
         var report = Report(plan: plan)
         // The episode flag is read BEFORE this run's battery step, and only
         // meaningful when the battery step runs at all.
-        let rearmAlreadyReported = heartbeatStore.load()?.rearmWithheldReported ?? false
+        let previous = heartbeatStore.load()
+        let rearmAlreadyReported = previous?.rearmWithheldReported ?? false
+        let auditedFailureKey = previous?.lastAuditedFailureKey
 
         // — Session step: expire a due session (`.sessionRecovery` for its own
         // previous-boot record), or reconcile an orphan. Same decisions as the
@@ -329,8 +347,26 @@ public struct RecoveryBackstopService {
         report.sleepRC = battery.sleepRC
         switch battery.mutation {
         case .released, .releaseFailed, .releaseRefused:
-            auditBattery(battery, recordBootID: recordBootID)
-            report.audited = true
+            // `releaseFailed` is the one outcome that REPEATS: a persistent
+            // failure (a stale sudoers rule, a `pmset` refused in the agent's
+            // context) holds the same condition every 60 s and would write
+            // 1 440 identical lines a day — the flood the "never on a no-op
+            // minute" rule exists to prevent. So a repeating failure is
+            // audited once per (reason) episode, tracked in the heartbeat, and
+            // a NEW reason or a recovery always writes. `released` and
+            // `releaseRefused` are terminal by construction: they stop the
+            // condition, so there is nothing to dedupe (review round 9).
+            if battery.mutation == .releaseFailed {
+                let key = "batteryReleaseFailed:\(battery.decision.reason.rawValue)"
+                if auditedFailureKey != key {
+                    auditBattery(battery, recordBootID: recordBootID)
+                    report.audited = true
+                }
+                report.auditedFailureKey = key
+            } else {
+                auditBattery(battery, recordBootID: recordBootID)
+                report.audited = true
+            }
         case .rearmWithheld:
             // The app owes a re-arm and the backstop will not do it. Recording
             // it keeps "nothing happened" from being the only trace — but ONCE

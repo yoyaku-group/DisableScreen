@@ -277,24 +277,36 @@ public struct BackstopLifecycleService {
             return report()
         }
         let status = registrar.status()
-        if automatic, status == .notRegistered, registrar.wasEverRegistered() {
-            // It WAS registered and now reads `notRegistered`: the operator
-            // revoked it in System Settings → Login Items, which is a decision
-            // exactly like `backstop unregister` and equally invisible
-            // afterwards. Re-registering at launch would undo it silently, in a
-            // screen they just used to say no. `notFound` is excluded on
-            // purpose: macOS 26 reports a never-registered agent that way
-            // (ADR 018), so a fresh machine must still register.
+        if automatic, status == .notRegistered || status == .notFound,
+           registrar.wasEverRegistered() {
+            // It WAS registered and now reads as absent: the operator revoked it
+            // in System Settings → Login Items, which is a decision exactly like
+            // `backstop unregister` and equally invisible afterwards.
+            // Re-registering at launch would undo it silently, on the very
+            // screen they just used to say no.
+            //
+            // `notFound` counts as revoked here even though macOS 26 reports a
+            // NEVER-registered agent the same way (ADR 018): `wasEverRegistered`
+            // is what separates the two. A fresh machine has it false and still
+            // registers; a machine that had the agent and now cannot find it has
+            // been told no (review round 9).
             return report()
         }
         switch status {
         case .notRegistered, .notFound:
             ok = registrar.register()
             if ok == true { registrar.setWasEverRegistered(true) }
-        default:
+        case .enabled, .requiresApproval:
             // Already registered or awaiting approval: remember it, so a later
             // `notRegistered` is read as a revocation rather than a first run.
             registrar.setWasEverRegistered(true)
+        case .unknown:
+            // `unknown` says "this process cannot see the agent" (a foreign
+            // bundle, a container-level failure), NOT that one exists. Marking
+            // it as "was ever registered" would let a single unreadable probe
+            // turn the next launch's `notRegistered` into a phantom revocation
+            // and stop the net from ever registering. Nothing is recorded.
+            break
         }
         var r = report()
         r.lastOperationSucceeded = ok

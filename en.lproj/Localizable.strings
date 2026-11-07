@@ -33,6 +33,7 @@
 /* Recovery backstop (ADR 024) */
 "Recovery backstop off — approve it in System Settings" = "Recovery backstop off — approve it in System Settings";
 "Recovery backstop off (see log)" = "Recovery backstop off (see log)";
+"Recovery backstop off — you turned it off" = "Recovery backstop off — you turned it off";
 "Recovery backstop enabled but not running (see log)" = "Recovery backstop enabled but not running (see log)";
 "Open Login Items…" = "Open Login Items…";
 

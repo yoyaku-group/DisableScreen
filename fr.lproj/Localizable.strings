@@ -31,6 +31,7 @@
 /* Filet de secours launchd (ADR 024) */
 "Recovery backstop off — approve it in System Settings" = "Filet de secours inactif — approuvez-le dans Réglages Système";
 "Recovery backstop off (see log)" = "Filet de secours inactif (voir le journal)";
+"Recovery backstop off — you turned it off" = "Filet de secours inactif — vous l'avez désactivé";
 "Recovery backstop enabled but not running (see log)" = "Filet de secours activé mais inactif (voir le journal)";
 "Open Login Items…" = "Ouvrir les items d'ouverture…";
 

@@ -61,20 +61,29 @@ public struct BackstopHeartbeatStore {
         /// audited (ADR 024 review round 2 — the condition holds for every
         /// minute while it lasts, so auditing it each time floods the log).
         public var rearmWithheldReported: Bool
+        /// The identifier of the last REPEATING failure already audited (a
+        /// battery release that keeps failing for the same reason). Same
+        /// once-per-episode discipline as `rearmWithheldReported`: a stale
+        /// sudoers rule holds the condition every 60 s, and 1 440 identical
+        /// audit lines a day is the flood the rule exists to stop (round 9).
+        public var lastAuditedFailureKey: String?
         public init(schemaVersion: Int = kBackstopHeartbeatSchemaVersion,
                     at: Date,
                     bootID: String,
                     exitCode: Int32,
-                    rearmWithheldReported: Bool = false) {
+                    rearmWithheldReported: Bool = false,
+                    lastAuditedFailureKey: String? = nil) {
             self.schemaVersion = schemaVersion
             self.at = at
             self.bootID = bootID
             self.exitCode = exitCode
             self.rearmWithheldReported = rearmWithheldReported
+            self.lastAuditedFailureKey = lastAuditedFailureKey
         }
 
         private enum CodingKeys: String, CodingKey {
-            case schemaVersion, at, bootID, exitCode, rearmWithheldReported
+            case schemaVersion, at, bootID, exitCode, rearmWithheldReported,
+                 lastAuditedFailureKey
         }
 
         /// Tolerant decoding: a key a later version adds must not make the file
@@ -88,6 +97,8 @@ public struct BackstopHeartbeatStore {
             exitCode = try c.decodeIfPresent(Int32.self, forKey: .exitCode) ?? 0
             rearmWithheldReported = try c.decodeIfPresent(
                 Bool.self, forKey: .rearmWithheldReported) ?? false
+            lastAuditedFailureKey = try c.decodeIfPresent(
+                String.self, forKey: .lastAuditedFailureKey)
         }
     }
 
