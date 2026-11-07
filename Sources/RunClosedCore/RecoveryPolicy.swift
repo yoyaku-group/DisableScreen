@@ -157,6 +157,10 @@ public enum RecoveryPolicy {
     /// rule needs it and Core cannot depend on MacSystem.
     public static let backendFailureExitCode: Int32 = 5
 
+    /// The exit code of a minute that could not take the write lock (75,
+    /// `EX_TEMPFAIL`). Kept here for the same reason as the failure code.
+    public static let busyExitCode: Int32 = 75
+
     /// A registration state is not proof of execution. `SMAppService` reporting
     /// `enabled` means the agent is registered and approved; it says nothing
     /// about whether a single protective minute ever ran — an approved agent
@@ -181,6 +185,11 @@ public enum RecoveryPolicy {
         /// The last run FAILED. A backstop that cannot do its job is not an
         /// enforcer, whatever its registration says.
         case lastRunFailed(exitCode: Int32)
+        /// The last run was BUSY: another writer held `LidWriteLock` for the
+        /// whole interval, so no protective section ran. A minute that could
+        /// not act is not proof the agent CAN act — a lock held across every
+        /// interval would otherwise grade fresh on nothing.
+        case lastRunBusy(exitCode: Int32)
         /// A run finished recently on this boot and did not fail.
         case fresh(ageSeconds: TimeInterval)
 
@@ -200,6 +209,8 @@ public enum RecoveryPolicy {
             case .stale(let age):
                 return "its last run was \(Int(age)) s ago (more than \(Int(RecoveryPolicy.maximumHeartbeatAge)) s)"
             case .lastRunFailed(let code): return "its last run failed (exit \(code))"
+            case .lastRunBusy:
+                return "its last run could not get the write lock, so it did nothing"
             }
         }
     }
@@ -227,6 +238,12 @@ public enum RecoveryPolicy {
         // Checked before the age: a failed run is not made good by recency.
         guard heartbeat.exitCode != backendFailureExitCode else {
             return .lastRunFailed(exitCode: heartbeat.exitCode)
+        }
+        // A busy minute proves the agent started, not that it could act. If the
+        // lock were held across every interval, grading that fresh would let
+        // the CLI trust an enforcer that has not enforced anything.
+        if heartbeat.exitCode == busyExitCode {
+            return .lastRunBusy(exitCode: heartbeat.exitCode)
         }
         let age = now.timeIntervalSince(heartbeat.at)
         // A negative age means the wall clock moved backwards. That is not

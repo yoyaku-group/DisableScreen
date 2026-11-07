@@ -763,7 +763,7 @@ $ arch -arm64 swift test
   RunClosedPersistenceTests     53 tests, 0 failures   (46 → 53)
   RunClosedHelperSupportTests   27 tests, 0 failures   (inchangé)
   RunClosedAppTests             11 tests, 0 failures   (inchangé)
-  → 422 tests, 0 failures (391 avant ce tour : +30)
+  → 429 tests, 0 failures (391 avant ce tour : +30)
 ```
 
 Corrections et contrats ajoutés :
@@ -796,3 +796,52 @@ résolution de l'agent dans le bundle, qui n'a pas été mesurée. Les chemins d
 fraîcheur sont couverts par fakes et par un store temporaire ; `recover --backstop`, `backstop
 register`, `session start` et `lid-stay-awake on|off` n'ont toujours pas été lancés sur la machine
 réelle.
+
+### Relecture tour 3 (`ai-review-gate` WARN advisory, 0 CRITICAL, 7 constats) — 2026-11-07
+
+```
+$ arch -arm64 swift build --build-tests     → 0 error, 0 warning
+$ arch -arm64 swift test
+  RunClosedCoreTests           135 tests, 0 failures   (132 → 135)
+  RunClosedMacSystemTests      199 tests, 0 failures   (199, réécriture à contrat égal)
+  RunClosedPersistenceTests     53 tests, 0 failures
+  RunClosedHelperSupportTests   31 tests, 0 failures   (27 → 31)
+  RunClosedAppTests             11 tests, 0 failures
+  → 429 tests, 0 failures (422 avant ce tour : +7)
+```
+
+Le verdict est `WARN (advisory)`, 0 CRITICAL — la porte passe — mais 7 constats portaient sur du code
+écrit dans ce lot. Tous traités :
+
+- **Popup (WARN)** — `backstopRow()` ne regardait que `status.isProtecting`, donc un agent approuvé
+  dont le `BundleProgram` ne se résout pas affichait *rien* dans le popup alors que le CLI du même diff
+  rapportait `enforcing: false`. Exactement la panne silencieuse que le heartbeat existe pour
+  attraper. Le popup applique désormais la même règle (`isProtecting && runFreshness(...).isEnforcing`)
+  et affiche « Recovery backstop enabled but not running (see log) ».
+- **Enregistrement au lancement (WARN)** — `registerIfNeeded()` enregistrait depuis `notRegistered`,
+  or c'est l'état que laisse un `backstop unregister` : lancer l'app annulait donc en silence une
+  décision explicite de l'opérateur. L'opt-out est maintenant persisté (`UserDefaults`, clé
+  `backstopOperatorOptedOut`), honoré par l'enregistrement automatique (`automatic: true`, le seul
+  appel fait au lancement), et effacé par un `backstop register` explicite.
+- **Test dépendant de la machine (WARN)** — l'assertion `recentRun == false` contre le binaire réel
+  passait sur une machine où l'agent n'a jamais été installé et **échouait sur le Mac déployé** que ce
+  lot cible. Remplacée par des invariants : `enforcing == protecting && recentRun`, cohérence
+  `lastRunAt`/`lastExitCode`, et « non enregistré ⇒ jamais enforcing ».
+- **Test qui ne pouvait pas échouer (WARN)** — `testRefusedBatteryReleaseExits3` n'assertait que dans
+  un `if` jamais pris. Le refus est une course réelle non stagingeable par la surface publique (retirer
+  le record dans le readback batterie fait passer `evaluate()` en `notOwned` et dégrade en alerte, donc
+  aucun relâchement n'est tenté) : le map est désormais asserté sur un `Report` construit, avec
+  `released` et `rearmWithheld` côte à côte.
+- **Minute occupée (suggestion, retenue)** — `runFreshness` ne rejetait que le code 5, donc un run à 75
+  (verrou tenu) comptait comme preuve. Un nouveau cas `lastRunBusy` refuse : une minute qui n'a pas pu
+  agir ne prouve pas que l'agent peut agir. Un refus (3) reste frais — c'est le backstop qui marche.
+- **Échéance à 7 jours (suggestion)** — `rowLabel` affichait le jour de la semaine, or une échéance à
+  exactement une semaine tombe le MÊME jour : « Until Tue 14:30 » un mardi se lit comme aujourd'hui.
+  Au-delà de 7 jours la date est ajoutée ; en deçà d'un jour, heure seule.
+- **Ordre de l'audit (suggestion)** — `performRelease` lisait `recordBootIDBefore` après l'étape
+  session, qui peut effacer `owned_lid.json` sur le même tick. La valeur est maintenant capturée avant.
+
+NOT_TESTED, inchangé : rien de tout cela n'a été mesuré sur matériel. Le popup et la persistance de
+l'opt-out sont du code AppKit/`UserDefaults` couverts par lecture et par tests de la couche service ;
+`recover --backstop`, `backstop register`, `session start` et `lid-stay-awake on|off` n'ont toujours
+pas été lancés sur la machine réelle.

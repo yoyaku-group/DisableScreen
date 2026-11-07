@@ -60,6 +60,18 @@ public protocol BackstopRegistrar: Sendable {
     /// Open System Settings → Login Items & Extensions so the user can approve
     /// a `requiresApproval` agent. Performs no privileged work.
     func openLoginItemsSettings()
+    /// The operator explicitly turned the backstop off (`backstop unregister`).
+    /// The app's automatic registration at launch honours this, so it can never
+    /// silently undo that decision. Cleared by an explicit re-register.
+    func operatorOptedOut() -> Bool
+    func setOperatorOptedOut(_ value: Bool)
+}
+
+public extension BackstopRegistrar {
+    /// Registrars that do not model the opt-out (test doubles) default to
+    /// "no opt-out", so nothing changes for them.
+    func operatorOptedOut() -> Bool { false }
+    func setOperatorOptedOut(_ value: Bool) {}
 }
 
 /// Production registrar wrapping `SMAppService.agent(plistName:)`.
@@ -122,6 +134,30 @@ public struct SMAppServiceAgentRegistrar: BackstopRegistrar {
     public func openLoginItemsSettings() {
         SMAppService.openSystemSettingsLoginItems()
     }
+
+    /// Persisted in `UserDefaults`, NOT in the registry: the opt-out is the
+    /// operator's statement of intent and must survive the status going to
+    /// `notRegistered`, which is precisely the state that would otherwise look
+    /// like "never registered, safe to register at launch".
+    public func operatorOptedOut() -> Bool {
+        Self.defaults()?.bool(forKey: Self.optedOutKey) ?? false
+    }
+
+    public func setOperatorOptedOut(_ value: Bool) {
+        Self.defaults()?.set(value, forKey: Self.optedOutKey)
+    }
+
+    static let optedOutKey = "backstopOperatorOptedOut"
+
+    /// Same bundle dance as `LowBatteryGuardSettings`: inside the bundle the
+    /// main bundle id IS the suite, and `UserDefaults(suiteName: <own id>)` is
+    /// rejected by Foundation there.
+    private static func defaults() -> UserDefaults? {
+        if Bundle.main.bundleIdentifier == "com.benjaminbelaga.RunClosed" {
+            return .standard
+        }
+        return UserDefaults(suiteName: "com.benjaminbelaga.RunClosed")
+    }
 }
 
 /// Registration + status, deliberately without any mutation of the flag: this
@@ -161,8 +197,20 @@ public struct BackstopLifecycleService {
     ///
     /// Idempotent by construction: calling it at every app launch is the
     /// intended use.
-    public func registerIfNeeded() -> Report {
+    ///
+    /// `automatic` says the APP is registering on its own initiative at launch,
+    /// as opposed to the operator typing `runclosed backstop register`. The two
+    /// cases differ in exactly one way: an automatic call honours the opt-out
+    /// an explicit `backstop unregister` recorded, so launching the app can
+    /// never silently undo an operator decision (ADR 024).
+    public func registerIfNeeded(automatic: Bool = false) -> Report {
         var ok: Bool?
+        if automatic, registrar.operatorOptedOut() {
+            // The operator turned the backstop off on purpose. Re-registering
+            // at launch would undo that with no prompt and no way to tell —
+            // the state is surfaced as `notRegistered`, not fought.
+            return report()
+        }
         switch registrar.status() {
         case .notRegistered, .notFound:
             ok = registrar.register()
@@ -175,15 +223,22 @@ public struct BackstopLifecycleService {
     }
 
     /// Explicit `runclosed backstop register`: same rule as `registerIfNeeded`
-    /// (never re-register a pending approval).
-    public func registerAndReport() -> Report { registerIfNeeded() }
+    /// (never re-register a pending approval), but it CLEARS the operator
+    /// opt-out — this IS the operator asking for it back.
+    public func registerAndReport() -> Report {
+        registrar.setOperatorOptedOut(false)
+        return registerIfNeeded()
+    }
 
-    /// Reversible teardown: no launchd call when nothing is registered.
+    /// Reversible teardown: no launchd call when nothing is registered. Records
+    /// the operator's opt-out so the app's automatic registration at launch
+    /// does not put it straight back.
     public func unregisterAndReport() -> Report {
         var ok: Bool?
         if registrar.status() != .notRegistered {
             ok = registrar.unregister()
         }
+        registrar.setOperatorOptedOut(true)
         var r = report()
         r.lastOperationSucceeded = ok
         return r

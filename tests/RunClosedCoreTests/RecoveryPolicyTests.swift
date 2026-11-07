@@ -294,6 +294,22 @@ final class RecoveryPolicyTests: XCTestCase {
         XCTAssertFalse(f.isEnforcing)
     }
 
+    /// A busy minute proves the agent STARTED, not that it could ACT. If the
+    /// lock were held across every interval, grading those fresh would let the
+    /// CLI trust an enforcer that has enforced nothing.
+    func testABusyLastRunDoesNotEnforce() {
+        let f = freshness(at: -30, exitCode: RecoveryPolicy.busyExitCode)
+        XCTAssertEqual(f, .lastRunBusy(exitCode: 75))
+        XCTAssertFalse(f.isEnforcing)
+        XCTAssertFalse(f.refusalHint.isEmpty)
+    }
+
+    /// A refusal (exit 3) still proves the agent ran its section and the policy
+    /// said no — that IS the backstop working, so it stays fresh.
+    func testARefusedLastRunStillEnforces() {
+        XCTAssertTrue(freshness(at: -30, exitCode: 3).isEnforcing)
+    }
+
     /// The refusal hint names the actual situation — the operator's next move
     /// differs per case.
     func testEveryNonFreshCaseExplainsItself() {
@@ -302,6 +318,7 @@ final class RecoveryPolicyTests: XCTestCase {
             .otherBoot(recordBootID: "x"),
             .stale(ageSeconds: 400),
             .lastRunFailed(exitCode: 5),
+            .lastRunBusy(exitCode: 75),
         ]
         for c in cases {
             XCTAssertFalse(c.refusalHint.isEmpty, "\(c) must say why")

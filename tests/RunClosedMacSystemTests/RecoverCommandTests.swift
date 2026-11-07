@@ -114,17 +114,30 @@ final class RecoverCommandTests: XCTestCase {
             XCTAssertNotNil(backstop["status"], command)
             XCTAssertNotNil(backstop["protecting"], command)
             // Round 2: registration is not proof of execution, so the blocks
-            // must also say whether a run is PROVEN recent — and on this
-            // machine no agent has ever run, so recentRun is false.
+            // must also say whether a run is PROVEN recent.
+            //
+            // Only INVARIANTS are asserted here, never this machine's state: a
+            // hard-coded `recentRun == false` passes on a developer box where
+            // the agent was never installed and FAILS on the deployed Mac this
+            // lot ships to — the test would be measuring the machine, not the
+            // code.
             XCTAssertNotNil(backstop["enforcing"], command)
+            XCTAssertNotNil(backstop["recentRun"], command)
             XCTAssertNotNil(backstop["lastRunAt"], command)
             XCTAssertNotNil(backstop["lastExitCode"], command)
-            XCTAssertEqual(backstop["recentRun"] as? Bool, false,
-                           "\(command): nothing proves the agent ever ran on this machine")
             XCTAssertEqual(backstop["enforcing"] as? Bool,
                            (backstop["protecting"] as? Bool == true)
                            && (backstop["recentRun"] as? Bool == true),
                            "\(command): enforcing = enabled AND a proven recent run")
+            // The heartbeat fields agree with each other: a run is either
+            // recorded (both fields present) or not (both null).
+            let hasRun = backstop["lastRunAt"] is String
+            XCTAssertEqual(hasRun, backstop["lastExitCode"] is Int,
+                           "\(command): lastRunAt and lastExitCode describe the same run")
+            if !(backstop["protecting"] as? Bool ?? false) {
+                XCTAssertEqual(backstop["enforcing"] as? Bool, false,
+                               "\(command): a backstop that is not registered cannot be enforcing")
+            }
         }
     }
 

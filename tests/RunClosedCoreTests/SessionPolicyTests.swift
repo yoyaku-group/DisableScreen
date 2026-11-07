@@ -293,6 +293,21 @@ final class SessionPolicyTests: XCTestCase {
                        "weekday + time, not a bare time: \(until)")
     }
 
+    /// A 7-day session capped at exactly one week is the trap this label exists
+    /// to close: the deadline falls on the SAME weekday, so "Until Tue 14:30"
+    /// would read as today. Past a day it must carry the date.
+    func testRowLabelShowsTheDateForADeadlineAWeekOut() {
+        let paris = TimeZone(identifier: "Europe/Paris")!
+        let session = timed(7 * 24 * 3600)
+        let label = try! XCTUnwrap(SessionPolicy.rowLabel(
+            session, now: now(continuousSeconds: 1_000),
+            timeZone: paris, locale: Locale(identifier: "en_GB")))
+        let until = label.replacingOccurrences(of: "Until ", with: "")
+            .components(separatedBy: " · ")[0]
+        XCTAssertGreaterThanOrEqual(until.split(separator: " ").count, 3,
+                                    "weekday AND date for a week-out deadline: \(until)")
+    }
+
     /// Same day: no weekday, exactly as before (no regression in the popup's
     /// wording for the ordinary 1 h / 2 h case).
     func testRowLabelOmitsTheDayWhenTheDeadlineIsToday() {

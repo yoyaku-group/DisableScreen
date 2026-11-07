@@ -13,6 +13,11 @@ final class BackstopRegistrationTests: XCTestCase {
         private(set) var unregisterCalls = 0
         private(set) var openLoginItemsCalls = 0
         var registerShouldFail = false
+        /// The operator's explicit opt-out (`backstop unregister`).
+        var optedOut = false
+
+        func operatorOptedOut() -> Bool { optedOut }
+        func setOperatorOptedOut(_ value: Bool) { optedOut = value }
 
         func status() -> BackstopStatus { current }
         func register() -> Bool {
@@ -123,6 +128,57 @@ final class BackstopRegistrationTests: XCTestCase {
         XCTAssertTrue(svc.report().isProtecting)
         XCTAssertEqual(svc.unregisterAndReport().status, .notRegistered)
         XCTAssertEqual(fake.unregisterCalls, 1)
+    }
+
+    // MARK: — An app launch must not undo an operator's unregister
+
+    /// `unregister` is an explicit operator decision. The app registers at every
+    /// launch from `notRegistered`, which is exactly the state an unregister
+    /// leaves behind — so without the opt-out, launching the app would put the
+    /// agent straight back with no prompt.
+    func testAnAutomaticRegisterHonoursTheOperatorOptOut() {
+        let fake = FakeRegistrar()
+        fake.current = .notRegistered
+        fake.optedOut = true
+        let svc = BackstopLifecycleService(registrar: fake)
+        let r = svc.registerIfNeeded(automatic: true)
+        XCTAssertEqual(r.status, .notRegistered)
+        XCTAssertEqual(fake.registerCalls, 0, "an app launch must not undo an explicit unregister")
+        XCTAssertNil(r.lastOperationSucceeded)
+    }
+
+    /// The operator typing `backstop register` is asking for it back: that call
+    /// clears the opt-out and registers.
+    func testAnExplicitRegisterClearsTheOptOut() {
+        let fake = FakeRegistrar()
+        fake.current = .notRegistered
+        fake.optedOut = true
+        let svc = BackstopLifecycleService(registrar: fake)
+        let r = svc.registerAndReport()
+        XCTAssertFalse(fake.optedOut, "the operator asked for it back")
+        XCTAssertEqual(fake.registerCalls, 1)
+        XCTAssertEqual(r.status, .requiresApproval)
+    }
+
+    /// Unregistering records the opt-out — otherwise the next launch undoes it.
+    func testUnregisterRecordsTheOptOut() {
+        let fake = FakeRegistrar()
+        fake.current = .enabled
+        let svc = BackstopLifecycleService(registrar: fake)
+        _ = svc.unregisterAndReport()
+        XCTAssertTrue(fake.optedOut)
+        XCTAssertEqual(fake.unregisterCalls, 1)
+    }
+
+    /// A plain (non-automatic) `registerIfNeeded` is unaffected, so the CLI's
+    /// behaviour never depends on the opt-out.
+    func testANonAutomaticRegisterIgnoresTheOptOut() {
+        let fake = FakeRegistrar()
+        fake.current = .notRegistered
+        fake.optedOut = true
+        XCTAssertEqual(BackstopLifecycleService(registrar: fake)
+            .registerIfNeeded().status, .requiresApproval)
+        XCTAssertEqual(fake.registerCalls, 1)
     }
 
     func testOpenApprovalSettingsPerformsTheDeepLinkOnly() {

@@ -608,26 +608,38 @@ final class RecoveryBackstopServiceTests: XCTestCase {
     }
 
     /// A refusal (B1/B2) is exit 3: policy said no, nothing was attempted.
+    ///
+    /// The mapping is asserted on a constructed `Report` because the refusal is
+    /// a genuine race that cannot be staged through the public surface: the
+    /// ownership record must disappear AFTER the policy decided
+    /// `releaseAndSleep` and BEFORE `LidMutationService`'s B2 gate reads it.
+    /// Removing it earlier (in the battery readback) makes `evaluate()` see
+    /// `notOwned` and downgrade the decision to a warning, so no release is
+    /// ever attempted — which is exactly how the first version of this test
+    /// silently checked nothing.
     func testRefusedBatteryReleaseExits3() {
-        // A flag that reads ON with a critical battery but whose ownership
-        // record is foreign is refused by policy (B2) — however the fast path
-        // would not even engage without a claim, so model the race: the record
-        // claims the flag, the gate refuses because the record is not this
-        // boot's and the reason is not the emergency branch.
-        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 6))
-        // Make the gate see a foreign record between the plan and the write.
-        rig.lidStore.save(.init(bootID: "SOMEONE-ELSE", ownedEnabled: true, referenceState: "on"))
-        let outcome = rig.service.run()
-        guard case .completed(let report) = outcome else {
-            return XCTFail("expected a completed run, got \(outcome)")
-        }
-        // The stale own record takes the emergency branch, which releases; a
-        // genuine B2 refusal needs no record at all, and then the fast path
-        // skips the battery step. Assert whichever happened rather than
-        // guessing: the mapping itself is what matters.
-        if report.batteryMutation == "releaseRefused" {
-            XCTAssertEqual(outcome.exitCode, .refused)
-        }
+        var report = RecoveryBackstopService.Report(
+            plan: RecoveryPolicy.plan(RecoveryPolicy.Facts(
+                recordBootID: "A", recordOwnedEnabled: true, currentBootID: "A",
+                session: nil,
+                now: SessionPolicy.Now(wall: epoch, continuousNanoseconds: 0, bootID: "A"))))
+        report.batteryMutation = "releaseRefused"
+        report.batteryReason = .criticalOwned
+        report.batteryError = "notOwned"
+
+        XCTAssertEqual(report.exitCode, .refused)
+        XCTAssertEqual(report.exitCode.rawValue, 3)
+
+        // And the other battery outcomes, side by side, so a change to any of
+        // them fails here rather than in production.
+        var released = report
+        released.batteryMutation = "released"
+        XCTAssertEqual(released.exitCode, .ok)
+
+        var withheld = report
+        withheld.batteryMutation = "rearmWithheld"
+        withheld.batteryError = "a re-arm is the app's"
+        XCTAssertEqual(withheld.exitCode, .ok)
     }
 
     /// `released`, `rearmWithheld` and "battery step did not run" keep exit 0.

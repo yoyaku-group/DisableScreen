@@ -249,8 +249,12 @@ public struct LowBatteryGuardService {
             outcome.mutation = .rearmWithheld
             outcome.mutationError = "a re-arm is the app's; the backstop never turns the flag on"
         case .releaseAndSleep:
+            // Captured here, before the write, so the guard's own audit line
+            // describes the record the decision was based on.
+            let recordBootIDBefore = lidService.store.load().bootID
             var tick = TickOutcome(evaluation: evaluation)
-            performRelease(evaluation: evaluation, record: &record, outcome: &tick)
+            performRelease(evaluation: evaluation, record: &record, outcome: &tick,
+                           recordBootIDBefore: recordBootIDBefore)
             outcome.mutation = tick.mutation.map {
                 switch $0 {
                 case .released: return .released
@@ -303,7 +307,8 @@ public struct LowBatteryGuardService {
             break
 
         case .releaseAndSleep:
-            performRelease(evaluation: evaluation, record: &record, outcome: &outcome)
+            performRelease(evaluation: evaluation, record: &record, outcome: &outcome,
+                           recordBootIDBefore: recordBootIDBefore)
 
         case .rearm:
             // ADR 023 §4: re-arm only while the session is still valid (not
@@ -366,10 +371,16 @@ public struct LowBatteryGuardService {
     /// The only caller-specific input is the initiator, which the policy
     /// already decided (`emergencyStaleOwnership` widens B2 to our own record
     /// from a previous boot; `LidMutationService` re-checks it).
+    /// `recordBootIDBefore` is passed IN rather than read here: `lockedTick`
+    /// must capture it BEFORE the session step, which can clear or rewrite
+    /// `owned_lid.json` on the same tick. Reading it inside the helper would
+    /// record, in the low-battery audit line, the ownership record as it stood
+    /// AFTER the session step instead of the one the battery decision was
+    /// actually based on.
     private mutating func performRelease(evaluation: Evaluation,
                                          record: inout LowBatteryLatchStore.Record,
-                                         outcome: inout TickOutcome) {
-        let recordBootIDBefore = lidService.store.load().bootID
+                                         outcome: inout TickOutcome,
+                                         recordBootIDBefore: String) {
         let initiator: LidMutationService.Initiator =
             evaluation.decision.reason == .emergencyStaleOwnership ? .lowBatteryEmergency : .automatic
         let result = lidService.setEnabled(false, initiator: initiator)

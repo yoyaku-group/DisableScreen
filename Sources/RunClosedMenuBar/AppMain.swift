@@ -239,8 +239,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// a phantom "enabled".
     private func registerBackstop() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
+            // `automatic: true` — an app launch must never undo an explicit
+            // `runclosed backstop unregister`.
             let report = BackstopLifecycleService(registrar: SMAppServiceAgentRegistrar())
-                .registerIfNeeded()
+                .registerIfNeeded(automatic: true)
             DispatchQueue.main.async {
                 if report.lastOperationSucceeded == false {
                     FileHandle.standardError.write(Data(
@@ -257,12 +259,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The backstop's state for the popup (ADR 024). Read on the main thread:
     /// `SMAppService.status` is a cheap, in-process dictionary lookup (it is
     /// the same call the login-item row already makes on every rebuild).
+    ///
+    /// It applies the SAME rule as the CLI: registration (`enabled`) is not
+    /// enough, the agent must also have proven it RUNS (a fresh, successful
+    /// heartbeat on this boot). Showing nothing on `enabled` alone would tell
+    /// the operator the Mac is protected while they quit the app, in exactly
+    /// the case the heartbeat exists to catch — an approved agent whose program
+    /// never resolves.
     private func backstopRow() -> PopupState.BackstopRow {
-        let status = SMAppServiceAgentRegistrar().status()
-        // Nothing to say when the net is up: the popup stays quiet about a
-        // feature working as intended.
-        guard !status.isProtecting else {
-            return PopupState.BackstopRow(status: status.rawValue, summary: nil, needsApproval: false)
+        let report = BackstopLifecycleService(registrar: SMAppServiceAgentRegistrar()).report()
+        let status = report.status
+        if status.isProtecting {
+            let heartbeat = BackstopHeartbeatStore().load()
+            let freshness = RecoveryPolicy.runFreshness(
+                heartbeat: heartbeat.map { (at: $0.at, bootID: $0.bootID, exitCode: $0.exitCode) },
+                currentBootID: clock.bootID,
+                now: Date())
+            guard !freshness.isEnforcing else {
+                // The net is genuinely up: the popup stays quiet.
+                return PopupState.BackstopRow(status: status.rawValue, summary: nil,
+                                             needsApproval: false)
+            }
+            // Registered and approved, but not provably running.
+            return PopupState.BackstopRow(
+                status: status.rawValue,
+                summary: L10n.t("Recovery backstop enabled but not running (see log)"),
+                needsApproval: false)
         }
         return PopupState.BackstopRow(
             status: status.rawValue,

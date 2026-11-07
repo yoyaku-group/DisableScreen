@@ -270,11 +270,21 @@ public enum SessionPolicy {
         guard let endsAtWall = session.endsAtWall else { return nil }
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = timeZone
-        let sameDay = calendar.isDate(endsAtWall, inSameDayAs: now.wall)
+        // "Today" is not enough of a test: a session can run a full 7 days, and
+        // a deadline exactly a week out has the SAME weekday name — "Until Tue
+        // 14:30" on a Tuesday reads as today, the very ambiguity this label
+        // exists to remove. Only a deadline inside the next day is safe to show
+        // as a bare time.
+        let hoursOut = endsAtWall.timeIntervalSince(now.wall) / 3600
+        let sameDay = calendar.isDate(endsAtWall, inSameDayAs: now.wall) && hoursOut < 24
         let formatter = DateFormatter()
         formatter.timeZone = timeZone
         formatter.locale = locale
-        formatter.setLocalizedDateFormatFromTemplate(sameDay ? "HH:mm" : "EEE HH:mm")
+        // A deadline close enough to be unambiguous gets the bare time;
+        // anything further names the day AND the date, so a 7-day session
+        // cannot be mistaken for this week.
+        let template = sameDay ? "HH:mm" : (hoursOut < 7 * 24 ? "EEE HH:mm" : "EEE d MMM HH:mm")
+        formatter.setLocalizedDateFormatFromTemplate(template)
         let until = formatter.string(from: endsAtWall)
         guard let left = remainingLabel(session, now: now) else {
             return "Until \(until)"

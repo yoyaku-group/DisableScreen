@@ -39,8 +39,12 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   letting a deadline go unenforced. A run that failed, a heartbeat from before
   a restart, or a stale one after a wake all refuse; `backstop status`,
   `status` and `doctor` report `lastRunAt`, `lastExitCode`, `recentRun` and
-  `enforcing`. Known limit, stated in the README: nothing protects the Mac
-  while no user is logged in.
+  `enforcing`. The popup applies the same rule, so it no longer says nothing
+  about an approved-but-never-running agent. A busy minute (another writer held
+  the lock) no longer counts as proof the agent could act, and unregistering is
+  remembered as an explicit operator decision so the next app launch does not
+  silently register the agent again. Known limit, stated in the README: nothing
+  protects the Mac while no user is logged in.
 
 ### Fixed
 
