@@ -1002,6 +1002,12 @@ func renderRecover(_ service: RecoveryBackstopService) -> Int32 {
     // assert exactly what this prints.
     let described = RecoveryBackstopService.describe(outcome, bootID: clock.bootID)
     emitJSON(described.json)
+    // launchd no longer names a log file (a plist inside a signed bundle is
+    // fixed bytes, so any path there belongs to the build account). The agent
+    // writes its own one-line trace under the home of the user it runs as.
+    RunClosedBackstopDescriptor.appendAgentLog(
+        "\(ISO8601DateFormatter().string(from: Date())) "
+        + "recover --backstop exit=\(described.exitCode) outcome=\(outcome.rawValue)")
     return described.exitCode
 }
 

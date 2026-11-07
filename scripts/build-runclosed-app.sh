@@ -71,32 +71,18 @@ cp Resources/com.benjaminbelaga.runclosed.helper.plist \
 # its BundleProgram points back at the runclosed-cli copied above, so the job
 # dies with the app instead of surviving a deleted bundle.
 #
-# `__HOME__` is substituted here because launchd does NOT expand `~` in
-# StandardOutPath/StandardErrorPath, and the template must not carry a /tmp
-# path: /tmp is world-writable and sticky, so another local account could
-# pre-create the name as a symlink and launchd would open it AS THIS USER.
-#
-# Two escaping layers, because the value lands in an XML text node:
-#
-# 1. XML first — `&` and `<` are not legal raw in a plist text node. A home
-#    directory containing `&` (perfectly legal in a POSIX path) would otherwise
-#    produce a plist `plutil -lint` rejects, so the agent would never load.
-# 2. Then `sed` — `&` in the REPLACEMENT means "the whole match" and `|` is the
-#    delimiter, so both need a backslash for sed itself. Escaping for XML first
-#    turns `&` into `&amp;`, whose sed metacharacter has to be escaped again.
-#
-# Order matters: sed's escape of `&` must be applied to the XML-escaped text,
-# never the reverse (a `${_xml_home}` still holding `&` would be re-expanded by
-# sed into the match).
-_xml_home="${HOME//&/&amp;}"
-_xml_home="${_xml_home//</\&lt;}"
-_xml_home="${_xml_home//>/\&gt;}"
-_escaped_home="$(printf '%s' "$_xml_home" | sed 's/[&|\\]/\\&/g')"
-sed "s|__HOME__|${_escaped_home}|g" Resources/com.benjaminbelaga.runclosed.backstop.plist \
-   > "$APP/Contents/Library/LaunchAgents/com.benjaminbelaga.runclosed.backstop.plist"
-# launchd creates the file but not the directory; without this the agent's
-# diagnostics vanish into a failed open.
-mkdir -p "$HOME/Library/Logs/RunClosed"
+# The plist carries NO log path and needs no substitution. `StandardOutPath`
+# and `StandardErrorPath` are fixed bytes in a signed bundle, so whatever path
+# they name belongs to the machine that BUILT the bundle: installed by another
+# account, the agent would write its diagnostics into a directory the running
+# user may not own, or fail the open and lose them. launchd expands no variable
+# there, so there is no correct value to substitute. The agent writes its own
+# trace under NSHomeDirectory()/Library/Logs/RunClosed/backstop.log, resolved at
+# RUNTIME by the process launchd started as the right user (review round 16).
+cp Resources/com.benjaminbelaga.runclosed.backstop.plist \
+   "$APP/Contents/Library/LaunchAgents/"
+# The directory itself is created at runtime by `prepareLogDirectory()`, so a
+# bundle installed on another machine is not left with a missing directory.
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

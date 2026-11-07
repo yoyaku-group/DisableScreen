@@ -1096,3 +1096,34 @@ fermé, la révocation dans Réglages Système pendant la même fenêtre ne l'es
 diagnostic liés au compte de build (tour 13).
 
 Suite : **456/456**, 0 warning.
+
+## Relecture tour 16 — les chemins de diagnostic, corrigés à la source (2026-11-07)
+
+Le même WARN est revenu trois tours de suite (13, 14, 16). Je l'avais consigné deux fois comme une
+limite non corrigeable — c'était faux.
+
+- `Resources/com.benjaminbelaga.runclosed.backstop.plist` — `StandardErrorPath`/`StandardOutPath`
+  sont des octets fixes dans un bundle signé, donc aucun chemin qu'ils nomment ne peut être juste
+  pour un autre compte que celui du build, et launchd n'y étend aucune variable. La conclusion
+  correcte n'était pas « pas de valeur possible » mais « pas besoin de ces clés » : l'agent écrit
+  lui-même sa trace. Les deux clés sont SUPPRIMÉES.
+- `Sources/RunClosedHelperSupport/BackstopDescriptor.swift` — `agentLogURL(home:)` +
+  `appendAgentLog(_:home:)`, qui résolvent `NSHomeDirectory()` au RUNTIME (le home de l'utilisateur
+  que launchd a réellement démarré), créent le répertoire et AJOUTENT au fichier sans jamais le
+  tronquer — la trace d'un échec antérieur ne doit pas disparaître. N'échoue jamais : un diagnostic
+  non écrit ne doit pas faire échouer un run protecteur.
+- `Sources/runclosed/main.swift` — `renderRecover` ajoute une ligne horodatée (`exit`, `outcome`).
+- `scripts/build-runclosed-app.sh` — plus aucune substitution pour ce plist ; toute la mécanique
+  `sed`/XML (juste, et désormais inutile) disparaît avec.
+
+Le test de plist est RETOURNÉ : il exigeait ces clés, il refuse maintenant leur présence.
+`testAppendAgentLogCreatesTheDirectoryAndAppends` couvre l'écriture réelle sur un home temporaire.
+
+**Contre-épreuve mesurée** — en réintroduisant `<key>StandardErrorPath</key>` dans le plist, le test
+échoue en la nommant : `XCTAssertNil failed: "/tmp/x.log"`.
+
+L'audit protecteur (`recovery_audit.jsonl`) n'a jamais dépendu de ces clés : il était déjà écrit par
+l'agent sous son propre home.
+
+Suite : **457/457**, 0 warning. Bundle reconstruit, `plutil -lint` OK, `codesign --verify --strict`
+OK, aucune clé de log ni `__HOME__` dans le plist livré.

@@ -72,4 +72,46 @@ public enum RunClosedBackstopDescriptor {
         return (try? FileManager.default.createDirectory(
             at: dir, withIntermediateDirectories: true)) != nil
     }
+
+    /// The agent's own diagnostic file, resolved at RUNTIME under the home of
+    /// the user the agent runs as.
+    ///
+    /// The plist cannot carry this path. `StandardErrorPath` is a fixed byte
+    /// string in a signed bundle, so a `__HOME__` substituted at build time
+    /// names the BUILD account's home: install a bundle built by another
+    /// account and the agent either writes its diagnostics into a directory
+    /// this user may not own, or fails the open and loses them. launchd expands
+    /// no variable there (review rounds 13-16 flagged it every time).
+    ///
+    /// So the plist keeps NO log keys and the agent tees its own stderr here
+    /// instead. `NSHomeDirectory()` is resolved by the process, which launchd
+    /// starts as the right user.
+    public static func agentLogURL(
+        home: URL = URL(fileURLWithPath: NSHomeDirectory())
+    ) -> URL {
+        home.appendingPathComponent(logDirectoryRelativePath, isDirectory: true)
+            .appendingPathComponent("backstop.log")
+    }
+
+    /// Append one line to the agent log, creating the directory first. Never
+    /// throws: a diagnostic that cannot be written must not fail the run — the
+    /// protective action is what matters, and this is only its trace.
+    ///
+    /// `home` is a test seam; production always uses the process's own home.
+    public static func appendAgentLog(
+        _ line: String,
+        home: URL = URL(fileURLWithPath: NSHomeDirectory())
+    ) {
+        prepareLogDirectory(home: home)
+        let url = agentLogURL(home: home)
+        let data = Data((line.hasSuffix("\n") ? line : line + "\n").utf8)
+        guard let handle = try? FileHandle(forWritingTo: url) else {
+            // First write: create it, owner-only.
+            try? data.write(to: url, options: .atomic)
+            return
+        }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: data)
+    }
 }

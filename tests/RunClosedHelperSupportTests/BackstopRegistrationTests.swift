@@ -348,6 +348,34 @@ final class BackstopRegistrationTests: XCTestCase {
     /// BundleProgram, the protective argv, the interval and the absence of
     /// `KeepAlive` are all asserted against the real file (the same discipline
     /// ADR 017 established for the daemon plist).
+    /// The agent must still leave a trace now that launchd no longer writes
+    /// one for it: `appendAgentLog` creates the directory, appends (never
+    /// truncates) and is a no-op rather than a throw on failure (review round
+    /// 16).
+    func testAppendAgentLogCreatesTheDirectoryAndAppends() throws {
+        let home = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("runclosed-agentlog-\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: home) }
+
+        let expected = RunClosedBackstopDescriptor.agentLogURL(home: home)
+        XCTAssertTrue(expected.path.hasSuffix("/Library/Logs/RunClosed/backstop.log"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: expected.path),
+                       "nothing exists before the first write")
+
+        XCTAssertTrue(RunClosedBackstopDescriptor.prepareLogDirectory(home: home))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: expected.deletingLastPathComponent().path),
+                      "the directory launchd refuses to create is created at runtime")
+
+        // Two appends must both survive: the second must never truncate the
+        // first, or the trace of an earlier failure disappears.
+        RunClosedBackstopDescriptor.appendAgentLog("line one", home: home)
+        RunClosedBackstopDescriptor.appendAgentLog("line two", home: home)
+        let text = try String(contentsOf: expected, encoding: .utf8)
+        XCTAssertTrue(text.contains("line one"))
+        XCTAssertTrue(text.contains("line two"))
+        XCTAssertEqual(text.split(separator: "\n").count, 2)
+    }
+
     func testShippedPlistMatchesTheDescriptor() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()   // RunClosedHelperSupportTests/
@@ -373,27 +401,25 @@ final class BackstopRegistrationTests: XCTestCase {
                      "BundleProgram is the SMAppService form; an absolute Program would "
                      + "point outside the bundle")
         XCTAssertNil(dict["MachServices"], "an agent exposes no listener")
-        // launchd discards an agent's output unless told where to put it, and
-        // that output is the only place a refusal or a failed `pmset` says WHY
-        // the net is not protecting the operator.
-        XCTAssertNotNil(dict["StandardErrorPath"], "a silent launchd agent hides its own failures")
-        XCTAssertNotNil(dict["StandardOutPath"], "a silent launchd agent hides its own failures")
-        // NEVER /tmp. It is world-writable and sticky, so another local account
-        // could pre-create these names as symlinks and launchd would open them
-        // AS THIS USER — an arbitrary-write primitive against a shell profile
-        // or an authorized_keys (review round 7). The build script substitutes
-        // __HOME__; launchd does not expand `~`.
+        // The agent MUST leave a trace — a refusal or a failed `pmset` is the
+        // only place it can say WHY the net is not protecting the operator.
+        //
+        // But it must NOT be launchd's StandardErrorPath/StandardOutPath: those
+        // are FIXED bytes in a signed bundle, so any path they name belongs to
+        // the machine that built it. Installed by another account, the agent
+        // would write into a directory the running user may not own, or fail
+        // the open and lose its diagnostics entirely — and launchd expands no
+        // variable there, so no correct value exists to substitute (review
+        // rounds 13-16 flagged this every time). The agent therefore writes its
+        // own trace under NSHomeDirectory() at RUNTIME, using the home of the
+        // user launchd actually started it as.
         for key in ["StandardErrorPath", "StandardOutPath"] {
-            let path = dict[key] as? String ?? ""
-            XCTAssertFalse(path.isEmpty, "\(key) must not be empty")
-            XCTAssertFalse(path.hasPrefix("/tmp"),
-                           "\(key) must never live in world-writable /tmp: \(path)")
-            // The shipped source is a template; the build script substitutes
-            // __HOME__ with the absolute home before it enters the bundle.
-            XCTAssertTrue(path.hasPrefix("__HOME__") || path.hasPrefix("/"),
-                          "\(key) must be absolute, or the __HOME__ template "
-                          + "the build script substitutes: \(path)")
+            XCTAssertNil(dict[key],
+                         "\(key) is a build-time constant in a signed bundle: it "
+                         + "names the builder's home on someone else's machine. The "
+                         + "agent logs via appendAgentLog() instead")
         }
+        XCTAssertTrue(dict["BundleProgram"] != nil)
     }
 
     /// The argv carries the protective subcommand: a plist that lost
