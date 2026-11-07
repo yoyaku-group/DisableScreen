@@ -13,16 +13,19 @@ public struct LowBatteryAuditLog: Sendable {
     public let url: URL
 
     public init() {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("RunClosed", isDirectory: true)
-        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        self.url = base.appendingPathComponent("low_battery_audit.jsonl")
+        self.url = JSONLAuditLog(fileName: "low_battery_audit.jsonl").url
     }
 
     /// Test seam: explicit URL.
     public init(url: URL) {
         self.url = url
     }
+
+    /// The append mechanics live in `JSONLAuditLog` since ADR 025 — one copy of
+    /// the `O_APPEND` / short-write discipline for every audit trail. The file
+    /// this type writes keeps its exact format: same keys, same sorted order,
+    /// same one-object-per-line layout.
+    private var sink: JSONLAuditLog { JSONLAuditLog(url: url) }
 
     public struct Entry: Codable, Equatable, Sendable {
         public var ts: String
@@ -55,22 +58,11 @@ public struct LowBatteryAuditLog: Sendable {
     }
 
     public func append(_ entry: Entry) {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        guard var data = try? encoder.encode(entry) else { return }
-        data.append(0x0A)
-        let fd = open(url.path, O_CREAT | O_WRONLY | O_APPEND | O_CLOEXEC, 0o600)
-        guard fd >= 0 else { return }
-        defer { close(fd) }
-        _ = data.withUnsafeBytes { buf in write(fd, buf.baseAddress, buf.count) }
+        sink.append(entry)
     }
 
     /// All entries, oldest first (tests, CLI). Unparseable lines are skipped.
     public func load() -> [Entry] {
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
-        let decoder = JSONDecoder()
-        return text.split(separator: "\n").compactMap {
-            try? decoder.decode(Entry.self, from: Data($0.utf8))
-        }
+        sink.load(Entry.self)
     }
 }

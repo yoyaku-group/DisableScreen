@@ -1146,3 +1146,98 @@ OK, aucune clé de log ni `__HOME__` dans le plist livré.
   le correctif, il échoue sur les QUATRE assertions : un seul appel au sommeil pour tout l'épisode.
 
 Suite : **458/458**, 0 warning.
+
+## L3 — garde thermique + détection du capot (ADR 025)
+
+Env : Apple Silicon (`arch -arm64`), macOS, Swift 6. Tous les tests du lot
+tournent sur fakes (lid, sleeper, lectures thermiques/capot/écran injectées,
+stores en répertoire temporaire) : **aucun `pmset`, aucune vraie mutation, aucun
+sommeil réel**.
+
+### Build (0 warning)
+
+```
+$ arch -arm64 swift build --build-tests
+(lignes "warning:" : 0)
+```
+
+### Suite complète
+
+```
+$ arch -arm64 swift test
+cas de test passés : 554
+suites en échec    : 0
+```
+
+Répartition des tests ajoutés par ce lot :
+
+| Fichier | Tests | Ce qu'ils prouvent |
+|---|---|---|
+| `tests/RunClosedCoreTests/ThermalPolicyTests.swift` | 28 | La grille complète ; 9 min ne relâche pas / 10 min relâche ; borne inclusive ; retour à `fair` et à `nominal` qui remettent le compteur à zéro ; les trois refus à chaque sévérité ; INCONNU ≠ OFF ; l'horloge qui ne démarre qu'à l'enceinte ; un `seriousSince` d'un autre boot écarté ; deux balayages exhaustifs (1 296 combinaisons sans `enable`, et aucun relâchement demandé hors flag ON + à nous + capot fermé + aucun écran) |
+| `tests/RunClosedMacSystemTests/ThermalGuardServiceTests.swift` | 28 | Relâchement critique puis sommeil ; `serious` soutenu ; les refus sans aucune écriture (asserté sur `FakeLid.calls`) ; `nil` qui refuse ; échec qui ne marque pas `releasedForHeat` ; latch qui survit à un redémarrage sans ré-alerter ni redémarrer le décompte ; `releasedForHeat` qui survit puis s'efface au refroidissement ; balayage sans `enable` ; pas de `LidWriteLock` emboîté (échec nommé après 10 s) ; section tenue pendant tout le tick ; coupe-circuit |
+| `tests/RunClosedMacSystemTests/RecoveryBackstopServiceTests.swift` | +16 | Chaleur critique avec session indéfinie ; aucune dette de réarmement laissée ; l'étape batterie qui ne tourne pas sur un tick chaleur ; les deux switches indépendants dans les deux sens ; les trois refus ; ligne d'audit `thermalRelease` ; échec ⇒ exit 5 ; minute nominale gratuite qui n'écrit pas le latch ; balayage sans `enable` ; étape dans la section verrouillée du backstop |
+| `tests/RunClosedMacSystemTests/SessionGuardTickTests.swift` | +5 | La chaleur gouverne le tick (session terminée) ; minute nominale qui laisse le reste intact ; un AVERTISSEMENT thermique qui ne supprime pas l'étape batterie ; pas de service thermique = pas de comportement thermique |
+| `tests/RunClosedPersistenceTests/ThermalLatchStoreTests.swift` | 8 | Absent / corrompu / vide / schéma futur ; `updatedAt` ; écriture atomique ; chemin canonique hors `Logs` |
+| `tests/RunClosedPersistenceTests/JSONLAuditLogTests.swift` | 7 | Lignes triées ; lignes illisibles ignorées ; mode `0600` ; **format de `low_battery_audit.jsonl` inchangé** (ligne décodée) ; fichiers séparés |
+| `tests/RunClosedMacSystemTests/ThermalSimulateTests.swift` | 5 | `simulate` ne mute rien sur les quatre états ; décisions identiques à la politique ; épisode `serious` rejouable ; latch échoïque non persisté ; balayage sans `enable` |
+
+### Bundle
+
+```
+$ bash scripts/build-runclosed-app.sh
+OK: build/RunClosed.app
+
+$ plutil -lint build/RunClosed.app/Contents/*.plist build/RunClosed.app/Contents/Library/*/*.plist
+build/RunClosed.app/Contents/Info.plist: OK
+build/RunClosed.app/Contents/Library/LaunchAgents/com.benjaminbelaga.runclosed.backstop.plist: OK
+build/RunClosed.app/Contents/Library/LaunchDaemons/com.benjaminbelaga.runclosed.helper.plist: OK
+
+$ codesign --verify --strict build/RunClosed.app
+VERIFIED
+```
+
+### CLI sur la machine réelle (`thermal` est lecture / décision pure)
+
+```
+$ ./build/RunClosed.app/Contents/MacOS/runclosed-cli thermal status --json
+  "mode" : "status (read-only)",
+  "guardEnabled" : true,
+  "thermal" : { "critical" : false, "serious" : false, "state" : "fair" },
+  "input" : { "lid" : "open", "externalDisplay" : "none", "lidFlag" : "on",
+              "ownership" : "ownedThisBoot", "enclosed" : false },
+  "decision" : { "action" : "none", "reason" : "fair", "state" : "fair" },
+  "protection" : "not-needed: the machine is not hot",
+  "thresholds" : { "sustainedReleaseSeconds" : 600 }
+
+$ ./build/RunClosed.app/Contents/MacOS/runclosed-cli thermal simulate critical
+  "decision" : { "action" : "releaseAndSleep", "reason" : "criticalOwned",
+                 "state" : "critical" },
+  "protection" : "armed: release + sleep now (critical, nothing is cooling it)",
+  "mode" : "simulate (dry-run, pure decision, nothing mutated)"
+
+$ ./build/RunClosed.app/Contents/MacOS/runclosed-cli thermal simulate serious --lid closed --external-display no --since 600
+  "action" : "releaseAndSleep", "reason" : "seriousSustained"
+
+$ ./build/RunClosed.app/Contents/MacOS/runclosed-cli thermal simulate critical --lid open
+  "action" : "warn", "reason" : "lidOpen",
+  "protection" : "not-needed: lid open — the air circulates and the operator is there"
+
+$ ./build/RunClosed.app/Contents/MacOS/runclosed-cli thermal simulate critical --ownership not-owned
+  "action" : "warn", "reason" : "notOwned"
+```
+
+Aucune mutation : `/usr/bin/pmset -g | grep -i sleepdisabled` donne
+`SleepDisabled 1` avant **et** après la série de commandes ci-dessus. Les
+commandes interdites sur la machine réelle (`session start`, `recover
+--backstop`, `backstop register`, `lid-stay-awake on|off`) n'ont pas été
+exécutées.
+
+### Non testé (matériel — PR5, Ben présent)
+
+- La notification clamshell réelle à la fermeture du capot, et la rafale
+  d'anti-rebond sur ce matériel (2 s).
+- `ProcessInfo.processInfo.thermalState` réellement observé en `serious` /
+  `critical`, et l'observation `thermalStateDidChangeNotification`.
+- Le relâchement réel du flag et le `pmset sleepnow` pour cause de chaleur.
+- Le rendu du popup (« Session terminée — chaleur ») et du titre de barre
+  (`ended: heat`) sur la build installée.

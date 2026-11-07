@@ -90,6 +90,11 @@ public struct LowBatteryGuardService {
     /// expires a due session, pauses it on a battery release, and resumes it
     /// on the re-arm.
     public var sessionService: SessionService?
+    /// Optional thermal step (ADR 025). `nil` = ADR 022/023 behaviour
+    /// unchanged. When present it runs FIRST in the same section: heat kills
+    /// faster than the drain, and a machine that overheated must be released
+    /// before the battery step gets to read the flag.
+    public var thermalService: ThermalGuardService?
 
     public init(
         lidService: LidMutationService,
@@ -98,7 +103,8 @@ public struct LowBatteryGuardService {
         sleeper: any SystemSleeper,
         lock: LidWriteLock = LidWriteLock(),
         auditLog: LowBatteryAuditLog = LowBatteryAuditLog(),
-        sessionService: SessionService? = nil
+        sessionService: SessionService? = nil,
+        thermalService: ThermalGuardService? = nil
     ) {
         self.lidService = lidService
         self.latchStore = latchStore
@@ -107,6 +113,7 @@ public struct LowBatteryGuardService {
         self.lock = lock
         self.auditLog = auditLog
         self.sessionService = sessionService
+        self.thermalService = thermalService
     }
 
     public struct Evaluation: Equatable, Sendable {
@@ -153,6 +160,20 @@ public struct LowBatteryGuardService {
         /// Set when the session step reconciled a record whose flag reads OFF
         /// (ADR 023): cleared as an orphan, or a lost battery pause restored.
         public var sessionReconciled: SessionService.ReconcileOutcome?
+        /// The thermal step's result (ADR 025), when one is wired. `nil` on a
+        /// machine with no thermal layer, which keeps ADR 022/023 behaviour
+        /// byte for byte.
+        public var thermal: ThermalGuardService.TickOutcome?
+        /// Whether the BATTERY step ran in this tick.
+        ///
+        /// `false` for `thermalTick()` — the tick the app runs with the battery
+        /// guard switched off. The evaluation it carries is still a real
+        /// readback (the popup and the bar render it), but no battery decision
+        /// was ACTED on, so the caller must not announce one: an operator who
+        /// turned the battery guard off would otherwise still get its
+        /// "Battery low" notification from a tick that was only looking at
+        /// heat.
+        public var batteryStepRan: Bool = true
     }
 
     /// Read-only evaluation: no mutation, no persistence write. Used by
@@ -186,6 +207,103 @@ public struct LowBatteryGuardService {
     @discardableResult
     public mutating func tick() -> TickOutcome {
         return lock.withLock { lockedTick() }
+    }
+
+    /// The tick the app runs when the BATTERY guard is switched off but the
+    /// thermal one is on (ADR 025): one `LidWriteLock` section, the thermal
+    /// step first, then the session step — never the battery step.
+    ///
+    /// Without it the two kill switches would be coupled in the wrong
+    /// direction: turning the battery guard off would also switch heat
+    /// protection off, which is exactly the pairing the operator did not ask
+    /// for (ADR 024's addendum made the same argument for the battery step in
+    /// the backstop).
+    @discardableResult
+    public mutating func thermalTick() -> TickOutcome {
+        return lock.withLock { lockedThermalTick() }
+    }
+
+    private mutating func lockedThermalTick() -> TickOutcome {
+        let thermal = runThermalStep()
+        if let thermal, Self.thermalGovernsTheTick(thermal) {
+            return thermalOutcome(thermal)
+        }
+        let sessionStep = sessionService?.step()
+        var outcome = TickOutcome(evaluation: evaluate())
+        outcome.thermal = thermal
+        // No battery decision was taken here: the guard is switched off.
+        outcome.batteryStepRan = false
+        outcome.session = sessionStep?.expiry
+        outcome.sessionReconciled = sessionStep?.reconciled
+        if case .ended(let end)? = sessionStep?.expiry {
+            outcome.sessionEndedNaturally = end.stopsKeepingAwake
+        }
+        return outcome
+    }
+
+    /// The tick outcome for a thermal step that governed it. Read-only, and
+    /// evaluated AFTER the release: the battery fields describe the flag as the
+    /// thermal step left it, which is what the popup and the bar will show.
+    ///
+    /// One helper for the app's two locked ticks, so the mapping of a thermal
+    /// mutation onto the battery vocabulary cannot drift between them: the
+    /// three protective outcomes are exactly the three the battery release
+    /// produces, and `releaseRefused` keeps its own meaning (nothing was
+    /// written).
+    private mutating func thermalOutcome(
+        _ thermal: ThermalGuardService.TickOutcome
+    ) -> TickOutcome {
+        var outcome = TickOutcome(evaluation: evaluate())
+        outcome.thermal = thermal
+        outcome.mutation = thermal.mutation.map {
+            switch $0 {
+            case .released: return .released
+            case .releaseFailed: return .releaseFailed
+            case .releaseRefused: return .releaseRefused
+            }
+        }
+        outcome.mutationError = thermal.mutationError
+        outcome.sleepAttempted = thermal.sleepAttempted
+        outcome.sleepRC = thermal.sleepRC
+        outcome.sleepOutput = thermal.sleepOutput
+        outcome.shouldNotify = thermal.shouldNotify
+        // A heat release ends the session; the caller tells the operator
+        // through the thermal notice, not a second "session ended" one.
+        outcome.sessionEndedNaturally = false
+        outcome.batteryStepRan = false
+        return outcome
+    }
+
+    /// The thermal step, for a caller that already holds `LidWriteLock` (the
+    /// app's shared tick, the ADR 024 backstop's one section). Takes no lock:
+    /// `withLock` opens a new fd, so nesting it would deadlock.
+    ///
+    /// Returns `nil` when no thermal layer is wired (ADR 022/023 behaviour
+    /// unchanged), so the battery and session steps run exactly as before.
+    public mutating func runThermalStep() -> ThermalGuardService.TickOutcome? {
+        guard var thermal = thermalService else { return nil }
+        let outcome = thermal.step()
+        thermalService = thermal
+        return outcome
+    }
+
+    /// Does this thermal outcome make the rest of the tick redundant?
+    ///
+    /// `true` in exactly two cases: the step ATTEMPTED a release (the flag is
+    /// now off, so the battery step would only read `lidFlagOff` — and its
+    /// re-arm branch could turn the flag back ON for a machine that is still
+    /// hot, which the thermal rule must never allow), or it ended the session
+    /// (there is no record left to expire).
+    ///
+    /// A thermal WARNING does NOT govern the tick: telling the operator the Mac
+    /// is hot must not suppress the independent battery protection. And an
+    /// inert thermal minute — `nominal`, or hot with the lid open — leaves the
+    /// rest of the tick untouched, so ADR 022/023 behaviour is unchanged
+    /// whenever heat has nothing to say.
+    public static func thermalGovernsTheTick(
+        _ outcome: ThermalGuardService.TickOutcome
+    ) -> Bool {
+        outcome.mutation != nil || outcome.sessionEndedByHeat
     }
 
     /// What a protective-only caller did. There is no `rearmed` case: the
@@ -307,6 +425,16 @@ public struct LowBatteryGuardService {
     }
 
     private mutating func lockedTick() -> TickOutcome {
+        // ADR 025 — heat is evaluated FIRST, in this same section: it kills
+        // faster than the drain. The step takes no lock of its own (this is the
+        // app's single section). A tick where heat governs stops here: the
+        // battery step would otherwise read a flag we have just released and
+        // its re-arm branch could turn it back ON for a machine that is still
+        // hot — the one thing this policy must never allow.
+        let thermal = runThermalStep()
+        if let thermal, Self.thermalGovernsTheTick(thermal) {
+            return thermalOutcome(thermal)
+        }
         // ADR 023 — session expiry runs FIRST, inside this same lock section:
         // a session whose deadline passed must never be re-armed by the very
         // tick that noticed the deadline. It is a separate step from the
@@ -321,6 +449,10 @@ public struct LowBatteryGuardService {
         // (an emergency release replaces a stale record with this boot's).
         let recordBootIDBefore = lidService.store.load().bootID
         var outcome = TickOutcome(evaluation: evaluation)
+        // Carried, never merged: a thermal WARNING must reach the operator
+        // without displacing whatever the battery step decided. A thermal
+        // RELEASE never gets this far (it governs the tick above).
+        outcome.thermal = thermal
         outcome.session = sessionExpiry
         outcome.sessionReconciled = sessionStep?.reconciled
         var record = latchStore.load()

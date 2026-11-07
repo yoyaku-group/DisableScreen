@@ -13,6 +13,8 @@ import RunClosedHelperSupport
 //   runclosed restore --owned           → stub (G3): reports, changes nothing
 //   runclosed low-battery status        → battery readback + guard decision (read-only, ADR 022)
 //   runclosed low-battery simulate <onBattery> <pct> <minutes> → pure decision (never mutates)
+//   runclosed thermal status            → thermal/clamshell readback + decision (read-only, ADR 025)
+//   runclosed thermal simulate <state>  → pure decision (never mutates)
 
 let clock = SystemClock(bootID: BootID.current())
 
@@ -695,6 +697,239 @@ func cmdLowBattery(_ rest: [String]) -> Int32 {
     }
 }
 
+// ── ADR 025 — thermal guard (read-only CLI surface) ─────────────────────────
+
+func thermalJSON(_ s: ThermalState) -> [String: Any] {
+    ["state": s.rawValue, "serious": s.isSerious, "critical": s.isCritical]
+}
+
+func thermalLatchJSON(_ l: ThermalPolicy.Latch) -> [String: Any] {
+    [
+        "warnedSerious": l.warnedSerious,
+        "warnedCritical": l.warnedCritical,
+        "seriousSince": l.seriousSince as Any? ?? NSNull(),
+        "seriousSinceBootID": l.seriousSinceBootID as Any? ?? NSNull(),
+        "releasedForHeat": l.releasedForHeat,
+    ]
+}
+
+func thermalDecisionJSON(_ d: ThermalPolicy.Decision) -> [String: Any] {
+    ["action": d.action.rawValue, "reason": d.reason.rawValue, "state": d.state.rawValue]
+}
+
+/// `closed` / `open` / `unknown` — a script must be able to tell a refusal
+/// caused by an open lid from one caused by an unreadable one.
+func thermalTriState(_ v: Bool?, yes: String, no: String) -> String {
+    guard let v else { return "unknown" }
+    return v ? yes : no
+}
+
+func thermalInputJSON(_ i: ThermalPolicy.Input) -> [String: Any] {
+    [
+        "state": i.state.rawValue,
+        "lid": thermalTriState(i.lidClosed, yes: "closed", no: "open"),
+        "externalDisplay": thermalTriState(i.externalDisplayConnected,
+                                           yes: "connected", no: "none"),
+        "lidFlag": i.lidFlag.map { $0 ? "on" : "off" } ?? "unknown",
+        "ownership": i.ownership.rawValue,
+        "enclosed": i.isEnclosed,
+        "monotonic": i.monotonic,
+        "bootID": i.bootID,
+    ]
+}
+
+func thermalThresholdsJSON() -> [String: Any] {
+    ["sustainedReleaseSeconds": Int(ThermalPolicy.sustainedReleaseSeconds)]
+}
+
+/// What the guard will do about the current heat, in one phrase.
+func thermalProtection(_ i: ThermalPolicy.Input) -> String {
+    guard i.state.isHot else { return "not-needed: the machine is not hot" }
+    guard let flag = i.lidFlag else { return "unknown-flag: alert only (B1)" }
+    guard flag else { return "not-needed: lid stay-awake is off, macOS sleeps and cools on its own" }
+    guard i.lidClosed == true else {
+        return i.lidClosed == false
+            ? "not-needed: lid open — the air circulates and the operator is there"
+            : "unknown-lid: alert only (a lid that cannot be read is not proven shut)"
+    }
+    guard i.externalDisplayConnected == false else {
+        return i.externalDisplayConnected == true
+            ? "not-needed: a display is attached, so the machine is in use"
+            : "unknown-display: alert only (in doubt, do not release)"
+    }
+    switch i.ownership {
+    case .ownedThisBoot:
+        return i.state.isCritical
+            ? "armed: release + sleep now (critical, nothing is cooling it)"
+            : "armed: release + sleep once serious has held for \(Int(ThermalPolicy.sustainedReleaseSeconds / 60)) min"
+    case .staleRecord:
+        return "unprotected: our record is from a previous boot — alert only (the heat rule has no emergency widening)"
+    case .notOwned:
+        return "unprotected: flag set by another tool — alert only"
+    }
+}
+
+/// The one-click remedy when the flag is not provably ours.
+func thermalRemedy(_ i: ThermalPolicy.Input) -> String? {
+    guard i.state.isHot, i.lidFlag == true else { return nil }
+    switch i.ownership {
+    case .ownedThisBoot:
+        return nil
+    case .staleRecord:
+        return "recoveryPending: switch \"Keep awake with lid closed\" off then on in the popup (or `runclosed-cli lid-stay-awake off --operator && runclosed-cli lid-stay-awake on`) so RunClosed owns it on this boot; until then the thermal guard can only alert."
+    case .notOwned:
+        return "set by another tool: `runclosed-cli lid-stay-awake off --operator` (then `on` if you want RunClosed to own and protect it)."
+    }
+}
+
+let thermalUsage = """
+usage: runclosed thermal status [--json]
+       runclosed thermal simulate <nominal|fair|serious|critical>
+                 [--lid closed|open|unknown] [--external-display yes|no|unknown]
+                 [--lid-flag on|off|unknown] [--ownership owned|stale|not-owned]
+                 [--since <seconds-ago>]
+
+`simulate` is a pure decision on injected values: it never reads the flag,
+never writes the latch, and never sleeps the Mac.
+"""
+
+func parseThermalState(_ s: String) -> ThermalState? {
+    ThermalState(rawValue: s.lowercased())
+}
+
+func cmdThermal(_ rest: [String]) -> Int32 {
+    guard let sub = rest.first else {
+        FileHandler.err(thermalUsage)
+        return 64
+    }
+    switch sub {
+    case "status":
+        // Real readback + decision, READ-ONLY: `evaluate()` never mutates,
+        // never writes the latch, and never sleeps the Mac.
+        let svc = ThermalGuardService(
+            lidService: makeLidService(),
+            latchStore: ThermalLatchStore(),
+            thermalProvider: { ThermalReadback.read() },
+            lidClosedProvider: { ClamshellReadback.lidClosed() },
+            externalDisplayProvider: { ClamshellReadback.externalDisplayConnected() },
+            monotonic: { MonotonicReadback.seconds() },
+            sleeper: PMSetSleeper())
+        let e = svc.evaluate()
+        let rec = OwnedLidAssertion(currentBootID: clock.bootID).load()
+        emitJSON([
+            "schemaVersion": kSchemaVersion,
+            "bootID": clock.bootID,
+            "mode": "status (read-only)",
+            "guardEnabled": ThermalGuardSettings.isEnabled(),
+            "thermal": thermalJSON(e.input.state),
+            "input": thermalInputJSON(e.input),
+            "decision": thermalDecisionJSON(e.decision),
+            "latch": thermalLatchJSON(e.latchBefore),
+            "lidRecord": [
+                "ownedBootID": rec.bootID,
+                "ownedByThisBoot": e.input.ownership == .ownedThisBoot,
+                "recoveryPending": e.input.ownership == .staleRecord,
+            ],
+            "protection": thermalProtection(e.input),
+            "remedy": thermalRemedy(e.input) as Any? ?? NSNull(),
+            "thresholds": thermalThresholdsJSON(),
+        ])
+        return 0
+
+    case "simulate":
+        // Pure decision on injected values — no readback, no mutation, no
+        // persistence, no sleep. Defaults model the incident shape: lid closed,
+        // no display, flag ON and ours.
+        let args = Array(rest.dropFirst())
+        guard let first = args.first, let state = parseThermalState(first) else {
+            FileHandler.err(thermalUsage)
+            return 64
+        }
+        var lidClosed: Bool? = true
+        var externalDisplay: Bool? = false
+        var lidFlag: Bool? = true
+        var ownership: LowBatteryPolicy.LidOwnership = .ownedThisBoot
+        var latch = ThermalPolicy.Latch()
+        var monotonic: Double = 1_000
+        var i = 1
+        while i < args.count {
+            switch args[i] {
+            case "--lid":
+                i += 1
+                guard i < args.count else { FileHandler.err(thermalUsage); return 64 }
+                switch args[i] {
+                case "closed": lidClosed = true
+                case "open": lidClosed = false
+                case "unknown": lidClosed = nil
+                default: FileHandler.err(thermalUsage); return 64
+                }
+            case "--external-display":
+                i += 1
+                guard i < args.count else { FileHandler.err(thermalUsage); return 64 }
+                switch args[i] {
+                case "yes", "connected", "true": externalDisplay = true
+                case "no", "none", "false": externalDisplay = false
+                case "unknown": externalDisplay = nil
+                default: FileHandler.err(thermalUsage); return 64
+                }
+            case "--lid-flag":
+                i += 1
+                guard i < args.count else { FileHandler.err(thermalUsage); return 64 }
+                switch args[i] {
+                case "on": lidFlag = true
+                case "off": lidFlag = false
+                case "unknown": lidFlag = nil
+                default: FileHandler.err(thermalUsage); return 64
+                }
+            case "--ownership":
+                i += 1
+                guard i < args.count else { FileHandler.err(thermalUsage); return 64 }
+                switch args[i] {
+                case "owned": ownership = .ownedThisBoot
+                case "stale": ownership = .staleRecord
+                case "not-owned": ownership = .notOwned
+                default: FileHandler.err(thermalUsage); return 64
+                }
+            case "--since":
+                // Paint an open `serious` episode: the tick's `monotonic` is
+                // then `since` seconds past the latch's start.
+                i += 1
+                guard i < args.count, let s = Double(args[i]), s.isFinite, s >= 0 else {
+                    FileHandler.err(thermalUsage)
+                    return 64
+                }
+                monotonic = 1_000 + s
+                latch = ThermalPolicy.Latch(
+                    seriousSince: 1_000, seriousSinceBootID: clock.bootID)
+            default:
+                FileHandler.err(thermalUsage)
+                return 64
+            }
+            i += 1
+        }
+        let input = ThermalPolicy.Input(
+            state: state, lidClosed: lidClosed, externalDisplayConnected: externalDisplay,
+            lidFlag: lidFlag, ownership: ownership, monotonic: monotonic,
+            bootID: clock.bootID)
+        let (decision, next) = ThermalPolicy.step(input, latch: latch)
+        emitJSON([
+            "schemaVersion": kSchemaVersion,
+            "mode": "simulate (dry-run, pure decision, nothing mutated)",
+            "input": thermalInputJSON(input),
+            "protection": thermalProtection(input),
+            "decision": thermalDecisionJSON(decision),
+            "latchBefore": thermalLatchJSON(latch),
+            "latchAfter": thermalLatchJSON(next),
+            "thresholds": thermalThresholdsJSON(),
+        ])
+        return 0
+
+    default:
+        FileHandler.err(thermalUsage)
+        return 64
+    }
+}
+
 // ── ADR 023 — timed keep-awake session ──────────────────────────────────────
 
 let sessionUsage = """
@@ -1164,7 +1399,7 @@ func cmdLoginItem(_ rest: [String]) -> Int32 {
 // ── dispatch ─────────────────────────────────────────────────────────────────
 let args = Array(CommandLine.arguments.dropFirst())
 guard let sub = args.first else {
-    FileHandler.err("usage: runclosed <status|displays|doctor|run|restore|disable|enable|lid-stay-awake|login-item|helper|low-battery|session|recover|backstop> [...]")
+    FileHandler.err("usage: runclosed <status|displays|doctor|run|restore|disable|enable|lid-stay-awake|login-item|helper|low-battery|thermal|session|recover|backstop> [...]")
     exit(64)
 }
 let rest = Array(args.dropFirst())
@@ -1183,6 +1418,7 @@ case "low-battery": exit(cmdLowBattery(rest))
 case "session":  exit(cmdSession(rest))
 case "recover":  exit(cmdRecover(rest))
 case "backstop": exit(cmdBackstop(rest))
+case "thermal":  exit(cmdThermal(rest))
 case "restore":
     // restore --owned = re-enable every display we previously disabled (B3).
     // restore --lid = closed-lid keep-awake restore (G3 stub, unchanged).

@@ -159,6 +159,14 @@ public struct RecoveryBackstopService {
         /// repeats the same audit line 1 440 times a day (review round 15).
         public var auditedSessionFailureKey: String?
         public var sessionStepRan = false
+        /// Thermal step (ADR 025): the policy reason when it governed this run.
+        public var thermalReason: ThermalPolicy.Reason?
+        public var thermalMutation: ThermalGuardService.MutationOutcome?
+        public var thermalError: String?
+        /// A heat release ended the session — the deadline is gone, not paused.
+        public var sessionEndedByHeat = false
+        /// Whether the thermal step ran at all (the kill switch can stop it).
+        public var thermalStepRan = false
 
         public init(plan: RecoveryPolicy.Plan) {
             self.plan = plan
@@ -169,6 +177,14 @@ public struct RecoveryBackstopService {
             // deadline is NOT enforced, which is the most serious outcome a
             // backstop minute can produce.
             if let session, session.expiry.isFailure { return .backendFailure }
+            // ADR 025: the thermal step maps its own outcome, on the same rule
+            // as the battery step — a protective action that did not happen is
+            // never announced as a healthy minute.
+            switch thermalMutation {
+            case .releaseFailed: return .backendFailure
+            case .releaseRefused: return .refused
+            case .released, nil: break
+            }
             // The battery step maps its own outcome. Previously only a nil
             // mutation with an error yielded 5, so a critical-battery release
             // that FAILED reported success — a protective action that did not
@@ -210,6 +226,15 @@ public struct RecoveryBackstopService {
     /// one minute after saying no. Injected for the same reason every other
     /// system read is: so the rule is testable without touching this Mac.
     public let batteryGuardEnabled: @Sendable () -> Bool
+    /// The thermal guard's operator kill switch (`ThermalGuardSettings`,
+    /// ADR 025 — the sibling of `batteryGuardEnabled`).
+    ///
+    /// A session with no end time must be protected from HEAT even when the
+    /// menu-bar app is gone: that is the exact argument that put the battery
+    /// step in the backstop. The switch is honoured for the same reason too —
+    /// an operator who turned the thermal guard off must not get a
+    /// `disablesleep 0` plus `pmset sleepnow` from launchd a minute later.
+    public let thermalGuardEnabled: @Sendable () -> Bool
     public var wallClock: @Sendable () -> Date
 
     public init(
@@ -222,6 +247,9 @@ public struct RecoveryBackstopService {
         batteryGuardEnabled: @escaping @Sendable () -> Bool = {
             LowBatteryGuardSettings.isEnabled()
         },
+        thermalGuardEnabled: @escaping @Sendable () -> Bool = {
+            ThermalGuardSettings.isEnabled()
+        },
         wallClock: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.sessionService = sessionService
@@ -231,6 +259,7 @@ public struct RecoveryBackstopService {
         self.heartbeatStore = heartbeatStore
         self.appIsAlive = appIsAlive
         self.batteryGuardEnabled = batteryGuardEnabled
+        self.thermalGuardEnabled = thermalGuardEnabled
         self.wallClock = wallClock
     }
 
@@ -254,7 +283,12 @@ public struct RecoveryBackstopService {
             // orphaning it (ADR 023 §4), exactly as the app's tick does.
             // `protectiveStep()` never calls the session step itself — the
             // backstop runs that once, first, in the same lock section.
-            sessionService: session)
+            sessionService: session,
+            // ADR 025: the SAME thermal policy the app runs. A session with no
+            // end time must be protected from heat even if the app crashed —
+            // the argument that justified the battery step here.
+            thermalService: ThermalGuardService.live(bootID: bootID,
+                                                     sessionService: session))
         return RecoveryBackstopService(
             sessionService: session,
             guardService: guardService,
@@ -284,7 +318,8 @@ public struct RecoveryBackstopService {
             now: now,
             battery: nil,
             latch: guardService.latchStore.load().latch,
-            batteryGuardEnabled: batteryGuardEnabled())
+            batteryGuardEnabled: batteryGuardEnabled(),
+            thermalGuardEnabled: thermalGuardEnabled())
         let plan = RecoveryPolicy.plan(facts)
         let outcome: Outcome
         if !plan.needsWork {
@@ -381,6 +416,46 @@ public struct RecoveryBackstopService {
         let previous = heartbeatStore.load()
         let rearmAlreadyReported = previous?.rearmWithheldReported ?? false
         let auditedFailureKey = previous?.lastAuditedFailureKey
+
+        // — Thermal step: the SAME policy the app runs (ADR 025), and it goes
+        // FIRST for the same reason it does in the app's tick: heat kills
+        // faster than the drain. A session with no end time must be protected
+        // from heat even when the app crashed — exactly the argument that put
+        // the battery step here.
+        //
+        // Its release ENDS the run: the flag is now off, so the battery step
+        // would only observe `lidFlagOff`, and its re-arm branch must never
+        // run for a machine that is still hot.
+        if plan.thermal {
+            let thermal = guardService.runThermalStep()
+            report.thermalStepRan = true
+            if let thermal, LowBatteryGuardService.thermalGovernsTheTick(thermal) {
+                report.thermalReason = thermal.evaluation.decision.reason
+                report.thermalMutation = thermal.mutation
+                report.thermalError = thermal.mutationError
+                report.sleepAttempted = thermal.sleepAttempted
+                report.sleepRC = thermal.sleepRC
+                report.sessionEndedByHeat = thermal.sessionEndedByHeat
+                // The thermal service audits its OWN file (`thermal_audit.jsonl`,
+                // one line per action, deduped by the latch). The recovery log
+                // gets the line that belongs to the BACKSTOP: what this agent
+                // did because the app was not there to do it.
+                if thermal.mutation != nil || thermal.sessionEndedByHeat {
+                    audit(.init(
+                        ts: timestamp(),
+                        bootID: sessionService.continuous.bootID,
+                        step: "thermalRelease",
+                        outcome: thermal.mutation?.rawValue ?? "sessionEnded",
+                        reason: thermal.evaluation.decision.reason.rawValue,
+                        detail: thermal.sessionEndedByHeat ? "session ended by heat" : nil,
+                        recordBootID: recordBootID.isEmpty ? nil : recordBootID,
+                        error: thermal.mutationError,
+                        sleepRC: thermal.sleepRC))
+                    report.audited = true
+                }
+                return report
+            }
+        }
 
         // — Session step: expire a due session (`.sessionRecovery` for its own
         // previous-boot record), or reconcile an orphan. Same decisions as the
@@ -499,7 +574,20 @@ public struct RecoveryBackstopService {
                 "session": report.plan.session,
                 "sessionDue": report.plan.sessionDue,
                 "battery": report.plan.battery,
+                "thermal": report.plan.thermal,
             ]
+            // ADR 025: present only when the thermal step governed this run, so
+            // a machine that never overheats keeps the ADR 024 report byte for
+            // byte.
+            if report.thermalStepRan {
+                obj["thermalStepRan"] = true
+            }
+            if let reason = report.thermalReason {
+                obj["thermalReason"] = reason.rawValue
+                obj["thermalMutation"] = report.thermalMutation?.rawValue as Any? ?? NSNull()
+                obj["thermalError"] = report.thermalError as Any? ?? NSNull()
+                obj["sessionEndedByHeat"] = report.sessionEndedByHeat
+            }
             if let step = report.session {
                 obj["sessionExpiry"] = String(describing: step.expiry)
                 obj["sessionReconciled"] = step.reconciled.map { String(describing: $0) } as Any? ?? NSNull()

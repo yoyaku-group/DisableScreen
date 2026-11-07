@@ -45,6 +45,12 @@ public enum RecoveryPolicy {
         /// step when it is off and still runs the session step; the backstop is
         /// the same guard and must obey the same switch.
         public var batteryGuardEnabled: Bool
+        /// The thermal guard's operator kill switch (`ThermalGuardSettings`,
+        /// ADR 025). Same contract as `batteryGuardEnabled`: the backstop IS
+        /// the guard, so it obeys the switch the operator set — otherwise an
+        /// operator who turned the thermal guard off would still get a
+        /// `disablesleep 0` plus `pmset sleepnow` from launchd a minute later.
+        public var thermalGuardEnabled: Bool
 
         public init(
             recordBootID: String,
@@ -54,7 +60,8 @@ public enum RecoveryPolicy {
             now: SessionPolicy.Now,
             battery: LowBatteryPolicy.Input? = nil,
             latch: LowBatteryPolicy.Latch = LowBatteryPolicy.Latch(),
-            batteryGuardEnabled: Bool = true
+            batteryGuardEnabled: Bool = true,
+            thermalGuardEnabled: Bool = true
         ) {
             self.recordBootID = recordBootID
             self.recordOwnedEnabled = recordOwnedEnabled
@@ -64,6 +71,7 @@ public enum RecoveryPolicy {
             self.battery = battery
             self.latch = latch
             self.batteryGuardEnabled = batteryGuardEnabled
+            self.thermalGuardEnabled = thermalGuardEnabled
         }
     }
 
@@ -109,9 +117,18 @@ public enum RecoveryPolicy {
         public var battery: Bool
         public var ownership: LowBatteryPolicy.LidOwnership
         public var batteryVerdict: BatteryVerdict
+        /// The thermal step runs (ADR 025): our ownership record still claims
+        /// the flag, any boot, AND the operator kill switch is on.
+        ///
+        /// Gated on the record and not on the thermal state, deliberately: the
+        /// fast path reads FILE FACTS ONLY, and a thermal read it did here
+        /// would be stale by the time the lock is taken. The decision is
+        /// re-computed from live values inside the section, exactly like the
+        /// battery verdict.
+        public var thermal: Bool
 
         /// `false` = exit 0 without a `pmset` call and without the lock.
-        public var needsWork: Bool { session || battery }
+        public var needsWork: Bool { session || battery || thermal }
     }
 
     /// Decide whether the backstop has anything to do, and which steps it may
@@ -139,7 +156,12 @@ public enum RecoveryPolicy {
             sessionDue: session.map { SessionPolicy.dueReason($0, now: facts.now) != nil } ?? false,
             battery: claimsFlag && facts.batteryGuardEnabled,
             ownership: ownership,
-            batteryVerdict: facts.batteryGuardEnabled ? verdict : .unread)
+            batteryVerdict: facts.batteryGuardEnabled ? verdict : .unread,
+            // Heat and the battery are independent protections of the SAME
+            // claim, so they share the gate: a flag the record claims, on any
+            // boot. Two separate kill switches, though — the thermal one does
+            // not switch the battery one off, and vice versa.
+            thermal: claimsFlag && facts.thermalGuardEnabled)
     }
 
     /// The battery step's decision, mapped onto what a protective-only caller
