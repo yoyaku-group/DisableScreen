@@ -99,6 +99,17 @@ public struct RecoveryBackstopService {
             if case .completed(let report) = self { return report.auditedFailureKey }
             return nil
         }
+
+        /// Whether this minute actually reached the battery step. It is what
+        /// makes `auditedFailureKey` readable as a tri-state: without it, a run
+        /// whose battery step RAN and found nothing to report carries `nil`
+        /// exactly like a run that never got there, and the heartbeat could not
+        /// tell "the failure episode ended, forget the key" from "this minute
+        /// proved nothing, keep it" (review round 10).
+        public var batteryStepRan: Bool {
+            if case .completed(let report) = self { return report.batteryStepRan }
+            return false
+        }
     }
 
     /// What the protected section did. `nil` fields are steps that did not run.
@@ -123,6 +134,10 @@ public struct RecoveryBackstopService {
         /// The identifier of a repeating failure this run audited, carried into
         /// the heartbeat so the next minute with the SAME failure stays quiet.
         public var auditedFailureKey: String?
+        /// Whether the battery step ran at all. `false` means this minute
+        /// proves nothing about the failure episode, so the heartbeat must
+        /// carry its key forward (see `Outcome.batteryStepRan`).
+        public var batteryStepRan = false
 
         public init(plan: RecoveryPolicy.Plan) {
             self.plan = plan
@@ -288,11 +303,24 @@ public struct RecoveryBackstopService {
         // battery (fast path, app alive, busy), so the log stays
         // once-per-episode instead of re-reporting on every no-op minute.
         let reported = outcome.rearmWithheldEpisode ?? previous?.rearmWithheldReported ?? false
-        // A repeating failure keeps its key until a DIFFERENT outcome replaces
-        // it: a minute that never reached the battery step (fast path, app
-        // alive, busy) must not clear the memory, or the next failing minute
-        // would re-audit the same failure.
-        let auditedKey = outcome.auditedFailureKey ?? previous?.lastAuditedFailureKey
+        // A repeating failure keeps its key until the battery step RUNS again
+        // and finds a different (or no) failure: a minute that never reached
+        // the battery step (fast path, app alive, busy) must not clear the
+        // memory, or the next failing minute would re-audit the same failure.
+        //
+        // `batteryStepRan` is what makes that distinction readable. Without
+        // it, a run that reached the battery step and found the release healthy
+        // carried `auditedFailureKey == nil` exactly like a run that never got
+        // there, so the key survived a full recovery: a LATER failure with the
+        // same reason matched it and was never audited at all (review round
+        // 10). A healthy battery step therefore CLEARS the key; only a minute
+        // that never evaluated the battery carries it forward.
+        let auditedKey: String?
+        if !outcome.batteryStepRan {
+            auditedKey = previous?.lastAuditedFailureKey
+        } else {
+            auditedKey = outcome.auditedFailureKey
+        }
         let saved = heartbeatStore.save(.init(
             at: wallClock(),
             bootID: bootID,
@@ -339,6 +367,10 @@ public struct RecoveryBackstopService {
         // protections, and a failed release is exactly the moment the battery
         // rule matters most. The exit code aggregates both.
         guard plan.battery else { return report }
+        // Set BEFORE the battery step: from here on, a `nil` `auditedFailureKey`
+        // in this report is a measurement ("no repeating failure right now"),
+        // not an absence of measurement.
+        report.batteryStepRan = true
         let battery = guardService.protectiveStep()
         report.batteryReason = battery.decision.reason
         report.batteryMutation = battery.mutation

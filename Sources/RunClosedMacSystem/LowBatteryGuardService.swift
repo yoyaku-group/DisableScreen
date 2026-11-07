@@ -254,7 +254,7 @@ public struct LowBatteryGuardService {
             let recordBootIDBefore = lidService.store.load().bootID
             var tick = TickOutcome(evaluation: evaluation)
             performRelease(evaluation: evaluation, record: &record, outcome: &tick,
-                           recordBootIDBefore: recordBootIDBefore)
+                           recordBootIDBefore: recordBootIDBefore, protective: true)
             outcome.mutation = tick.mutation.map {
                 switch $0 {
                 case .released: return .released
@@ -278,6 +278,14 @@ public struct LowBatteryGuardService {
         // Only the re-arm debt (`releasedByGuard` / `releasedBootID`) is this
         // caller's to write: that is the app's signal to re-enable the flag,
         // not a claim that anyone was informed.
+        //
+        // `protectiveSleepTried` is the ONE latch this caller may write: it is
+        // the backstop's own "I already slept for this failure" memory. Without
+        // it the sleep-once guard was erased here on every run, so a
+        // persistently failing release put the Mac to sleep every 60 s — even
+        // right after the operator woke it (review round 10). Separate from
+        // `failedReleaseSleepTried` precisely because that one doubles as the
+        // app's notify latch, which must stay untouched.
         record.latch.warnedLow = before.latch.warnedLow
         record.latch.warnedCritical = before.latch.warnedCritical
         record.latch.failedReleaseSleepTried = before.latch.failedReleaseSleepTried
@@ -395,7 +403,8 @@ public struct LowBatteryGuardService {
     private mutating func performRelease(evaluation: Evaluation,
                                          record: inout LowBatteryLatchStore.Record,
                                          outcome: inout TickOutcome,
-                                         recordBootIDBefore: String) {
+                                         recordBootIDBefore: String,
+                                         protective: Bool = false) {
         let initiator: LidMutationService.Initiator =
             evaluation.decision.reason == .emergencyStaleOwnership ? .lowBatteryEmergency : .automatic
         let result = lidService.setEnabled(false, initiator: initiator)
@@ -420,13 +429,13 @@ public struct LowBatteryGuardService {
             // Not refused, not verified: treat as a backend failure.
             outcome.mutation = .releaseFailed
             outcome.mutationError = op.error ?? "release not verified (state=\(op.state.rawValue))"
-            attemptSleepOnceAfterFailure(&outcome, record: &record)
+            attemptSleepOnceAfterFailure(&outcome, record: &record, protective: protective)
         case .failure(.backendFailed(let message)):
             // We own the flag and the battery is critical: still try
             // the sleep (best effort, it is not a persistent mutation).
             outcome.mutation = .releaseFailed
             outcome.mutationError = message
-            attemptSleepOnceAfterFailure(&outcome, record: &record)
+            attemptSleepOnceAfterFailure(&outcome, record: &record, protective: protective)
         case .failure(let error):
             // B1/B2/no-op refusal (e.g. ownership changed between the
             // evaluation and the write): no sleep; warn once per episode.
@@ -453,11 +462,24 @@ public struct LowBatteryGuardService {
     /// A persistently failing release (e.g. sudoers rule removed) is retried
     /// every tick, but the best-effort sleep + its notification happen once
     /// per discharge episode — never a sleep/notify loop every 30 s.
+    ///
+    /// `protective` picks WHICH once-per-episode latch applies: the app owns
+    /// `failedReleaseSleepTried` (which also gates its notify), while the
+    /// backstop owns `protectiveSleepTried` and must not touch the app's
+    /// (it shows no notification, so consuming the app's latch would silence a
+    /// warning nobody ever saw). It also suppresses the notification for the
+    /// protective caller for the same reason (review round 10).
     private func attemptSleepOnceAfterFailure(_ outcome: inout TickOutcome,
-                                              record: inout LowBatteryLatchStore.Record) {
-        guard !record.latch.failedReleaseSleepTried else { return }
-        record.latch.failedReleaseSleepTried = true
-        outcome.shouldNotify = true
+                                              record: inout LowBatteryLatchStore.Record,
+                                              protective: Bool) {
+        if protective {
+            guard !record.latch.protectiveSleepTried else { return }
+            record.latch.protectiveSleepTried = true
+        } else {
+            guard !record.latch.failedReleaseSleepTried else { return }
+            record.latch.failedReleaseSleepTried = true
+            outcome.shouldNotify = true
+        }
         attemptSleep(&outcome)
     }
 

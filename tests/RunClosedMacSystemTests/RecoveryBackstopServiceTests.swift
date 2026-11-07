@@ -884,6 +884,117 @@ final class RecoveryBackstopServiceTests: XCTestCase {
                        "the episode stays open across a busy minute")
     }
 
+    // MARK: — Round-10 review findings
+
+    /// Review round 10 (WARNING): a persistently failing release slept ONCE,
+    /// but the next minute slept again, and again — 60 s apart, forever, even
+    /// right after the operator woke the Mac.
+    ///
+    /// `protectiveStep()` restores the app's notify latches (`warnedLow`,
+    /// `warnedCritical`, `failedReleaseSleepTried`) because the backstop shows
+    /// no notification and must not consume the app's warnings. Restoring
+    /// `failedReleaseSleepTried` wholesale also erased the backstop's OWN
+    /// sleep-once memory, since the two concerns shared one field. Sleep
+    /// suppression and notification suppression are separate states:
+    /// `protectiveSleepTried` is the caller's, `failedReleaseSleepTried` the
+    /// app's.
+    func testAFailingProtectiveReleaseSleepsOnlyOnce() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 6))
+        rig.lid.failWrites = true
+
+        _ = rig.service.run()
+        XCTAssertEqual(rig.sleeper.count, 1, "the first failure sleeps once")
+
+        rig.clock.advance(60)
+        _ = rig.service.run()
+        XCTAssertEqual(rig.sleeper.count, 1,
+                       "a repeated identical failure must not sleep the Mac every minute")
+
+        // The app's notify latch stays untouched: the backstop showed nothing,
+        // so the app must still be able to warn its operator.
+        XCTAssertFalse(rig.latchStore.load().latch.failedReleaseSleepTried,
+                       "the backstop must not consume the app's notify-once latch")
+    }
+
+    /// ...and the suppression is an EPISODE, not a permanent mute: charging
+    /// back above the warn band clears it, so the next discharge can sleep.
+    func testAProtectiveSleepEpisodeEndsWhenTheBatteryRecovers() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 6))
+        rig.lid.failWrites = true
+        _ = rig.service.run()
+        XCTAssertEqual(rig.sleeper.count, 1)
+
+        // Charged on AC above the warn band: the policy clears the episode.
+        rig.battery.state = Self.reading(false, 30)
+        _ = rig.service.run()
+        XCTAssertFalse(rig.latchStore.load().latch.protectiveSleepTried)
+
+        // A new discharge failure is a new episode and may sleep again.
+        rig.lid.failWrites = false
+        rig.lid.failWrites = true
+        rig.battery.state = Self.reading(true, 6)
+        _ = rig.service.run()
+        XCTAssertEqual(rig.sleeper.count, 2, "a new episode is allowed its own sleep")
+    }
+
+    /// Review round 10 (WARNING): the failure-dedupe key was never cleared
+    /// after a recovery, so a LATER failure with the same reason got no audit
+    /// line at all — the log claimed nothing had gone wrong during a second
+    /// outage.
+    ///
+    /// `nil` used to mean both "the battery step found no failure" and "the
+    /// battery step did not run". `batteryStepRan` tells them apart: a healthy
+    /// battery step CLEARS the key, a minute that never evaluated the battery
+    /// carries it forward.
+    func testANewFailureEpisodeIsAuditedAgainAfterARecovery() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 6))
+        rig.lid.failWrites = true
+
+        _ = rig.service.run()
+        let afterFirst = rig.auditLog.load().filter { $0.step == "batteryRelease" }.count
+        XCTAssertEqual(afterFirst, 1, "the first failure is audited")
+
+        rig.clock.advance(60)
+        _ = rig.service.run()
+        XCTAssertEqual(rig.auditLog.load().filter { $0.step == "batteryRelease" }.count, 1,
+                       "the same failure repeating is deduped")
+
+        // Recovered: the battery step runs and finds a healthy release.
+        rig.lid.failWrites = false
+        _ = rig.service.run()
+        XCTAssertNil(rig.heartbeat.load()?.lastAuditedFailureKey,
+                     "a healthy battery step forgets the episode")
+
+        // A NEW failure with the SAME reason is a new episode: it must be
+        // audited, not compared against a key left over from the old one.
+        rig.lid.failWrites = true
+        rig.clock.advance(60)
+        _ = rig.service.run()
+        XCTAssertEqual(rig.auditLog.load().filter { $0.step == "batteryRelease" }.count, 2,
+                       "a new failure episode gets its own audit line")
+    }
+
+    /// The other half of the tri-state: a minute that never reaches the battery
+    /// step must still carry the key forward, or the very next failing minute
+    /// re-audits the same standing failure.
+    func testABusyMinuteCarriesTheFailureKeyForward() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 6))
+        rig.lid.failWrites = true
+        _ = rig.service.run()
+        let key = rig.heartbeat.load()?.lastAuditedFailureKey
+        XCTAssertNotNil(key)
+
+        let other = LidWriteLock(url: rig.lockURL)
+        _ = other.tryWithLock { rig.service.run() }   // busy: battery step never ran
+        XCTAssertEqual(rig.heartbeat.load()?.lastAuditedFailureKey, key,
+                       "a minute that proved nothing must not forget the episode")
+
+        rig.clock.advance(60)
+        _ = rig.service.run()
+        XCTAssertEqual(rig.auditLog.load().filter { $0.step == "batteryRelease" }.count, 1,
+                       "the standing failure stays deduped across a busy minute")
+    }
+
     // MARK: — Exit codes
 
     func testExitCodeValues() {

@@ -189,8 +189,8 @@ func cmdBackstop(_ rest: [String]) -> Int32 {
 /// a wake — conservative, and launchd fires the missed interval on wake, so the
 /// next minute restores it.
 ///
-/// Called under `LidWriteLock`, as today — the state can change between the
-/// check and the write otherwise.
+/// Called BEFORE `LidWriteLock`, deliberately: it is an XPC round-trip. The
+/// fast local re-check inside the section is `backstopStillEnforcingLocked()`.
 func backstopEnforcement() -> RecoveryPolicy.RunFreshness? {
     guard backstopService().report().isProtecting else { return nil }
     return RecoveryPolicy.runFreshness(
@@ -202,6 +202,37 @@ func backstopEnforcement() -> RecoveryPolicy.RunFreshness? {
 /// `true` only when the backstop is provably running. See `backstopEnforcement`.
 func backstopIsProtecting() -> Bool {
     backstopEnforcement()?.isEnforcing ?? false
+}
+
+/// Cheap re-check for use INSIDE `LidWriteLock`.
+///
+/// `backstopEnforcement()` is an `SMAppService` XPC round-trip, so `start` and
+/// `extend` read it BEFORE the lock — holding the lid lock across a slow `smd`
+/// stalls the app's guard tick and every other CLI command. That leaves a
+/// window: an operator `backstop unregister` completing while this command
+/// waits for the lock flipped the agent off, yet the pre-lock answer stayed
+/// `true` and a timed session was accepted with nothing enforcing its
+/// deadline. The heartbeat's 180 s tolerance does not help — it is tolerance in
+/// the OTHER direction.
+///
+/// So the two facts an unregister actually changes are re-read here, inside the
+/// section, at the cost of no XPC at all:
+///
+/// - the recorded opt-out (`UserDefaults`), which `backstop unregister` sets so
+///   the app cannot silently undo it — the same durable signal the app honours;
+/// - the heartbeat freshness (`backstop_heartbeat.json`), which is a file read.
+///
+/// It does not re-ask `SMAppService`, so a revocation made in System Settings
+/// during that same window is not covered: that path is asynchronous, leaves no
+/// local trace, and closing it would mean putting the XPC back under the lock.
+/// The named, local, instant path is closed; the residual is documented in
+/// ADR 024 rather than hidden.
+func backstopStillEnforcingLocked() -> Bool {
+    guard !SMAppServiceAgentRegistrar().operatorOptedOut() else { return false }
+    return RecoveryPolicy.runFreshness(
+        heartbeat: BackstopHeartbeatStore().freshnessInput(),
+        currentBootID: clock.bootID,
+        now: Date()).isEnforcing
 }
 
 /// The precise reason the backstop cannot be relied on, for the CLI refusal.
@@ -826,7 +857,8 @@ func cmdSession(_ rest: [String]) -> Int32 {
             // backstop, being APPROVED is not enough: it must have PROVEN it
             // runs (a heartbeat on this boot, recent, not a failed run). An
             // approved agent whose program never resolves enforces nothing.
-            if duration != nil, !AppLivenessLock().isHeld(), !backstopEnforcing {
+            if duration != nil, !AppLivenessLock().isHeld(),
+               !(backstopEnforcing && backstopStillEnforcingLocked()) {
                 return nil
             }
             // `start` itself clears a pending low-battery re-arm on success,
@@ -879,7 +911,8 @@ func cmdSession(_ rest: [String]) -> Int32 {
             // deadline that nothing would enforce must not be reported as
             // "extended" (the app crashed during a timed session). No session on
             // record falls through to `extend`'s own `noSession`.
-            if svc.load() != nil, !AppLivenessLock().isHeld(), !backstopEnforcing {
+            if svc.load() != nil, !AppLivenessLock().isHeld(),
+               !(backstopEnforcing && backstopStillEnforcingLocked()) {
                 return nil
             }
             return svc.extend(by: step)

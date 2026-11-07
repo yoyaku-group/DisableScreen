@@ -56,6 +56,32 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Recovery backstop: a failing protective release slept the Mac once per
+  minute. `protectiveStep()` restores the app's notification latches on purpose
+  (the backstop shows no notification, so consuming them would silence a
+  warning nobody saw), but the sleep-once memory shared one of those fields —
+  restoring it erased the memory every run, so a stale sudoers rule put the Mac
+  to sleep every 60 s forever, including right after the operator woke it.
+  Sleep suppression and notification suppression are now separate states:
+  `protectiveSleepTried` belongs to the backstop, `failedReleaseSleepTried`
+  stays the app's and is no longer touched. The episode ends when the charge
+  rises above the warn band, so a later discharge may sleep again.
+- Recovery backstop: a failure episode was never forgotten, so a later failure
+  with the same reason got no audit line at all. A healthy run wrote `nil`,
+  which the heartbeat read as "keep the previous key" — the same sentinel used
+  for "the battery step did not run". `batteryStepRan` tells the two apart: a
+  healthy battery step clears the key, only a minute that never evaluated the
+  battery carries it forward.
+- Recovery backstop: `session start --for` and `session extend` could accept a
+  deadline nothing would enforce. The backstop probe is read before
+  `LidWriteLock` (it is an XPC round-trip; holding the lock across a slow `smd`
+  stalls the app's tick), so an operator `backstop unregister` completing while
+  the command waited for the lock left the pre-lock answer `true`.
+  `backstopStillEnforcingLocked()` re-checks the two facts an unregister
+  actually changes — the recorded opt-out and the heartbeat freshness — inside
+  the section, with no XPC. A revocation made in System Settings during that
+  same window is still not covered: it is asynchronous, leaves no local trace,
+  and closing it would mean putting the XPC back under the lock.
 - ADR 023 follow-ups. Turning the lid switch on now records an indefinite
   session only when the read-back verified the flag ON: a write that reported
   success without confirming it used to leave a deadline-less "running

@@ -958,3 +958,41 @@ opérateur ayant coupé la garde recevait `disablesleep 0` + `pmset sleepnow` de
 
 **Contre-épreuve** : en retirant `&& facts.batteryGuardEnabled` de `plan()`, le premier test échoue sur le
 flag, le relâchement, la veille et l'audit — la correction est porteuse, pas décorative.
+
+## Relecture tour 11 — trois défauts du backstop (2026-11-07)
+
+`arch -arm64 swift test` après les trois correctifs :
+
+```
+$ arch -arm64 swift test
+  RunClosedCoreTests           142 tests, 0 failures   (136 → 142)
+  RunClosedMacSystemTests      213 tests, 0 failures   (207 → 213)
+  RunClosedPersistenceTests     48 tests, 0 failures
+  RunClosedHelperSupportTests   38 tests, 0 failures
+  RunClosedAppTests             11 tests, 0 failures
+  → 452 tests, 0 failures (448 avant : +4)
+```
+
+Quatre tests de régression, un par défaut plus la contre-épreuve de l'épisode :
+
+- `testAFailingProtectiveReleaseSleepsOnlyOnce` — un relâchement qui échoue en boucle ne doit endormir le
+  Mac qu'une fois ; le verrou de notification de l'app reste intact.
+- `testAProtectiveSleepEpisodeEndsWhenTheBatteryRecovers` — la suppression est un épisode : au-dessus de la
+  bande d'alerte elle se termine, et une nouvelle décharge peut rendormir.
+- `testANewFailureEpisodeIsAuditedAgainAfterARecovery` — après un rétablissement, une panne ultérieure de
+  même raison est de nouveau auditée.
+- `testABusyMinuteCarriesTheFailureKeyForward` — l'autre moitié du tri-état : une minute qui n'a pas évalué
+  la batterie n'oublie pas l'épisode.
+
+**Contre-épreuves, mesurées** (correctif retiré, test relancé, correctif restauré) :
+
+- sommeil : sans `protectiveSleepTried`, `XCTAssertEqual failed: ("2") is not equal to ("1") — a repeated
+  identical failure must not sleep the Mac every minute`. Le Mac était endormi deux fois en deux minutes.
+- audit : sans `batteryStepRan`, `XCTAssertNil failed: "batteryReleaseFailed:criticalOwned" — a healthy
+  battery step forgets the episode`. La clé survivait donc au rétablissement.
+
+Le troisième défaut (course entre la sonde du backstop et le verrou) n'a pas de test : il demande de faire
+aboutir un `backstop unregister` pendant qu'un `session start` attend `LidWriteLock`, soit un ordonnancement
+inter-processus que la suite ne peut pas scénariser honnêtement. `backstopStillEnforcingLocked()` est une
+lecture de fichier et de `UserDefaults` sans XPC ; sa couverture est la relecture, pas un test. Marqué
+`NOT_TESTED` dans cette section plutôt que revendiqué.
