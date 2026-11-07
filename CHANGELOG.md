@@ -20,7 +20,7 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `serious` in that same situation gives a ten-minute grace period so a
   compiler burst does not end a session, then releases. The clock measures ten
   minutes of heat that COULD be released: any interruption (the lid reopened,
-  a display attached, ownership lost) resets it, so a Mac that ran hot and then
+  a display attached, ownership lost, the flag going off) resets it, so a Mac that ran hot and then
   cooled does not release the instant the lid comes back down. Three refusals make it
   safe: an open lid (the air circulates and the operator is there), an attached
   display (the machine is in use), and a flag that is not ours (B2 — alert
