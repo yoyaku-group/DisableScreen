@@ -28,6 +28,13 @@
 "Battery low: lid stay-awake is NOT protected" = "Batterie faible : maintien éveillé NON protégé";
 "Busy, try again" = "Occupé, réessayez";
 
+/* Filet de secours launchd (ADR 024) */
+"Recovery backstop off — approve it in System Settings" = "Filet de secours inactif — approuvez-le dans Réglages Système";
+"Recovery backstop off (see log)" = "Filet de secours inactif (voir le journal)";
+"Recovery backstop off — you turned it off" = "Filet de secours inactif — vous l'avez désactivé";
+"Recovery backstop enabled but not running (see log)" = "Filet de secours activé mais inactif (voir le journal)";
+"Open Login Items…" = "Ouvrir les items d'ouverture…";
+
 "%@%% on battery. Lid stay-awake is on but was turned on by another tool (or its state cannot be read), so RunClosed will NOT turn it off at 10%% and the Mac will not sleep by itself. Plug in, or switch \"Keep awake with lid closed\" off then on so RunClosed owns it." = "%@ %% sur batterie. Le maintien éveillé est actif mais a été activé par un autre outil (ou son état est illisible) : RunClosed ne le coupera PAS à 10 %% et le Mac ne se mettra pas en veille tout seul. Branchez le chargeur, ou basculez « Maintenir éveillé capot fermé » sur off puis on pour que RunClosed en devienne propriétaire.";
 "Battery critical: emergency sleep" = "Batterie critique : veille d'urgence";
 

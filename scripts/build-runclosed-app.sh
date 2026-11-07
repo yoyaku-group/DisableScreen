@@ -57,13 +57,46 @@ test -x "$BIN/runclosed"        || { echo "missing $BIN/runclosed" >&2; exit 1; 
 
 echo "==> assembling $APP"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Library/LaunchDaemons"
+mkdir -p "$APP/Contents/MacOS" \
+         "$APP/Contents/Library/LaunchDaemons" \
+         "$APP/Contents/Library/LaunchAgents"
 
 cp "$BIN/RunClosedMenuBar" "$APP/Contents/MacOS/RunClosed"
 cp "$BIN/runclosed"        "$APP/Contents/MacOS/runclosed-cli"
 cp "$BIN/RunClosedHelper"  "$APP/Contents/MacOS/runclosed-privileged-helper"
 cp Resources/com.benjaminbelaga.runclosed.helper.plist \
    "$APP/Contents/Library/LaunchDaemons/"
+# ADR 024 — the per-user recovery backstop agent. `SMAppService.agent(
+# plistName:)` resolves it against this bundle's LaunchAgents directory, and
+# its BundleProgram points back at the runclosed-cli copied above, so the job
+# dies with the app instead of surviving a deleted bundle.
+#
+# `__HOME__` is substituted here because launchd does NOT expand `~` in
+# StandardOutPath/StandardErrorPath, and the template must not carry a /tmp
+# path: /tmp is world-writable and sticky, so another local account could
+# pre-create the name as a symlink and launchd would open it AS THIS USER.
+#
+# Two escaping layers, because the value lands in an XML text node:
+#
+# 1. XML first — `&` and `<` are not legal raw in a plist text node. A home
+#    directory containing `&` (perfectly legal in a POSIX path) would otherwise
+#    produce a plist `plutil -lint` rejects, so the agent would never load.
+# 2. Then `sed` — `&` in the REPLACEMENT means "the whole match" and `|` is the
+#    delimiter, so both need a backslash for sed itself. Escaping for XML first
+#    turns `&` into `&amp;`, whose sed metacharacter has to be escaped again.
+#
+# Order matters: sed's escape of `&` must be applied to the XML-escaped text,
+# never the reverse (a `${_xml_home}` still holding `&` would be re-expanded by
+# sed into the match).
+_xml_home="${HOME//&/&amp;}"
+_xml_home="${_xml_home//</\&lt;}"
+_xml_home="${_xml_home//>/\&gt;}"
+_escaped_home="$(printf '%s' "$_xml_home" | sed 's/[&|\\]/\\&/g')"
+sed "s|__HOME__|${_escaped_home}|g" Resources/com.benjaminbelaga.runclosed.backstop.plist \
+   > "$APP/Contents/Library/LaunchAgents/com.benjaminbelaga.runclosed.backstop.plist"
+# launchd creates the file but not the directory; without this the agent's
+# diagnostics vanish into a failed open.
+mkdir -p "$HOME/Library/Logs/RunClosed"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -112,6 +145,7 @@ codesign --verify --strict --verbose=1 "$APP"
 
 echo "==> verify"
 plutil -lint "$APP/Contents/Library/LaunchDaemons/"*.plist
+plutil -lint "$APP/Contents/Library/LaunchAgents/"*.plist
 echo "--- structure"
 (cd "$OUT_DIR" && find RunClosed.app -print | sort)
 echo "--- bundle signature"

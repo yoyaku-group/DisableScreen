@@ -244,8 +244,13 @@ final class SessionServiceTests: XCTestCase {
         XCTAssertFalse(rig.latchStore.load().latch.releasedByGuard,
                        "an ended session owes no re-arm")
         XCTAssertFalse(SessionEndOutcome.flagLeftOn.stopsKeepingAwake)
+        // NOT a healthy minute: the record is gone but the Mac is still awake
+        // with no deadline and no RunClosed owner. The backstop must exit 5 so
+        // the CLI never reads this as proof of enforcement.
+        XCTAssertTrue(SessionService.ExpiryOutcome.ended(.flagLeftOn).isFailure,
+                      "flagLeftOn means the deadline was NOT enforced")
         XCTAssertFalse(SessionEndOutcome.flagLeftOn.isFailure,
-                       "the record is gone: there is nothing left to retry")
+                       "SessionEndOutcome alone is about the record, not the flag")
     }
 
     /// The refusal is re-read: a flag that went OFF right after the gate saw

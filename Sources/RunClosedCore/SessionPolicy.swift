@@ -255,6 +255,12 @@ public enum SessionPolicy {
     }
 
     /// `"Until 14:30 · 2 h 41 left"` — the lid row's session line.
+    ///
+    /// A session can last up to 7 days, so a deadline that is NOT today also
+    /// names the day (`"Until Tue 14:30 · …"`): "Until 14:30" on a Tuesday
+    /// deadline would read as "today" and is a claim the CLI should not make.
+    /// The popup has always done this; this is the same rule for
+    /// `session status --json`'s `rowLabel`.
     public static func rowLabel(
         _ session: KeepAwakeSession,
         now: Now,
@@ -262,10 +268,23 @@ public enum SessionPolicy {
         locale: Locale = .current
     ) -> String? {
         guard let endsAtWall = session.endsAtWall else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        // "Today" is not enough of a test: a session can run a full 7 days, and
+        // a deadline exactly a week out has the SAME weekday name — "Until Tue
+        // 14:30" on a Tuesday reads as today, the very ambiguity this label
+        // exists to remove. Only a deadline inside the next day is safe to show
+        // as a bare time.
+        let hoursOut = endsAtWall.timeIntervalSince(now.wall) / 3600
+        let sameDay = calendar.isDate(endsAtWall, inSameDayAs: now.wall) && hoursOut < 24
         let formatter = DateFormatter()
         formatter.timeZone = timeZone
         formatter.locale = locale
-        formatter.setLocalizedDateFormatFromTemplate("HH:mm")
+        // A deadline close enough to be unambiguous gets the bare time;
+        // anything further names the day AND the date, so a 7-day session
+        // cannot be mistaken for this week.
+        let template = sameDay ? "HH:mm" : (hoursOut < 7 * 24 ? "EEE HH:mm" : "EEE d MMM HH:mm")
+        formatter.setLocalizedDateFormatFromTemplate(template)
         let until = formatter.string(from: endsAtWall)
         guard let left = remainingLabel(session, now: now) else {
             return "Until \(until)"

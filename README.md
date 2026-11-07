@@ -34,6 +34,15 @@ as the audited baseline (see [Repository layout](#repository-layout)).
   released as an emergency; a flag set by another tool is never touched
   (ADR 022). Kill switch:
   `defaults write com.benjaminbelaga.RunClosed lowBatteryGuardEnabled -bool false`.
+- **Recovery backstop** — a per-user LaunchAgent runs `runclosed-cli recover
+  --backstop` every 60 s and takes only protective actions while the app is not
+  running: a session whose deadline passed is ended, and at critical battery
+  the lid flag is released and the Mac sleeps. It never turns the flag ON and
+  never performs the low-battery re-arm, so it cannot wake the Mac unattended.
+  Registered via `SMAppService.agent(plistName:)`; approval in System Settings →
+  Login Items, with a one-click link in the popup while it is pending. CLI:
+  `runclosed backstop status --json | register | login-items | unregister`
+  (ADR 024).
 - **Open at login** via `SMAppService`.
 - Localized: **English** (base) and **French**.
 
@@ -61,7 +70,7 @@ SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
 Test:
 
 ```bash
-swift test        # 329 tests across Core / MacSystem / Persistence / UI logic
+swift test        # 438 tests across Core / MacSystem / Persistence / UI logic
 ```
 
 ## Install
@@ -98,6 +107,8 @@ owned_lid.json          # lid flag ownership record (boot-scoped)
 session.json            # current keep-awake session: id, boot, deadlines, pause
 low_battery_guard.json  # guard latch (notifications, pending re-arm)
 low_battery_audit.jsonl # one line per low-battery mutation
+recovery_audit.jsonl    # one line per recovery-backstop action or failure (never per no-op)
+backstop_heartbeat.json # proof the recovery agent RUNS: last run time, boot, exit code
 lid.lock                # cross-process lock serialising every lid writer
 app.lock                # held while the menu-bar app runs (it enforces session deadlines)
 ```
@@ -129,6 +140,22 @@ flag), so the invariants are the interesting part:
   record written by the boot the session started in — never an arbitrary stale
   one. A session that comes due while the machine slept still ends, because
   the continuous clock keeps counting through sleep (ADR 023).
+- **A crash is not a way out of the deadline.** The app is not the only
+  enforcer: a per-user LaunchAgent runs `runclosed-cli recover --backstop`
+  every 60 s. It takes only PROTECTIVE actions — ends a session whose deadline
+  passed and releases the lid flag at critical battery, then lets the Mac
+  sleep. It never turns the flag ON and never performs the low-battery re-arm
+  (that stays the app's job, so the debt is left on disk for it). It takes the
+  cross-process lock non-blocking and reports "busy" (exit 75) instead of
+  queueing behind the app or a CLI. When the app holds `app.lock` the backstop
+  exits at once, but correctness never depends on that probe: every step is
+  idempotent and read-back confirmed. The agent is registered through
+  `SMAppService.agent(plistName:)`, so it dies with the bundle; approval
+  happens in System Settings → Login Items, and the popup says so with a
+  one-click link while it is pending. Being approved is not enough for the CLI
+  to rely on it: every run writes `backstop_heartbeat.json`, and a timed
+  session only starts (or extends) with the app closed when that record proves
+  a successful run on this boot within the last 3 minutes (ADR 024).
 
 ## Repository layout
 
@@ -143,7 +170,9 @@ Sources/
   runclosed/             # CLI: status, displays, doctor, run, disable/enable,
                          #      lid-stay-awake, restore, login-item, helper,
                          #      low-battery (status / simulate, read-only),
-                         #      session (start / extend / end / status)
+                         #      session (start / extend / end / status),
+                         #      recover --backstop (what the LaunchAgent runs),
+                         #      backstop (status / register / login-items / unregister)
 tests/                   # Swift test suites
 main.py, launcher.m,     # legacy Python app (audited baseline, kept in-tree)
 build.sh, test_e2e.py
@@ -163,6 +192,12 @@ TEST_RESULTS.md          # what was tested, with commands and outcomes
 - External brightness is a **software overlay**, not DDC. The UI says so.
 - The privileged helper daemon ships as a registration skeleton (no XPC yet);
   the day-to-day app uses `sudo -n pmset` + the sudoers rule instead.
+- The recovery backstop protects a logged-in user's session only. **Nothing
+  protects the Mac while no user is logged in** (at the login window, or before
+  the first login after a restart): the LaunchAgent runs in the user's session,
+  so it does not exist there. Turn the lid switch off before logging out.
+- The backstop's registration, the approval gesture in System Settings and the
+  real 60 s cadence have not been measured on hardware yet (unit-tested only).
 
 ## License
 

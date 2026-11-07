@@ -50,4 +50,15 @@ struct PopupState {
     var leasesSummary: String?           // "2 sessions · claude, codex" or nil
     var busy: Bool                       // any mutation in flight
     var session: SessionRow              // ADR 023
+    var backstop: BackstopRow            // ADR 024
+
+    /// The recovery backstop's registration state (ADR 024), as the popup
+    /// shows it: nil summary when the agent is enabled (nothing to say), or a
+    /// line explaining why the Mac is unprotected while RunClosed is closed.
+    struct BackstopRow {
+        var status: String
+        var summary: String?
+        /// A pending approval needs the System Settings deep link.
+        var needsApproval: Bool
+    }
 }

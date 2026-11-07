@@ -662,3 +662,437 @@ $ runclosed-cli definitely-not-a-command         → « unknown command », exit
 ```
 
 NOT_TESTED (matériel) : expiration réelle après une nuit capot fermé, tick au réveil, notifications macOS, rendu du popup et du titre de barre sur la build installée. Aucune de ces mesures n'a été faite ; rien n'est supposé.
+
+## ADR 024 — filet de secours launchd (2026-11-07, branche `agent/claude/20261106/2ad8bd6d-e42-runclosed-backstop`)
+
+Tout ce qui suit a réellement été exécuté dans ce worktree. Aucun `recover --backstop`, `backstop register`,
+`session start` ni `lid-stay-awake on|off` n'a été lancé contre la machine réelle : les chemins de mutation sont
+couverts par des fakes.
+
+Build et suite complète :
+
+```
+$ arch -arm64 swift build --build-tests
+  Build complete, 0 error, 0 warning
+$ arch -arm64 swift test
+  RunClosedCoreTests           124 tests, 0 failures
+  RunClosedMacSystemTests      183 tests, 0 failures
+  RunClosedPersistenceTests     46 tests, 0 failures
+  RunClosedHelperSupportTests   27 tests, 0 failures
+  RunClosedAppTests             11 tests, 0 failures
+  → 391 tests, 0 failures (329 avant ce lot : +62)
+```
+
+Suites ajoutées ou étendues, exécutées séparément :
+
+```
+$ arch -arm64 swift test --filter RunClosedCoreTests.SessionPolicyTests               → 45 tests, 0 failures (43 + 2)
+$ arch -arm64 swift test --filter RunClosedCoreTests.RecoveryPolicyTests              → 24 tests, 0 failures (16 au tour 1, +7 `runFreshness`)
+$ arch -arm64 swift test --filter RunClosedMacSystemTests.SessionGuardTickTests        → 26 tests, 0 failures (24 + 2)
+$ arch -arm64 swift test --filter RunClosedMacSystemTests.RecoveryBackstopServiceTests → 31 tests, 0 failures (20 au tour 1)
+$ arch -arm64 swift test --filter RunClosedMacSystemTests.RecoverCommandTests          → 13 tests, 0 failures (8 au tour 1)
+$ arch -arm64 swift test --filter RunClosedPersistenceTests.BackstopHeartbeatStoreTests→  7 tests, 0 failures
+$ arch -arm64 swift test --filter RunClosedHelperSupportTests.BackstopRegistrationTests→ 14 tests, 0 failures
+```
+
+Bundle et CLI (binaire embarqué) :
+
+```
+$ bash scripts/build-runclosed-app.sh
+  → OK: build/RunClosed.app (ad-hoc, runtime)
+  → Contents/Library/LaunchAgents/com.benjaminbelaga.runclosed.backstop.plist présent
+$ codesign --verify --strict build/RunClosed.app                         → exit 0
+$ plutil -lint build/RunClosed.app/Contents/Library/LaunchAgents/*.plist → OK
+$ build/RunClosed.app/Contents/MacOS/runclosed-cli backstop status --json
+  backstop { status: "notFound", protecting: false, intervalSeconds: 60 }
+  plistName: "com.benjaminbelaga.runclosed.backstop.plist"
+  programArguments: ["runclosed-cli", "recover", "--backstop"]           (exit 0)
+$ build/RunClosed.app/Contents/MacOS/runclosed-cli recover --bogus       → exit 64
+```
+
+`notFound` est l'état honnête d'un agent jamais enregistré sur cette machine (ADR 018). Rien n'a été enregistré :
+ni `backstop register`, ni le lancement de l'app installée.
+
+Contrats verrouillés par les tests :
+
+- **Politique pure** : sortie rapide (aucun record ne revendique le flag ET aucune session) ; un record relâché ne
+  revendique rien ; un record nôtre sans session, ou d'un boot précédent, demande quand même le travail ; une session
+  seule aussi ; échéance due / non due / indéfinie jamais due ; batterie critique avec flag nôtre (relâche), étranger
+  (B2, jamais muté), record périmé (urgence), bon niveau (rien), flag illisible (`lidFlagUnknown`) ;
+  **dette de réarmement retenue, jamais exécutée** ; un balayage de la grille complète (flag × pourcentage × source ×
+  ownership × latch) prouve qu'aucune combinaison ne demande un `enable`.
+- **Service backstop sur fakes** : rien à faire ⇒ 0 sans aucun appel système (ni `pmset`, ni relevé batterie, ni
+  `sleepnow`) ; app vivante ⇒ 0, aucune mutation, aucun verrou laissé ; verrou tenu ⇒ 75, aucune mutation, aucune
+  ligne d'audit, et la sortie revient bien pendant qu'un autre fd tient le verrou (non bloquant prouvé) ; session due
+  ⇒ relâchée et effacée, une ligne d'audit ; session en cours ⇒ minute muette sans ligne ; record d'un autre boot +
+  session concordante ⇒ `sessionRecovery` ; record étranger sans session concordante ⇒ refusé, flag laissé ON ; échec
+  d'écriture ⇒ record gardé et sortie 5 ; orphelin ⇒ réconcilié sans écriture ; batterie critique avec session
+  indéfinie ⇒ relâchement + veille + session en pause + dette de réarmement ; sans session (interrupteur simple)
+  ⇒ relâchement + veille ; flag étranger ⇒ jamais relâché ; record périmé ⇒ `lowBatteryEmergency` ; bonne batterie
+  ⇒ rien ; dette de réarmement ⇒ `rearmWithheld`, flag resté OFF, dette conservée ; grille complète sans aucun
+  `enable` émis ; **régression : le backstop n'emboîte jamais `LidWriteLock`** (échec nommé après 10 s au lieu d'un
+  blocage) ; la section est exclusive de bout en bout, prouvée par une sonde dans le relevé batterie.
+- **Registrar** : chaque statut `SMAppService` mappé ; `unknown` n'est jamais traité comme `enabled` ; seul `enabled`
+  vaut `isProtecting` ; enregistrement tenté depuis `notFound` (réalité macOS 26) ; idempotence (jamais de
+  re-registration d'une approbation en attente) ; un `register()` qui lève est surfacé en `false`, sans état inventé ;
+  désenregistrement sans effet quand rien n'est enregistré ; cycle complet ; deep link sans travail privilégié ;
+  **le plist livré est conforme au descripteur** (Label, `BundleProgram`, argv, `StartInterval`, `RunAtLoad`, absence
+  de `KeepAlive` / `Program` / `MachServices`).
+- **CLI** : `recover` sans `--backstop`, `recover --bogus`, `recover --backstop --force`, `recover --backstop extra`,
+  `backstop` seul, `backstop <inconnu>`, `backstop status --bogus`, `backstop register extra` ⇒ tous 64 ;
+  `backstop status --json` est une lecture (statut et `protecting` cohérents, argv et intervalle présents) ;
+  `doctor` et `status` portent le bloc `backstop` ; le chemin rapide sort en 0 sans appel système ; le verrou tenu
+  sort en 75.
+- **Premier tick au lancement** : une session devenue due pendant que l'app était fermée est terminée par ce premier
+  tick, garde batterie active ou coupée.
+- **`rowLabel`** : le jour est affiché quand l'échéance n'est pas aujourd'hui, pas quand elle l'est.
+
+NOT_TESTED (matériel) : enregistrement réel de l'agent (`backstop register`), geste d'approbation dans Réglages
+Système → Items d'ouverture, cadence réelle de 60 s, résolution de `SMAppService.agent(plistName:)` depuis
+`runclosed-cli` dans `Contents/MacOS`, relâchement réel et `pmset sleepnow` du backstop, rendu de la ligne de popup
+et du bouton « Ouvrir les items d'ouverture… » sur la build installée. Rien de tout cela n'a été mesuré ; rien n'est
+supposé.
+
+### Relecture tour 2 (`ai-review-gate` 0 CRITICAL / 2 WARN + 2 constats du Lord) — 2026-11-07
+
+```
+$ arch -arm64 swift build --build-tests     → 0 error, 0 warning
+$ arch -arm64 swift test
+  RunClosedCoreTests           132 tests, 0 failures   (124 → 132)
+  RunClosedMacSystemTests      199 tests, 0 failures   (183 → 199)
+  RunClosedPersistenceTests     53 tests, 0 failures   (46 → 53)
+  RunClosedHelperSupportTests   27 tests, 0 failures   (inchangé)
+  RunClosedAppTests             11 tests, 0 failures   (inchangé)
+  → 438 tests, 0 failures (391 avant ce tour : +30)
+```
+
+Corrections et contrats ajoutés :
+
+- **WARN `RecoveryBackstopService.Report.exitCode`** — un relâchement critique ÉCHOUÉ sortait 0.
+  Désormais `releaseFailed` ⇒ 5, `releaseRefused` ⇒ 3, `released` / `rearmWithheld` / étape absente
+  inchangés, et l'échec de session reste prioritaire. Le rendu JSON et le code de sortie ont été
+  déplacés dans `RecoveryBackstopService.describe`, donc les 4 tests du map assertent le corps ET le
+  code que launchd reçoit réellement (0 relâchement vérifié, 5 échec avec `batteryMutation:
+  releaseFailed`, 0 chemin rapide, 75 verrou tenu) — pas seulement l'accesseur du service.
+- **WARN `backstopIsProtecting()`** — `SMAppService` `enabled` ne prouve pas que l'agent tourne.
+  `backstop_heartbeat.json` est écrit à la fin de CHAQUE run (chemin rapide, app vivante et minute
+  occupée compris : 3 tests), hors verrou et sans `pmset`. `RecoveryPolicy.runFreshness` exige le même
+  boot, un âge ≤ 180 s et un dernier code ≠ 5 : 7 tests (frais, absent, autre boot, borne inclusive,
+  périmé après réveil, dernier run en échec, horodatage futur). Un test relie l'écrivain et le lecteur :
+  un run réel du service produit un heartbeat que la règle accepte, et qu'un autre boot refuse.
+  `backstop status --json`, `status` et `doctor` gagnent `lastRunAt`, `lastExitCode`, `recentRun`,
+  `enforcing` ; le test CLI vérifie sur la machine réelle que `recentRun` est `false` (rien n'a jamais
+  tourné ici) et que `enforcing == protecting && recentRun`. Persistance : 7 tests.
+- **Lord, inondation du journal** — `rearmWithheld` est audité une fois par épisode (l'état vit dans
+  le heartbeat, donc il survit à un redémarrage du processus), et de nouveau après être sorti de
+  l'épisode : 3 tests (trois minutes consécutives ⇒ 1 ligne ; sortie puis retour ⇒ 2 ; une minute
+  occupée au milieu ne rouvre pas l'épisode).
+- **Lord, API morte** — `LowBatteryGuardService.tryTick()` supprimé : aucun appelant, aucun test, et sa
+  documentation laissait croire que le backstop l'utilise alors que `tick()` réarme, ce que le backstop
+  ne doit jamais faire.
+
+NOT_TESTED (matériel), inchangé par ce tour : l'écriture réelle du heartbeat par launchd dépend de la
+résolution de l'agent dans le bundle, qui n'a pas été mesurée. Les chemins de mutation et la règle de
+fraîcheur sont couverts par fakes et par un store temporaire ; `recover --backstop`, `backstop
+register`, `session start` et `lid-stay-awake on|off` n'ont toujours pas été lancés sur la machine
+réelle.
+
+### Relecture tour 3 (`ai-review-gate` WARN advisory, 0 CRITICAL, 7 constats) — 2026-11-07
+
+```
+$ arch -arm64 swift build --build-tests     → 0 error, 0 warning
+$ arch -arm64 swift test
+  RunClosedCoreTests           135 tests, 0 failures   (132 → 135)
+  RunClosedMacSystemTests      199 tests, 0 failures   (199, réécriture à contrat égal)
+  RunClosedPersistenceTests     53 tests, 0 failures
+  RunClosedHelperSupportTests   31 tests, 0 failures   (27 → 31)
+  RunClosedAppTests             11 tests, 0 failures
+  → 438 tests, 0 failures (422 avant ce tour : +7)
+```
+
+Le verdict est `WARN (advisory)`, 0 CRITICAL — la porte passe — mais 7 constats portaient sur du code
+écrit dans ce lot. Tous traités :
+
+- **Popup (WARN)** — `backstopRow()` ne regardait que `status.isProtecting`, donc un agent approuvé
+  dont le `BundleProgram` ne se résout pas affichait *rien* dans le popup alors que le CLI du même diff
+  rapportait `enforcing: false`. Exactement la panne silencieuse que le heartbeat existe pour
+  attraper. Le popup applique désormais la même règle (`isProtecting && runFreshness(...).isEnforcing`)
+  et affiche « Recovery backstop enabled but not running (see log) ».
+- **Enregistrement au lancement (WARN)** — `registerIfNeeded()` enregistrait depuis `notRegistered`,
+  or c'est l'état que laisse un `backstop unregister` : lancer l'app annulait donc en silence une
+  décision explicite de l'opérateur. L'opt-out est maintenant persisté (`UserDefaults`, clé
+  `backstopOperatorOptedOut`), honoré par l'enregistrement automatique (`automatic: true`, le seul
+  appel fait au lancement), et effacé par un `backstop register` explicite.
+- **Test dépendant de la machine (WARN)** — l'assertion `recentRun == false` contre le binaire réel
+  passait sur une machine où l'agent n'a jamais été installé et **échouait sur le Mac déployé** que ce
+  lot cible. Remplacée par des invariants : `enforcing == protecting && recentRun`, cohérence
+  `lastRunAt`/`lastExitCode`, et « non enregistré ⇒ jamais enforcing ».
+- **Test qui ne pouvait pas échouer (WARN)** — `testRefusedBatteryReleaseExits3` n'assertait que dans
+  un `if` jamais pris. Le refus est une course réelle non stagingeable par la surface publique (retirer
+  le record dans le readback batterie fait passer `evaluate()` en `notOwned` et dégrade en alerte, donc
+  aucun relâchement n'est tenté) : le map est désormais asserté sur un `Report` construit, avec
+  `released` et `rearmWithheld` côte à côte.
+- **Minute occupée (suggestion, retenue)** — `runFreshness` ne rejetait que le code 5, donc un run à 75
+  (verrou tenu) comptait comme preuve. Un nouveau cas `lastRunBusy` refuse : une minute qui n'a pas pu
+  agir ne prouve pas que l'agent peut agir. Un refus (3) reste frais — c'est le backstop qui marche.
+- **Échéance à 7 jours (suggestion)** — `rowLabel` affichait le jour de la semaine, or une échéance à
+  exactement une semaine tombe le MÊME jour : « Until Tue 14:30 » un mardi se lit comme aujourd'hui.
+  Au-delà de 7 jours la date est ajoutée ; en deçà d'un jour, heure seule.
+- **Ordre de l'audit (suggestion)** — `performRelease` lisait `recordBootIDBefore` après l'étape
+  session, qui peut effacer `owned_lid.json` sur le même tick. La valeur est maintenant capturée avant.
+
+NOT_TESTED, inchangé : rien de tout cela n'a été mesuré sur matériel. Le popup et la persistance de
+l'opt-out sont du code AppKit/`UserDefaults` couverts par lecture et par tests de la couche service ;
+`recover --backstop`, `backstop register`, `session start` et `lid-stay-awake on|off` n'ont toujours
+pas été lancés sur la machine réelle.
+
+### Relecture tour 4 (`ai-review-gate` WARN advisory, 0 CRITICAL, 6 constats) — 2026-11-07
+
+```
+$ arch -arm64 swift build --build-tests     → 0 error, 0 warning
+$ arch -arm64 swift test
+  RunClosedCoreTests           135 tests, 0 failures
+  RunClosedMacSystemTests      201 tests, 0 failures   (199 → 201)
+  RunClosedPersistenceTests     53 tests, 0 failures
+  RunClosedHelperSupportTests   31 tests, 0 failures
+  RunClosedAppTests             11 tests, 0 failures
+  → 438 tests, 0 failures (429 avant ce tour : +2)
+```
+
+- **Couverture CI des tests CLI (WARN, le seul vrai défaut)** — `cliURL()` ne cherchait que
+  `.build/out/Products/Debug/runclosed` (layout Xcode) et le bundle, alors que la CI fait
+  `swift build --build-tests && swift test`, donc le binaire est dans `.build/debug/` : en CI tous
+  les tests de sous-processus étaient **silencieusement skippés** et la CI restait verte sans jamais
+  vérifier le contrat exit-64, `backstop status --json` ni les blocs `doctor`/`status`. Pire en local :
+  un bundle périmé était testé à la place du code. Les trois chemins sont maintenant essayés du plus
+  frais au plus ancien, et l'absence de binaire en CI **échoue** au lieu de skipper.
+- **`noLockedRunYet` (suggestion, RETIRÉE au tour 6)** — une minute `nothingToDo`/`appAlive` sort avant le verrou
+  et avant `pmset` : elle prouve que l'agent démarre, pas qu'il peut agir. Exiger une section verrouillée a été
+  essayé puis **retiré** : sur une machine vierge toutes les minutes sont `nothingToDo`, et le seul acte qui
+  donnerait du travail à la minute suivante est le `session start --for` que la règle conditionne — preuve
+  circulaire. `completedLockedRun` et `runFreshnessFull` n'existent plus dans le code ; la règle est
+  `runFreshness` seule, et seul un code de sortie exactement 0 vaut preuve.
+- **`unregister` sur `notFound`** — macOS 26 rapporte l'état jamais-enregistré comme `notFound`, donc
+  `unregister()` y échouait et la CLI annonçait un faux échec pour un démontage sans effet. Traité
+  comme `notRegistered`.
+- **Test « unknown status »** — il ré-affirmait `.notRegistered`, déjà couvert. Il passe maintenant un
+  vrai statut non reconnu (`SMAppService.Status(rawValue: 99)`) et vérifie qu'il donne `.unknown`, pas
+  `.enabled`.
+- **Test d'isolation du heartbeat** — il ne comparait que les URL ; il capture désormais l'existence et
+  le mtime du fichier réel avant/après le run, donc un service qui écrirait aux DEUX chemins échoue.
+- **Répertoires temporaires** — `addTeardownBlock` supprime chaque arbre créé (le test de grille à lui
+  seul en construisait 32 par exécution).
+
+NOT_TESTED : inchangé. Rien de tout cela n'a été mesuré sur matériel ; les tests CLI tournent
+désormais réellement en CI, ce qui est vérifiable ici au prochain passage.
+
+### Relecture tour 5 (`ai-review-gate` WARN advisory, 0 CRITICAL, 7 constats) — 2026-11-07
+
+```
+$ arch -arm64 swift build --build-tests     → 0 error, 0 warning
+$ arch -arm64 swift test
+  RunClosedCoreTests           136 tests, 0 failures
+  RunClosedMacSystemTests      203 tests, 0 failures   (201 → 203)
+  RunClosedPersistenceTests     53 tests, 0 failures
+  RunClosedHelperSupportTests   31 tests, 0 failures
+  RunClosedAppTests             11 tests, 0 failures
+  → 438 tests, 0 failures (431 avant ce tour : +3)
+$ CI=true swift test --filter RunClosedMacSystemTests.RecoverCommandTests → 13 tests, 0 échec, 0 skip
+```
+
+- **La garde CI faisait l'inverse de sa doc (WARN, régression du tour 4)** — mon
+  `if CI { throw XCTSkip }` skippait en CI et échouait en local, exactement le contraire de ce que le
+  commentaire annonçait, annulant le commit `9bee394`. Corrigé : en CI un binaire manquant
+  **`XCTFail`**, en local c'est un skip. Vérifié avec `CI=true` : les 13 tests CLI s'exécutent
+  réellement, aucun skip.
+- **Le backstop consommait les alertes de l'app (WARN)** — `protectiveStep` persistait le latch issu de
+  la politique, donc `warnedLow` / `warnedCritical` / `failedReleaseSleepTried` étaient marqués alors
+  que le backstop n'affiche AUCUNE notification. L'opérateur rouvrait l'app dans le même épisode de
+  décharge et recevait `.alreadyWarned` : l'alerte batterie faible n'était jamais montrée. Seule la
+  dette de réarmement (`releasedByGuard`) est désormais écrite par ce chemin — c'est le signal de
+  réactivation pour l'app, pas une affirmation que quelqu'un a été prévenu. 2 tests.
+- **Test contre la mauvaise règle (WARN)** — `testARealRunProducesAHeartbeatTheCLIAcceptsAsEnforcing`
+  notait un run de chemin rapide avec un wrapper plus permissif que la règle de production. Le test
+  passait donc sur une règle que personne n'applique. Il note désormais avec `runFreshness`, la SEULE
+  règle (le wrapper et le paramètre de preuve verrouillée ont été retirés au tour 6, avec la règle
+  qu'ils servaient).
+- **Preuve verrouillée retirée (tour 6)** — `runFreshness` n'exige plus de section verrouillée : la
+  seule preuve est un code de sortie exactement 0, sur le même boot, il y a moins de 180 s. Exiger
+  davantage rendait la preuve inatteignable sur une machine vierge.
+- **Échec d'écriture du heartbeat silencieux** — `save` était ignoré ; en cas d'échec,
+  `rearmWithheldReported` ne persistait pas (retour du flood) et le CLI refusait sans explication. Une
+  ligne stderr rend la panne diagnosticable (l'action protectrice, elle, a déjà eu lieu).
+- **Détail, non retenu** — l'assertion `rowLabel` dépend de l'époque fixe ; et un `lid -> on` non
+  vérifié laisse un ancien record de session en place. Les deux sont sans effet observable (les étapes
+  sont idempotentes et confirmées par readback) ; non modifiés, pour ne pas élargir le diff sans
+  défaut.
+
+NOT_TESTED : inchangé. Rien de tout cela n'a été mesuré sur matériel.
+
+### Addendum round 2 — le backstop respecte le coupe-circuit batterie (2026-11-07)
+
+```
+$ arch -arm64 swift build --build-tests     → 0 error, 0 warning
+$ arch -arm64 swift test
+  RunClosedCoreTests           136 tests, 0 failures
+  RunClosedMacSystemTests      207 tests, 0 failures   (203 → 207)
+  RunClosedPersistenceTests     53 tests, 0 failures
+  RunClosedHelperSupportTests   31 tests, 0 failures
+  RunClosedAppTests             11 tests, 0 failures
+  → 438 tests, 0 failures (434 avant : +4)
+```
+
+Constat du Lord : l'app saute l'étape batterie quand `LowBatteryGuardSettings.isEnabled()` est faux et garde
+l'étape session (`AppMain.runLowBatteryTick`) ; le backstop tournait `protectiveStep()` quand même, donc un
+opérateur ayant coupé la garde recevait `disablesleep 0` + `pmset sleepnow` de launchd une minute plus tard.
+
+`batteryGuardEnabled` est injecté (live = `LowBatteryGuardSettings.isEnabled()`) et porté par
+`RecoveryPolicy.Facts`. 4 tests :
+
+- garde coupée + batterie critique + flag nôtre ⇒ flag ON inchangé, aucun relâchement, aucun `sleepnow`,
+  aucune ligne d'audit `batteryRelease` ;
+- garde coupée + session échue ⇒ la session se termine (relâchement vérifié) et la veille n'est JAMAIS
+  appelée par l'étape session ;
+- garde coupée + rien d'autre ⇒ la minute reste gratuite (`nothingToDo`) ;
+- garde par défaut ⇒ le relâchement critique a toujours lieu.
+
+**Contre-épreuve** : en retirant `&& facts.batteryGuardEnabled` de `plan()`, le premier test échoue sur le
+flag, le relâchement, la veille et l'audit — la correction est porteuse, pas décorative.
+
+## Relecture tour 11 — trois défauts du backstop (2026-11-07)
+
+`arch -arm64 swift test` après les trois correctifs :
+
+```
+$ arch -arm64 swift test
+  RunClosedCoreTests           142 tests, 0 failures   (136 → 142)
+  RunClosedMacSystemTests      213 tests, 0 failures   (207 → 213)
+  RunClosedPersistenceTests     48 tests, 0 failures
+  RunClosedHelperSupportTests   38 tests, 0 failures
+  RunClosedAppTests             11 tests, 0 failures
+  → 452 tests, 0 failures (448 avant : +4)
+```
+
+Quatre tests de régression, un par défaut plus la contre-épreuve de l'épisode :
+
+- `testAFailingProtectiveReleaseSleepsOnlyOnce` — un relâchement qui échoue en boucle ne doit endormir le
+  Mac qu'une fois ; le verrou de notification de l'app reste intact.
+- `testAProtectiveSleepEpisodeEndsWhenTheBatteryRecovers` — la suppression est un épisode : au-dessus de la
+  bande d'alerte elle se termine, et une nouvelle décharge peut rendormir.
+- `testANewFailureEpisodeIsAuditedAgainAfterARecovery` — après un rétablissement, une panne ultérieure de
+  même raison est de nouveau auditée.
+- `testABusyMinuteCarriesTheFailureKeyForward` — l'autre moitié du tri-état : une minute qui n'a pas évalué
+  la batterie n'oublie pas l'épisode.
+
+**Contre-épreuves, mesurées** (correctif retiré, test relancé, correctif restauré) :
+
+- sommeil : sans `protectiveSleepTried`, `XCTAssertEqual failed: ("2") is not equal to ("1") — a repeated
+  identical failure must not sleep the Mac every minute`. Le Mac était endormi deux fois en deux minutes.
+- audit : sans `batteryStepRan`, `XCTAssertNil failed: "batteryReleaseFailed:criticalOwned" — a healthy
+  battery step forgets the episode`. La clé survivait donc au rétablissement.
+
+Le troisième défaut (course entre la sonde du backstop et le verrou) n'a pas de test : il demande de faire
+aboutir un `backstop unregister` pendant qu'un `session start` attend `LidWriteLock`, soit un ordonnancement
+inter-processus que la suite ne peut pas scénariser honnêtement. `backstopStillEnforcingLocked()` est une
+lecture de fichier et de `UserDefaults` sans XPC ; sa couverture est la relecture, pas un test. Marqué
+`NOT_TESTED` dans cette section plutôt que revendiqué.
+
+## Relecture tour 12 — deux WARN, dont un test qui passait à vide (2026-11-07)
+
+- `scripts/build-runclosed-app.sh` : `$HOME` était échappé pour `sed` mais inséré brut dans un
+  nœud texte XML. Un répertoire personnel contenant `&` ou `<` produisait un plist que
+  `plutil -lint` rejette — donc un agent qui ne charge jamais, sur une machine où tout le reste
+  fonctionne. L'échappement XML (`&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`) précède maintenant
+  l'échappement `sed`, et dans cet ordre : le `&` de `&amp;` doit être échappé pour sed après
+  coup, jamais avant.
+- `tests/.../RecoveryBackstopServiceTests.swift` : `testANewFailureEpisodeIsAuditedAgainAfterARecovery`
+  comptait toutes les lignes `batteryRelease`. Le run de rétablissement en écrit une (le
+  relâchement réussit), donc l'assertion finale à 2 était satisfaite par cette ligne et la panne
+  suivante n'était jamais exercée. Il compte désormais par résultat (`releaseFailed`).
+
+Durcir le test a révélé une seconde erreur : après un relâchement vérifié, `LidMutationService`
+passe le record à `ownedEnabled: false`, donc la politique répond `.notOwned` et n'essaie aucun
+relâchement — c'est B2 qui s'applique correctement. Le test modélise maintenant ce que fait
+réellement le réarmement (le record redevient nôtre) pour exercer la clé de dédoublonnage et non
+le contrôle de propriété.
+
+**Contre-épreuve** : en restaurant `outcome.auditedFailureKey ?? previous?.lastAuditedFailureKey`,
+le test échoue sur les DEUX assertions — la clé survit au rétablissement et la nouvelle panne
+n'est pas auditée.
+
+Suite : **452/452**, 0 warning. Bundle reconstruit, `plutil -lint` OK, `codesign --verify
+--strict` OK, chemin de log substitué, `backstop status --json` → `notFound` / `enforcing:false` /
+`operatorOptedOut:false`.
+
+## Relecture tour 13 — restauration des verrous et chemins de log (2026-11-07)
+
+Deux WARN. Le premier est un défaut réel :
+
+- `Sources/RunClosedMacSystem/LowBatteryGuardService.swift` — la restauration des verrous de
+  notification était une copie EN BLOC de `before`, qui annulait aussi les remises à zéro que
+  `LowBatteryPolicy.step` fait quand la charge repasse au-dessus de la bande d'alerte. Une machine
+  chargée pendant que l'app ne tournait pas gardait `warnedLow`/`warnedCritical` à vrai, donc la
+  première alerte de la DÉCHARGE SUIVANTE répondait `.alreadyWarned` et n'était jamais affichée —
+  exactement le silence que la restauration existe pour éviter, une décharge plus tard. Le `&&`
+  distingue les deux sens : un SET de ce passage est supprimé, un CLEAR de la politique passe.
+
+  Test : `testAChargeWhileTheBackstopRunsStillResetsTheWarnLatches`. **Contre-épreuve mesurée** —
+  en revenant à la copie en bloc, il échoue sur les DEUX assertions.
+
+Le second est une limite d'architecture, consignée et non prétendue corrigée :
+
+- `Resources/com.benjaminbelaga.runclosed.backstop.plist` — `__HOME__` est substitué au BUILD, donc
+  `StandardErrorPath`/`StandardOutPath` nomment le home du compte de build. L'agent étant enregistré
+  par utilisateur via `SMAppService`, sur une machine où l'app a été installée par un autre compte,
+  launchd écrit ces deux fichiers dans le home du buildeur — ou échoue l'ouverture. Non corrigeable
+  dans le template : un plist dans un bundle signé est un octet fixe et launchd n'y étend aucune
+  variable. Le vrai correctif est de renoncer à ces clés et de faire écrire l'agent sous
+  `NSHomeDirectory()` (ce que `prepareLogDirectory()` crée déjà) — suite ouverte, écrite dans le
+  plist lui-même. N'affecte que les diagnostics de l'agent, jamais son comportement protecteur :
+  `recovery_audit.jsonl` est écrit par l'agent sous son propre home.
+
+Suite : **453/453**, 0 warning. Bundle reconstruit, `plutil -lint` OK, `codesign --verify --strict`
+OK.
+
+## Relecture tour 14 — un register explicite qui ne voit pas l'agent n'est pas un succès (2026-11-07)
+
+- `Sources/RunClosedHelperSupport/BackstopRegistration.swift` — `registerAndReport()` traitait
+  `lastOperationSucceeded == nil` comme un succès. Ce `nil` est ce que `registerIfNeeded` rapporte
+  quand le statut est `.unknown` (« ce process ne voit pas l'agent »), état dans lequel il ne tente
+  délibérément AUCUN enregistrement. Effacer l'opt-out et sortir en 0 disait donc à l'opérateur que
+  le filet était rétabli alors que rien n'avait été fait — le seul test d'échec du CLI étant
+  `== false`, `nil` passait pour 0. Une preuve positive est désormais exigée : soit l'appel a réussi,
+  soit le statut lit `enabled`/`requiresApproval`.
+
+  Test : `testAnExplicitRegisterThatCannotSeeTheAgentIsNotASuccess`. **Contre-épreuve mesurée** —
+  sans le correctif, il échoue sur les deux assertions (`nil` accepté comme succès, opt-out écrasé).
+
+Le second WARN (chemins de diagnostic liés au compte de build) est la limite consignée au tour 13,
+non corrigée et documentée dans le plist, PROGRESS, cet onglet et l'ADR.
+
+Suite : **454/454**, 0 warning.
+
+## Relecture tour 15 — le flood d'audit de l'étape session (2026-11-07)
+
+- `Sources/RunClosedMacSystem/RecoveryBackstopService.swift` + `BackstopHeartbeatStore.swift` —
+  `.retained` garde le record exprès pour que la minute suivante réessaie, donc un relâchement qui
+  échoue en boucle écrivait la MÊME ligne `sessionExpiry`/`retained` toutes les 60 s : 1 440 par
+  jour, exactement le flood que le dédoublonnage de l'étape batterie empêche depuis le tour 9, mais
+  l'étape session n'en avait pas. Clé dédiée `lastAuditedSessionFailureKey`, séparée de celle de la
+  batterie — les deux étapes auditent indépendamment, une panne batterie ne doit pas taire une panne
+  de session — avec le même contrat tri-état via `sessionStepRan`.
+
+  Le dédoublonnage ne change PAS le code de sortie : une échéance non appliquée reste une panne à
+  chaque minute, asserté dans le test. Un log silencieux ne doit jamais devenir une minute saine.
+
+  Tests : `testARetainedSessionFailureIsAuditedOncePerEpisode` (4 minutes, 1 ligne, sortie 5 à
+  chaque fois) et `testANewRetainedEpisodeIsAuditedAfterTheRecordIsGone` (la clé est oubliée quand
+  le record disparaît, une nouvelle session qui échoue de la même façon est auditée).
+  **Contre-épreuve mesurée** — sans le `return`, le premier test lit 4 lignes au lieu d'1.
+
+Deux autres WARN du même tour sont des limites déjà consignées, non re-corrigées : la course
+`backstop unregister` / `session start` (résidu documenté au tour 11 — le chemin local instantané est
+fermé, la révocation dans Réglages Système pendant la même fenêtre ne l'est pas) et les chemins de
+diagnostic liés au compte de build (tour 13).
+
+Suite : **456/456**, 0 warning.

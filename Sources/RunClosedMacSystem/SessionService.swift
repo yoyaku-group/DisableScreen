@@ -228,23 +228,24 @@ public struct SessionService {
         return .success(next)
     }
 
-    /// Operator pressed End (or ran `session end`).
+    /// End the running session: the popup's End button, `session end`, or
+    /// `session end --operator`.
     ///
-    /// A TIMED session ends through the same ownership gate as expiry, so End
-    /// never turns off a flag another tool owns (a timed start refuses a
-    /// foreign flag in the first place). An INDEFINITE session is the plain
-    /// switch, which may have adopted a flag another tool set: End is then the
-    /// switch OFF, an operator command (ADR 021). Otherwise the record would
-    /// go while the Mac stays awake with no deadline. A timed End refused
-    /// with the flag still ON reports `.flagLeftOn`, so the popup and the CLI
-    /// tell the operator to turn it off with the switch.
+    /// A TIMED session always ends through the same ownership gate as expiry,
+    /// so End never turns off a flag another tool owns (a timed start refuses
+    /// a foreign flag in the first place). A timed End refused with the flag
+    /// still ON reports `.flagLeftOn`, so the popup and the CLI tell the
+    /// operator to turn it off with the switch.
     ///
-    /// `byOperator` says a human asked (the popup's End, `session end
-    /// --operator`). Only then does an indefinite End skip the ownership
-    /// gate, exactly like `lid-stay-awake off --operator`: otherwise a script
-    /// refused by the plain `off` could adopt a foreign flag with
-    /// `start --indefinite` and turn it off with `end`. An automatic End
-    /// still releases a flag RunClosed owns.
+    /// An INDEFINITE session is the plain switch, which may have adopted a
+    /// flag another tool set. `byOperator` says a human asked (the popup's End,
+    /// `session end --operator`): ONLY THEN does an indefinite End run as
+    /// `.operatorCommand` and skip the ownership gate (ADR 021) — otherwise the
+    /// record would go while the Mac stays awake with no deadline. The reason
+    /// is the same as for `lid-stay-awake off`: without it a script refused by
+    /// the plain `off` could adopt a foreign flag with `start --indefinite` and
+    /// turn it off with `end`. An AUTOMATIC End (`byOperator: false`) is not a
+    /// human and still releases only a flag RunClosed owns.
     public mutating func end(byOperator: Bool = false) -> Result<SessionEndOutcome, SessionError> {
         guard let session = store.load() else { return .failure(.noSession) }
         let initiator: LidMutationService.Initiator = session.isIndefinite && byOperator
@@ -262,6 +263,26 @@ public struct SessionService {
         /// The record stays for the next tick. Retrying is correct: a failed
         /// release must never look like a finished session.
         case retained(String)
+
+        /// The deadline was NOT enforced: the Mac is still being kept awake,
+        /// so callers must report a failure and never a healthy minute.
+        ///
+        /// Deliberately NOT the same question as `SessionEndOutcome.isFailure`,
+        /// which asks only "does the record stay for a retry?". Here `.retained`
+        /// and `.ended(.flagLeftOn)` both qualify: a refusal that left the flag
+        /// ON deleted the record but turned nothing off, so the Mac stays awake
+        /// with no deadline and no RunClosed owner — the 2026-10-14 class this
+        /// backstop exists to close. Reporting that as `0 ok` would also feed a
+        /// false "fresh" heartbeat to the CLI's enforcer check.
+        ///
+        /// Named `isFailure` for its callers; read it as `deadlineEnforced`.
+        public var isFailure: Bool {
+            switch self {
+            case .retained: return true
+            case .noSession, .notDue: return false
+            case .ended(let end): return !end.stopsKeepingAwake
+            }
+        }
     }
 
     /// End the session if a deadline has passed.
@@ -341,6 +362,15 @@ public struct SessionService {
     public struct StepOutcome: Equatable, Sendable {
         public var expiry: ExpiryOutcome
         public var reconciled: ReconcileOutcome?
+        /// The boot the step ran on, so a caller that only has the outcome
+        /// (the ADR 024 backstop writes an audit line) does not have to guess.
+        public var bootID: String = ""
+
+        public init(expiry: ExpiryOutcome, reconciled: ReconcileOutcome? = nil, bootID: String = "") {
+            self.expiry = expiry
+            self.reconciled = reconciled
+            self.bootID = bootID
+        }
     }
 
     /// The session's share of a tick: expire a due session, otherwise
@@ -350,7 +380,8 @@ public struct SessionService {
     public mutating func step() -> StepOutcome {
         let expiry = expireIfDue()
         let reconciled = expiry == .notDue ? reconcileOrphan() : nil
-        return StepOutcome(expiry: expiry, reconciled: reconciled)
+        return StepOutcome(expiry: expiry, reconciled: reconciled,
+                           bootID: continuous.bootID)
     }
 
     // MARK: — Low-battery interplay (ADR 023 §4)

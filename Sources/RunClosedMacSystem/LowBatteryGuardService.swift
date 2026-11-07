@@ -188,6 +188,124 @@ public struct LowBatteryGuardService {
         return lock.withLock { lockedTick() }
     }
 
+    /// What a protective-only caller did. There is no `rearmed` case: the
+    /// re-arm is the app's, so a decision that asks for one is WITHHELD and
+    /// reported as such.
+    public struct ProtectiveOutcome: Equatable, Sendable {
+        public var decision: LowBatteryPolicy.Decision
+        public var chargePercent: Int?
+        public var minutesRemaining: Int?
+        public var mutation: ProtectiveMutation?
+        public var mutationError: String?
+        public var sleepAttempted = false
+        public var sleepRC: Int32?
+
+        public init(decision: LowBatteryPolicy.Decision, chargePercent: Int?,
+                    minutesRemaining: Int?) {
+            self.decision = decision
+            self.chargePercent = chargePercent
+            self.minutesRemaining = minutesRemaining
+        }
+    }
+
+    public enum ProtectiveMutation: String, Equatable, Sendable {
+        case released
+        case releaseRefused
+        case releaseFailed
+        /// The policy wanted a re-arm; a protective-only caller never performs
+        /// one, so the debt is left to the app (ADR 024).
+        case rearmWithheld
+    }
+
+    /// The battery step for a caller that may only PROTECT (ADR 024).
+    ///
+    /// Same policy, same ownership gate, same latch and audit discipline as
+    /// `tick()` — the only difference is what it refuses to do:
+    ///
+    /// - it NEVER enables the flag: `.rearm` becomes `.rearmWithheld`, and the
+    ///   persisted debt stays exactly where the app will find it;
+    /// - it does not run the session step. The backstop runs that itself,
+    ///   once, in the same lock section, so running it here too would be a
+    ///   second decision on the same record;
+    /// - it takes no lock. The caller holds `LidWriteLock` (the backstop's
+    ///   one section).
+    ///
+    /// The release itself goes through the same branch `tick()` uses
+    /// (`performRelease`), so there is one rule and not two.
+    public mutating func protectiveStep() -> ProtectiveOutcome {
+        let evaluation = evaluate()
+        var outcome = ProtectiveOutcome(
+            decision: evaluation.decision,
+            chargePercent: evaluation.input.chargePercent,
+            minutesRemaining: evaluation.input.minutesRemaining)
+        var record = latchStore.load()
+        let before = record
+        record.latch = evaluation.latchAfter
+
+        switch evaluation.decision.action {
+        case .none, .warn:
+            break
+        case .rearm:
+            outcome.mutation = .rearmWithheld
+            outcome.mutationError = "a re-arm is the app's; the backstop never turns the flag on"
+        case .releaseAndSleep:
+            // Captured here, before the write, so the guard's own audit line
+            // describes the record the decision was based on.
+            let recordBootIDBefore = lidService.store.load().bootID
+            var tick = TickOutcome(evaluation: evaluation)
+            performRelease(evaluation: evaluation, record: &record, outcome: &tick,
+                           recordBootIDBefore: recordBootIDBefore, protective: true)
+            outcome.mutation = tick.mutation.map {
+                switch $0 {
+                case .released: return .released
+                case .releaseFailed: return .releaseFailed
+                default: return .releaseRefused
+                }
+            }
+            outcome.mutationError = tick.mutationError
+            outcome.sleepAttempted = tick.sleepAttempted
+            outcome.sleepRC = tick.sleepRC
+        }
+        // The backstop shows NO notification, so it must not consume the
+        // operator's warnings on the app's behalf. `LowBatteryPolicy` sets
+        // `warnedLow` on `.warn`, and a refused release sets `warnedCritical`;
+        // persisting those would make the app's next tick answer
+        // `.alreadyWarned` and the low-battery (or critical-not-owned) warning
+        // would never be shown at all — the one case where the operator most
+        // needs to be told. `failedReleaseSleepTried` is the same story: it
+        // suppresses the app's notify-once.
+        //
+        // Only the re-arm debt (`releasedByGuard` / `releasedBootID`) is this
+        // caller's to write: that is the app's signal to re-enable the flag,
+        // not a claim that anyone was informed.
+        //
+        // `protectiveSleepTried` is the ONE latch this caller may write: it is
+        // the backstop's own "I already slept for this failure" memory. Without
+        // it the sleep-once guard was erased here on every run, so a
+        // persistently failing release put the Mac to sleep every 60 s — even
+        // right after the operator woke it (review round 10). Separate from
+        // `failedReleaseSleepTried` precisely because that one doubles as the
+        // app's notify latch, which must stay untouched.
+        //
+        // Restoring is not a blanket copy: the policy also CLEARS these latches
+        // once the charge is back above the warn band, and copying `before`
+        // back would silently undo that reset. A machine that charged while the
+        // app was not running would keep `warnedLow`/`warnedCritical` set
+        // forever, so the app's first warning of the NEXT discharge would be
+        // answered `.alreadyWarned` and never shown — the same silent silencing
+        // this restore exists to prevent, just one episode later (review round
+        // 13). `&&` says exactly the right thing per field: a SET by this run
+        // is suppressed, a CLEAR by the policy goes through.
+        record.latch.warnedLow = before.latch.warnedLow && record.latch.warnedLow
+        record.latch.warnedCritical = before.latch.warnedCritical && record.latch.warnedCritical
+        record.latch.failedReleaseSleepTried =
+            before.latch.failedReleaseSleepTried && record.latch.failedReleaseSleepTried
+        if record != before {
+            latchStore.save(record)
+        }
+        return outcome
+    }
+
     private mutating func lockedTick() -> TickOutcome {
         // ADR 023 — session expiry runs FIRST, inside this same lock section:
         // a session whose deadline passed must never be re-armed by the very
@@ -223,47 +341,8 @@ public struct LowBatteryGuardService {
             break
 
         case .releaseAndSleep:
-            // Emergency ownership of OUR stale record is scoped to this one
-            // branch; `LidMutationService` re-checks that the record is ours.
-            let initiator: LidMutationService.Initiator =
-                evaluation.decision.reason == .emergencyStaleOwnership ? .lowBatteryEmergency : .automatic
-            let result = lidService.setEnabled(false, initiator: initiator)
-            switch result {
-            case .success(let op) where op.state == .verified:
-                outcome.mutation = .released
-                outcome.shouldNotify = true
-                record.latch = record.latch.recordingRelease()
-                record.releasedBootID = lidService.bootID
-                // ADR 023 §4: a low-battery release PAUSES the session instead
-                // of ending it — the operator's deadline is not the battery's
-                // to cancel, and the re-arm below may revive it. A pause that
-                // fails to save is restored by the next tick's reconciliation
-                // (flag OFF + re-arm debt pending = a battery pause).
-                sessionService?.pauseForBattery()
-                // Persist the re-arm debt and the audit line BEFORE asking
-                // for sleep: the Mac may go down right after `sleepnow`.
-                latchStore.save(record)
-                audit(outcome, evaluation: evaluation, recordBootID: recordBootIDBefore)
-                attemptSleep(&outcome)
-            case .success(let op):
-                // Not refused, not verified: treat as a backend failure.
-                outcome.mutation = .releaseFailed
-                outcome.mutationError = op.error ?? "release not verified (state=\(op.state.rawValue))"
-                attemptSleepOnceAfterFailure(&outcome, record: &record)
-            case .failure(.backendFailed(let message)):
-                // We own the flag and the battery is critical: still try
-                // the sleep (best effort, it is not a persistent mutation).
-                outcome.mutation = .releaseFailed
-                outcome.mutationError = message
-                attemptSleepOnceAfterFailure(&outcome, record: &record)
-            case .failure(let error):
-                // B1/B2/no-op refusal (e.g. ownership changed between the
-                // evaluation and the write): no sleep; warn once per episode.
-                outcome.mutation = .releaseRefused
-                outcome.mutationError = String(describing: error)
-                outcome.shouldNotify = !record.latch.warnedCritical
-                record.latch.warnedCritical = true
-            }
+            performRelease(evaluation: evaluation, record: &record, outcome: &outcome,
+                           recordBootIDBefore: recordBootIDBefore)
 
         case .rearm:
             // ADR 023 §4: re-arm only while the session is still valid (not
@@ -318,6 +397,66 @@ public struct LowBatteryGuardService {
         return outcome
     }
 
+    /// The ONE critical-battery release branch, shared by `lockedTick()` (the
+    /// app) and `protectiveStep()` (the ADR 024 backstop), so the two callers
+    /// cannot drift apart: journal-with-outcome, pause the session, persist the
+    /// re-arm debt BEFORE the sleep, audit before the sleep, then `sleepnow`.
+    ///
+    /// The only caller-specific input is the initiator, which the policy
+    /// already decided (`emergencyStaleOwnership` widens B2 to our own record
+    /// from a previous boot; `LidMutationService` re-checks it).
+    /// `recordBootIDBefore` is passed IN rather than read here: `lockedTick`
+    /// must capture it BEFORE the session step, which can clear or rewrite
+    /// `owned_lid.json` on the same tick. Reading it inside the helper would
+    /// record, in the low-battery audit line, the ownership record as it stood
+    /// AFTER the session step instead of the one the battery decision was
+    /// actually based on.
+    private mutating func performRelease(evaluation: Evaluation,
+                                         record: inout LowBatteryLatchStore.Record,
+                                         outcome: inout TickOutcome,
+                                         recordBootIDBefore: String,
+                                         protective: Bool = false) {
+        let initiator: LidMutationService.Initiator =
+            evaluation.decision.reason == .emergencyStaleOwnership ? .lowBatteryEmergency : .automatic
+        let result = lidService.setEnabled(false, initiator: initiator)
+        switch result {
+        case .success(let op) where op.state == .verified:
+            outcome.mutation = .released
+            outcome.shouldNotify = true
+            record.latch = record.latch.recordingRelease()
+            record.releasedBootID = lidService.bootID
+            // ADR 023 §4: a low-battery release PAUSES the session instead
+            // of ending it — the operator's deadline is not the battery's
+            // to cancel, and the re-arm may revive it. A pause that
+            // fails to save is restored by the next tick's reconciliation
+            // (flag OFF + re-arm debt pending = a battery pause).
+            sessionService?.pauseForBattery()
+            // Persist the re-arm debt and the audit line BEFORE asking
+            // for sleep: the Mac may go down right after `sleepnow`.
+            latchStore.save(record)
+            audit(outcome, evaluation: evaluation, recordBootID: recordBootIDBefore)
+            attemptSleep(&outcome)
+        case .success(let op):
+            // Not refused, not verified: treat as a backend failure.
+            outcome.mutation = .releaseFailed
+            outcome.mutationError = op.error ?? "release not verified (state=\(op.state.rawValue))"
+            attemptSleepOnceAfterFailure(&outcome, record: &record, protective: protective)
+        case .failure(.backendFailed(let message)):
+            // We own the flag and the battery is critical: still try
+            // the sleep (best effort, it is not a persistent mutation).
+            outcome.mutation = .releaseFailed
+            outcome.mutationError = message
+            attemptSleepOnceAfterFailure(&outcome, record: &record, protective: protective)
+        case .failure(let error):
+            // B1/B2/no-op refusal (e.g. ownership changed between the
+            // evaluation and the write): no sleep; warn once per episode.
+            outcome.mutation = .releaseRefused
+            outcome.mutationError = String(describing: error)
+            outcome.shouldNotify = !record.latch.warnedCritical
+            record.latch.warnedCritical = true
+        }
+    }
+
     private func audit(_ outcome: TickOutcome, evaluation: Evaluation, recordBootID: String) {
         auditLog.append(.init(
             ts: ISO8601DateFormatter().string(from: Date()),
@@ -334,11 +473,24 @@ public struct LowBatteryGuardService {
     /// A persistently failing release (e.g. sudoers rule removed) is retried
     /// every tick, but the best-effort sleep + its notification happen once
     /// per discharge episode — never a sleep/notify loop every 30 s.
+    ///
+    /// `protective` picks WHICH once-per-episode latch applies: the app owns
+    /// `failedReleaseSleepTried` (which also gates its notify), while the
+    /// backstop owns `protectiveSleepTried` and must not touch the app's
+    /// (it shows no notification, so consuming the app's latch would silence a
+    /// warning nobody ever saw). It also suppresses the notification for the
+    /// protective caller for the same reason (review round 10).
     private func attemptSleepOnceAfterFailure(_ outcome: inout TickOutcome,
-                                              record: inout LowBatteryLatchStore.Record) {
-        guard !record.latch.failedReleaseSleepTried else { return }
-        record.latch.failedReleaseSleepTried = true
-        outcome.shouldNotify = true
+                                              record: inout LowBatteryLatchStore.Record,
+                                              protective: Bool) {
+        if protective {
+            guard !record.latch.protectiveSleepTried else { return }
+            record.latch.protectiveSleepTried = true
+        } else {
+            guard !record.latch.failedReleaseSleepTried else { return }
+            record.latch.failedReleaseSleepTried = true
+            outcome.shouldNotify = true
+        }
         attemptSleep(&outcome)
     }
 

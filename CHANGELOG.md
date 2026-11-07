@@ -7,6 +7,93 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Recovery backstop (ADR 024). Until now only the running app enforced a
+  session deadline and the low-battery guard, so a crash or a quit left
+  `pmset disablesleep 1` on with nothing to turn it off: the Mac stayed awake
+  with the lid closed until the battery died (the 2026-10-14 incident behind
+  ADR 022). A per-user LaunchAgent now runs `runclosed-cli recover --backstop`
+  every 60 s. It takes only PROTECTIVE actions while the app is not running —
+  it ends a session whose deadline passed (releasing through the ownership
+  gate, `.sessionRecovery` for the session's own previous-boot record) and, at
+  critical battery, releases the flag and lets the Mac sleep. It never turns
+  the flag ON and never performs the low-battery re-arm: that debt is left on
+  disk for the app, so the agent cannot wake the Mac unattended. It takes the
+  cross-process lock non-blocking and exits 75 when another writer holds it,
+  the conventional "retry next minute"; when the app holds `app.lock` it exits
+  at once. A minute with nothing to protect costs no `pmset` call and no lock,
+  and `recovery_audit.jsonl` gets a line only when a step acted or failed.
+  Registered with `SMAppService.agent(plistName:)` — never `launchctl
+  bootstrap`, which would leave a job outliving a deleted bundle — and
+  registered at every launch when it is not registered yet. A pending approval
+  shows "Recovery backstop off — approve it in System Settings" in the popup
+  with a Login Items link. `status` and `doctor` gain a `backstop` block, and
+  the CLI gains `recover --backstop` and `backstop status|register|login-items|
+  unregister`. `session start --for` and `session extend` are now allowed while
+  the app is closed, provided the agent reports `enabled`; a merely pending
+  approval enforces nothing and keeps the refusal, whose message names both
+  ways out. Being registered is also not enough: every run writes
+  `backstop_heartbeat.json`, and the CLI only treats the agent as an enforcer
+  when that record proves a successful run on this boot within the last 3
+  minutes — an approved agent whose program never actually runs (a
+  `BundleProgram` that does not resolve) therefore keeps the refusal instead of
+  letting a deadline go unenforced. A run that failed, a heartbeat from before
+  a restart, or a stale one after a wake all refuse; `backstop status`,
+  `status` and `doctor` report `lastRunAt`, `lastExitCode`, `recentRun` and
+  `enforcing`. The popup applies the same rule, so it no longer says nothing
+  about an approved-but-never-running agent. A busy minute (another writer held
+  the lock) no longer counts as proof the agent could act, and unregistering is
+  remembered as an explicit operator decision so the next app launch does not
+  silently register the agent again — that decision is now SHOWN (`backstop
+  status`, the popup and the refusal message name it) instead of reading as
+  "never registered", which pointed the operator at a System Settings screen
+  where nothing would ever appear. An agent minute pre-empted by another writer
+  (exit 75) is reported as busy rather than as a failed run. The agent's
+  diagnostics go to `~/Library/Logs/RunClosed/`, never `/tmp`: that directory is
+  world-writable, so a fixed name there let another local account pre-create it
+  as a symlink and have launchd write to a file of its choosing with your
+  privileges. Known limit, stated in the README: nothing
+  protects the Mac while no user is logged in.
+
+### Fixed
+
+- Recovery backstop: a failing protective release slept the Mac once per
+  minute. `protectiveStep()` restores the app's notification latches on purpose
+  (the backstop shows no notification, so consuming them would silence a
+  warning nobody saw), but the sleep-once memory shared one of those fields —
+  restoring it erased the memory every run, so a stale sudoers rule put the Mac
+  to sleep every 60 s forever, including right after the operator woke it.
+  Sleep suppression and notification suppression are now separate states:
+  `protectiveSleepTried` belongs to the backstop, `failedReleaseSleepTried`
+  stays the app's and is no longer touched. The episode ends when the charge
+  rises above the warn band, so a later discharge may sleep again.
+- Recovery backstop: a failure episode was never forgotten, so a later failure
+  with the same reason got no audit line at all. A healthy run wrote `nil`,
+  which the heartbeat read as "keep the previous key" — the same sentinel used
+  for "the battery step did not run". `batteryStepRan` tells the two apart: a
+  healthy battery step clears the key, only a minute that never evaluated the
+  battery carries it forward.
+- Recovery backstop: `session start --for` and `session extend` could accept a
+  deadline nothing would enforce. The backstop probe is read before
+  `LidWriteLock` (it is an XPC round-trip; holding the lock across a slow `smd`
+  stalls the app's tick), so an operator `backstop unregister` completing while
+  the command waited for the lock left the pre-lock answer `true`.
+  `backstopStillEnforcingLocked()` re-checks the two facts an unregister
+  actually changes — the recorded opt-out and the heartbeat freshness — inside
+  the section, with no XPC. A revocation made in System Settings during that
+  same window is still not covered: it is asynchronous, leaves no local trace,
+  and closing it would mean putting the XPC back under the lock.
+- ADR 023 follow-ups. Turning the lid switch on now records an indefinite
+  session only when the read-back verified the flag ON: a write that reported
+  success without confirming it used to leave a deadline-less "running
+  session" on every surface for a flag nobody observed on, so it now behaves as
+  a failure for the session record. `runclosed session status --json` names the
+  day when the deadline is not today ("Until Tue 14:30"), as the popup already
+  did — a 7-day session read as "Until 14:30" claims today. The
+  `SessionService.end(byOperator:)` documentation now matches the code: an
+  indefinite End is an operator command only when `byOperator` is true.
+
+### Added
+
 - Timed keep-awake sessions (ADR 023). The lid stay-awake switch used to have
   no end time: forgetting it left the Mac awake until the low-battery guard
   stepped in at 10 %. The lid row now offers 1 h / 2 h / 4 h / 8 h buttons and

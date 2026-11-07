@@ -1,0 +1,385 @@
+import Foundation
+import ServiceManagement
+
+/// Observable lifecycle state of the ADR 024 recovery backstop, mapped 1:1
+/// from `SMAppService` statuses — the same model as the ADR 016 daemon
+/// (`DaemonStatus`), for the same reason: every state is surfaced, none is
+/// silently normalized into another (ADR 009 honesty).
+public enum BackstopStatus: String, Sendable, Equatable, CaseIterable {
+    /// No active registration (the steady state after an unregister).
+    case notRegistered
+    /// Registered and running: the agent fires every 60 s.
+    case enabled
+    /// Registered but still waiting for the user's approval in System
+    /// Settings → Login Items & Extensions. The app MUST surface this and
+    /// offer the deep link, never block — and, until it is approved, the
+    /// protective net does NOT exist, so the CLI keeps refusing a timed
+    /// session when the app is not running.
+    case requiresApproval
+    /// The framework could not find the service: never registered on this
+    /// machine (observed on macOS 26 in ADR 018), or a genuinely broken
+    /// registration (bundle moved, plist missing). Registration is attempted
+    /// from here too; it is never a phantom "enabled".
+    case notFound
+    /// Container/OS-level failure we could not classify.
+    case unknown
+
+    /// Does the backstop actually protect the Mac right now?
+    ///
+    /// Only `enabled` does. `requiresApproval` is a real, surfaced state but it
+    /// enforces nothing yet, so a caller that relaxes a safety rule on the
+    /// strength of this state must not relax it here.
+    public var isProtecting: Bool { self == .enabled }
+
+    /// One line for a popup or a CLI, honest about what the state means.
+    public var summary: String {
+        switch self {
+        case .enabled:
+            // Registration only. Whether the agent actually RUNS is a separate
+            // question the freshness rule answers (`recentRun`), and saying
+            // "enforced" here would claim a proof this state does not carry.
+            return "registered — approval granted; a session deadline is enforced only while it is also running"
+        case .requiresApproval:
+            return "off — approve it in System Settings"
+        case .notRegistered:
+            return "off — not registered"
+        case .notFound:
+            return "off — the agent is not registered on this Mac"
+        case .unknown:
+            return "unknown"
+        }
+    }
+}
+
+/// Registration seam for the backstop agent — a protocol so unit tests drive
+/// every state deterministically without touching the real `SMAppService`
+/// (which requires a signed bundle and a user approval gesture).
+public protocol BackstopRegistrar: Sendable {
+    func status() -> BackstopStatus
+    /// Ask launchd to register the bundled agent. `false` = the call failed AND
+    /// the service did not end up pending or enabled.
+    func register() -> Bool
+    func unregister() -> Bool
+    /// Open System Settings → Login Items & Extensions so the user can approve
+    /// a `requiresApproval` agent. Performs no privileged work.
+    func openLoginItemsSettings()
+    /// The operator explicitly turned the backstop off (`backstop unregister`).
+    /// The app's automatic registration at launch honours this, so it can never
+    /// silently undo that decision. Cleared by an explicit re-register.
+    func operatorOptedOut() -> Bool
+    func setOperatorOptedOut(_ value: Bool)
+    /// Whether the agent was ever seen REGISTERED (or awaiting approval) on
+    /// this machine.
+    ///
+    /// `SMAppService` reports `notRegistered` both for "never registered" and
+    /// for "the operator revoked it in System Settings", so without a memory
+    /// the app cannot tell a first run from a decision it would be undoing. It
+    /// records what it has seen, and `registerIfNeeded(automatic:)` treats
+    /// `notRegistered` AFTER a registration as a revocation to respect, not as
+    /// a gap to fill (review round 8).
+    func wasEverRegistered() -> Bool
+    func setWasEverRegistered(_ value: Bool)
+}
+
+public extension BackstopRegistrar {
+    /// Registrars that do not model the opt-out (test doubles) default to
+    /// "no opt-out", so nothing changes for them.
+    func operatorOptedOut() -> Bool { false }
+    func setOperatorOptedOut(_ value: Bool) {}
+    func wasEverRegistered() -> Bool { false }
+    func setWasEverRegistered(_ value: Bool) {}
+}
+
+/// Production registrar wrapping `SMAppService.agent(plistName:)`.
+///
+/// Apple's API — no `launchctl bootstrap`, which would create a job that
+/// outlives the app bundle it points at. `agent(...)` resolves the plist
+/// against the calling process's main bundle, so this only works from inside
+/// `RunClosed.app` (the app itself, or `runclosed-cli` shipped in
+/// `Contents/MacOS`), never from a bare `swift run` binary.
+public struct SMAppServiceAgentRegistrar: BackstopRegistrar {
+
+    public init() {}
+
+    /// `agent(plistName:)` resolves against the CALLING process's main bundle.
+    ///
+    /// From `RunClosed.app` and from `runclosed-cli` inside `Contents/MacOS`
+    /// that is the right bundle. From a bare `swift run runclosed` (or a copied
+    /// binary) it is not, and the call answers `.notFound` for an agent that is
+    /// registered and running — which would make the CLI refuse every timed
+    /// session on a machine where the backstop works.
+    ///
+    /// A `.notFound` is therefore reported as `.unknown` when the calling bundle
+    /// is not RunClosed's, never as a definite "off": the honest answer there is
+    /// "this process cannot see the agent". The app itself always calls with the
+    /// right bundle, so its popup is unaffected.
+    public func status() -> BackstopStatus {
+        let mapped = Self.map(
+            SMAppService.agent(plistName: RunClosedBackstopDescriptor.plistName).status)
+        guard mapped == .notFound,
+              Bundle.main.bundleIdentifier != RunClosedBackstopDescriptor.appBundleIdentifier
+        else { return mapped }
+        return .unknown
+    }
+
+    /// One mapping for the live call AND the fake-driven tests, so no state can
+    /// be handled in one place and forgotten in the other.
+    public static func map(_ status: SMAppService.Status) -> BackstopStatus {
+        switch status {
+        case .notRegistered: return .notRegistered
+        case .enabled: return .enabled
+        case .requiresApproval: return .requiresApproval
+        case .notFound: return .notFound
+        @unknown default: return .unknown
+        }
+    }
+
+    @discardableResult
+    public func register() -> Bool {
+        let service = SMAppService.agent(plistName: RunClosedBackstopDescriptor.plistName)
+        do {
+            try service.register()
+            return true
+        } catch {
+            // macOS reality (ADR 018, observed for a daemon and kept here for
+            // the agent): the first `register()` can throw
+            // `SMAppServiceErrorDomain code 1` ("Operation not permitted")
+            // WHILE still transitioning to `requiresApproval` — the user
+            // approval gate IS the normal path, not a failure. Report failure
+            // only when the service did not end up pending/enabled.
+            switch service.status {
+            case .requiresApproval, .enabled: return true
+            default: return false
+            }
+        }
+    }
+
+    @discardableResult
+    public func unregister() -> Bool {
+        do {
+            try SMAppService.agent(plistName: RunClosedBackstopDescriptor.plistName).unregister()
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    public func openLoginItemsSettings() {
+        SMAppService.openSystemSettingsLoginItems()
+    }
+
+    /// Persisted in `UserDefaults`, NOT in the registry: the opt-out is the
+    /// operator's statement of intent and must survive the status going to
+    /// `notRegistered`, which is precisely the state that would otherwise look
+    /// like "never registered, safe to register at launch".
+    public func operatorOptedOut() -> Bool {
+        Self.defaults()?.bool(forKey: Self.optedOutKey) ?? false
+    }
+
+    public func wasEverRegistered() -> Bool {
+        Self.defaults()?.bool(forKey: Self.wasRegisteredKey) ?? false
+    }
+
+    public func setWasEverRegistered(_ value: Bool) {
+        guard let d = Self.defaults() else { return }
+        d.set(value, forKey: Self.wasRegisteredKey)
+        d.synchronize()
+    }
+
+    public func setOperatorOptedOut(_ value: Bool) {
+        guard let d = Self.defaults() else { return }
+        d.set(value, forKey: Self.optedOutKey)
+        // `runclosed-cli backstop unregister` sets this and exits immediately.
+        // UserDefaults writes on its own schedule, and a short-lived process
+        // that never reaches that point loses the write — the operator's "off"
+        // would then be forgotten and the next app launch would register the
+        // agent again. `synchronize()` is the documented way to force it before
+        // exit (review round 8).
+        d.synchronize()
+    }
+
+    static let optedOutKey = "backstopOperatorOptedOut"
+    static let wasRegisteredKey = "backstopWasEverRegistered"
+
+    /// Same bundle dance as `LowBatteryGuardSettings`: inside the bundle the
+    /// main bundle id IS the suite, and `UserDefaults(suiteName: <own id>)` is
+    /// rejected by Foundation there.
+    private static func defaults() -> UserDefaults? {
+        if Bundle.main.bundleIdentifier == "com.benjaminbelaga.RunClosed" {
+            return .standard
+        }
+        return UserDefaults(suiteName: "com.benjaminbelaga.RunClosed")
+    }
+}
+
+/// Registration + status, deliberately without any mutation of the flag: this
+/// is the surface the app, the CLI and `doctor` share.
+public struct BackstopLifecycleService {
+    public let registrar: any BackstopRegistrar
+
+    public init(registrar: any BackstopRegistrar) {
+        self.registrar = registrar
+    }
+
+    public struct Report: Sendable, Equatable {
+        public var status: BackstopStatus
+        /// The ONE thing the agent may do (it can only make the Mac less
+        /// awake) — so approving it is an informed decision.
+        public var boundedAction: String
+        public var intervalSeconds: Int
+        /// Result of the last mutating call; nil when only observing. A failed
+        /// call is surfaced, never swallowed into a bare status.
+        public var lastOperationSucceeded: Bool?
+        /// The operator explicitly turned the backstop off (`backstop
+        /// unregister`), and the app therefore no longer re-registers it at
+        /// launch.
+        ///
+        /// Surfaced because it is otherwise INVISIBLE and indistinguishable
+        /// from "never registered": the app skips registration, `status`
+        /// reports `notRegistered`/`notFound`, and the popup tells the operator
+        /// to approve an agent in System Settings that will never appear there.
+        /// The net ADR 024 exists for then never exists, silently (review round
+        /// 7). Nothing is normalized: the status stays the registry fact and
+        /// this says WHY it stays that way.
+        public var operatorOptedOut: Bool
+
+        public var isProtecting: Bool { status.isProtecting }
+    }
+
+    public func report() -> Report {
+        Report(status: registrar.status(),
+               boundedAction: RunClosedBackstopDescriptor.boundedAction,
+               intervalSeconds: RunClosedBackstopDescriptor.startInterval,
+               lastOperationSucceeded: nil,
+               operatorOptedOut: registrar.operatorOptedOut())
+    }
+
+    /// Register when nothing is registered, and ONLY then: an existing
+    /// registration or a pending approval is a state to surface, never to
+    /// fight (no register/retry loop). `notFound` is included because macOS 26
+    /// reports a never-registered service that way (ADR 018) — without it a
+    /// fresh machine would never register at all.
+    ///
+    /// Idempotent by construction: calling it at every app launch is the
+    /// intended use.
+    ///
+    /// `automatic` says the APP is registering on its own initiative at launch,
+    /// as opposed to the operator typing `runclosed backstop register`. The two
+    /// cases differ in exactly one way: an automatic call honours the opt-out
+    /// an explicit `backstop unregister` recorded, so launching the app can
+    /// never silently undo an operator decision (ADR 024).
+    public func registerIfNeeded(automatic: Bool = false) -> Report {
+        var ok: Bool?
+        if automatic, registrar.operatorOptedOut() {
+            // The operator turned the backstop off on purpose. Re-registering
+            // at launch would undo that with no prompt and no way to tell —
+            // the state is surfaced as `notRegistered`, not fought.
+            return report()
+        }
+        let status = registrar.status()
+        if automatic, status == .notRegistered || status == .notFound,
+           registrar.wasEverRegistered() {
+            // It WAS registered and now reads as absent: the operator revoked it
+            // in System Settings → Login Items, which is a decision exactly like
+            // `backstop unregister` and equally invisible afterwards.
+            // Re-registering at launch would undo it silently, on the very
+            // screen they just used to say no.
+            //
+            // `notFound` counts as revoked here even though macOS 26 reports a
+            // NEVER-registered agent the same way (ADR 018): `wasEverRegistered`
+            // is what separates the two. A fresh machine has it false and still
+            // registers; a machine that had the agent and now cannot find it has
+            // been told no (review round 9).
+            return report()
+        }
+        switch status {
+        case .notRegistered, .notFound:
+            ok = registrar.register()
+            if ok == true { registrar.setWasEverRegistered(true) }
+        case .enabled, .requiresApproval:
+            // Already registered or awaiting approval: remember it, so a later
+            // `notRegistered` is read as a revocation rather than a first run.
+            registrar.setWasEverRegistered(true)
+        case .unknown:
+            // `unknown` says "this process cannot see the agent" (a foreign
+            // bundle, a container-level failure), NOT that one exists. Marking
+            // it as "was ever registered" would let a single unreadable probe
+            // turn the next launch's `notRegistered` into a phantom revocation
+            // and stop the net from ever registering. Nothing is recorded.
+            break
+        }
+        var r = report()
+        r.lastOperationSucceeded = ok
+        return r
+    }
+
+    /// Explicit `runclosed backstop register`: same rule as `registerIfNeeded`
+    /// (never re-register a pending approval), but it CLEARS the operator
+    /// opt-out — this IS the operator asking for it back.
+    ///
+    /// The opt-out is cleared only once the registration actually happened (or
+    /// was unnecessary). Clearing it first meant a `register` that FAILED — a
+    /// slow `smd`, a transient XPC error — also erased the operator's recorded
+    /// "off", so the next app launch would silently register the agent they had
+    /// turned off, for an operation they were told had failed. On failure the
+    /// opt-out stays, and `lastOperationSucceeded: false` says so.
+    ///
+    /// `lastOperationSucceeded == nil` is NOT a success here. It is what
+    /// `registerIfNeeded` reports when the status is `.unknown` — "this process
+    /// cannot see the agent" — a state in which it deliberately attempts no
+    /// registration at all. Treating that as success cleared the opt-out and
+    /// exited 0, telling the operator the net was back while nothing had been
+    /// done; the CLI's only failure test is `== false`, so nil read as 0 (review
+    /// round 14). Positive evidence is required: either the registration call
+    /// reported success, or the status itself now reads registered/awaiting
+    /// approval (the "nothing to do" case).
+    public func registerAndReport() -> Report {
+        let r = registerIfNeeded()
+        guard r.lastOperationSucceeded != false else { return r }
+        guard r.lastOperationSucceeded == true
+                || r.status == .enabled || r.status == .requiresApproval else {
+            var unknown = r
+            unknown.lastOperationSucceeded = false
+            return unknown
+        }
+        registrar.setOperatorOptedOut(false)
+        // Re-read so the returned report reflects the state it now reports:
+        // a report built before the clear would still say "opted out" about
+        // the very call that just undid it.
+        var fresh = report()
+        fresh.lastOperationSucceeded = r.lastOperationSucceeded
+        return fresh
+    }
+
+    /// Reversible teardown: no launchd call when nothing is registered. Records
+    /// the operator's opt-out so the app's automatic registration at launch
+    /// does not put it straight back.
+    public func unregisterAndReport() -> Report {
+        var ok: Bool?
+        // `notFound` is the never-registered state on macOS 26 (ADR 018), so
+        // calling `unregister()` there only throws and reports a spurious
+        // failure for a no-op teardown.
+        switch registrar.status() {
+        case .notRegistered, .notFound:
+            break
+        default:
+            ok = registrar.unregister()
+        }
+        // The opt-out is what stops the app from registering the agent again at
+        // launch, so it may only be recorded once the agent is really GONE. On
+        // a failed `unregister()` the agent keeps firing every 60 s (releasing
+        // the flag, sleeping the Mac at critical battery) and, with the opt-out
+        // set, nothing would ever retry the teardown: the operator's "off"
+        // would be recorded and never executed. Leaving it unset makes the next
+        // app launch retry, which is the honest state — the CLI already
+        // reports `lastOperationSucceeded: false`.
+        if ok == nil || ok == true { registrar.setOperatorOptedOut(true) }
+        var r = report()
+        r.lastOperationSucceeded = ok
+        return r
+    }
+
+    public func openApprovalSettings() {
+        registrar.openLoginItemsSettings()
+    }
+}
