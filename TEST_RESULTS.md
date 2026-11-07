@@ -1023,3 +1023,33 @@ n'est pas auditée.
 Suite : **452/452**, 0 warning. Bundle reconstruit, `plutil -lint` OK, `codesign --verify
 --strict` OK, chemin de log substitué, `backstop status --json` → `notFound` / `enforcing:false` /
 `operatorOptedOut:false`.
+
+## Relecture tour 13 — restauration des verrous et chemins de log (2026-11-07)
+
+Deux WARN. Le premier est un défaut réel :
+
+- `Sources/RunClosedMacSystem/LowBatteryGuardService.swift` — la restauration des verrous de
+  notification était une copie EN BLOC de `before`, qui annulait aussi les remises à zéro que
+  `LowBatteryPolicy.step` fait quand la charge repasse au-dessus de la bande d'alerte. Une machine
+  chargée pendant que l'app ne tournait pas gardait `warnedLow`/`warnedCritical` à vrai, donc la
+  première alerte de la DÉCHARGE SUIVANTE répondait `.alreadyWarned` et n'était jamais affichée —
+  exactement le silence que la restauration existe pour éviter, une décharge plus tard. Le `&&`
+  distingue les deux sens : un SET de ce passage est supprimé, un CLEAR de la politique passe.
+
+  Test : `testAChargeWhileTheBackstopRunsStillResetsTheWarnLatches`. **Contre-épreuve mesurée** —
+  en revenant à la copie en bloc, il échoue sur les DEUX assertions.
+
+Le second est une limite d'architecture, consignée et non prétendue corrigée :
+
+- `Resources/com.benjaminbelaga.runclosed.backstop.plist` — `__HOME__` est substitué au BUILD, donc
+  `StandardErrorPath`/`StandardOutPath` nomment le home du compte de build. L'agent étant enregistré
+  par utilisateur via `SMAppService`, sur une machine où l'app a été installée par un autre compte,
+  launchd écrit ces deux fichiers dans le home du buildeur — ou échoue l'ouverture. Non corrigeable
+  dans le template : un plist dans un bundle signé est un octet fixe et launchd n'y étend aucune
+  variable. Le vrai correctif est de renoncer à ces clés et de faire écrire l'agent sous
+  `NSHomeDirectory()` (ce que `prepareLogDirectory()` crée déjà) — suite ouverte, écrite dans le
+  plist lui-même. N'affecte que les diagnostics de l'agent, jamais son comportement protecteur :
+  `recovery_audit.jsonl` est écrit par l'agent sous son propre home.
+
+Suite : **453/453**, 0 warning. Bundle reconstruit, `plutil -lint` OK, `codesign --verify --strict`
+OK.

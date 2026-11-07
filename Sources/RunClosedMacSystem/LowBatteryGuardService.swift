@@ -286,9 +286,20 @@ public struct LowBatteryGuardService {
         // right after the operator woke it (review round 10). Separate from
         // `failedReleaseSleepTried` precisely because that one doubles as the
         // app's notify latch, which must stay untouched.
-        record.latch.warnedLow = before.latch.warnedLow
-        record.latch.warnedCritical = before.latch.warnedCritical
-        record.latch.failedReleaseSleepTried = before.latch.failedReleaseSleepTried
+        //
+        // Restoring is not a blanket copy: the policy also CLEARS these latches
+        // once the charge is back above the warn band, and copying `before`
+        // back would silently undo that reset. A machine that charged while the
+        // app was not running would keep `warnedLow`/`warnedCritical` set
+        // forever, so the app's first warning of the NEXT discharge would be
+        // answered `.alreadyWarned` and never shown — the same silent silencing
+        // this restore exists to prevent, just one episode later (review round
+        // 13). `&&` says exactly the right thing per field: a SET by this run
+        // is suppressed, a CLEAR by the policy goes through.
+        record.latch.warnedLow = before.latch.warnedLow && record.latch.warnedLow
+        record.latch.warnedCritical = before.latch.warnedCritical && record.latch.warnedCritical
+        record.latch.failedReleaseSleepTried =
+            before.latch.failedReleaseSleepTried && record.latch.failedReleaseSleepTried
         if record != before {
             latchStore.save(record)
         }

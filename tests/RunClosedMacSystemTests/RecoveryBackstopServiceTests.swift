@@ -1013,6 +1013,40 @@ final class RecoveryBackstopServiceTests: XCTestCase {
                        "the standing failure stays deduped across a busy minute")
     }
 
+    /// Review round 13 (WARNING): restoring the notify latches with a blanket
+    /// copy also undid the policy's own RESET of them.
+    ///
+    /// `LowBatteryPolicy.step` clears `warnedLow`/`warnedCritical` once the
+    /// charge is back above the warn band. Copying `before` back over the
+    /// result threw that reset away, so a machine that charged while the app
+    /// was not running kept the latches set forever and the app's first warning
+    /// of the NEXT discharge was answered `.alreadyWarned` — never shown.
+    /// Restoring must suppress a SET, never a CLEAR.
+    func testAChargeWhileTheBackstopRunsStillResetsTheWarnLatches() {
+        // A stale latch from an earlier episode, as an app crash would leave it.
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 6))
+        rig.latchStore.save(.init(
+            latch: LowBatteryPolicy.Latch(warnedLow: true, warnedCritical: true),
+            releasedBootID: nil))
+
+        // Charged on AC well above the warn band: the policy resets both.
+        rig.battery.state = Self.reading(false, 60)
+        _ = rig.service.run()
+
+        let latch = rig.latchStore.load().latch
+        XCTAssertFalse(latch.warnedLow,
+                       "a reset by the policy must survive the backstop's restore")
+        XCTAssertFalse(latch.warnedCritical,
+                       "otherwise the next discharge's warning is silently swallowed")
+
+        // And the suppression still works: a warning SET by this caller is not
+        // persisted, because the app must be the one to show it.
+        var warnRig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 18))
+        _ = warnRig.service.run()
+        XCTAssertFalse(warnRig.latchStore.load().latch.warnedLow,
+                       "the backstop shows no notification, so it must not consume it")
+    }
+
     // MARK: — Exit codes
 
     func testExitCodeValues() {

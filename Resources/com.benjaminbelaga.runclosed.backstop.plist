@@ -60,7 +60,23 @@
          the path AS THIS USER, so the write lands with our privileges. An
          absolute path under ~/Library/Logs is not pre-creatable by anyone
          else. launchd does not expand `~` in these keys, so the absolute form
-         is required; a unit test pins it. -->
+         is required; a unit test pins it.
+
+         KNOWN LIMIT (review round 13): `__HOME__` is substituted at BUILD time,
+         so these two paths name the build account's home. The agent itself is
+         registered per user with SMAppService, so on a machine where RunClosed
+         was installed by another account, the agent runs for THIS user but
+         launchd writes both files into the builder's home — either failing the
+         open (silent loss of diagnostics) or, worse, writing into a directory
+         this user may not own. It is not fixable in the template: a plist
+         inside a signed bundle is fixed bytes, and launchd expands no variable
+         here. The correct fix is to stop using these keys and let the agent
+         forward its own diagnostics to a per-user path resolved at RUNTIME
+         (Logs/RunClosed under NSHomeDirectory, which prepareLogDirectory()
+         already creates); that is a follow-up, tracked rather than pretended
+         done. It affects only the diagnostics of a protective agent, not its
+         protective behaviour: the audit log (recovery_audit.jsonl) is written
+         by the agent itself under its own home and is unaffected. -->
     <key>StandardErrorPath</key>
     <string>__HOME__/Library/Logs/RunClosed/backstop.err.log</string>
     <key>StandardOutPath</key>
