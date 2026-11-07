@@ -763,7 +763,7 @@ $ arch -arm64 swift test
   RunClosedPersistenceTests     53 tests, 0 failures   (46 → 53)
   RunClosedHelperSupportTests   27 tests, 0 failures   (inchangé)
   RunClosedAppTests             11 tests, 0 failures   (inchangé)
-  → 429 tests, 0 failures (391 avant ce tour : +30)
+  → 431 tests, 0 failures (391 avant ce tour : +30)
 ```
 
 Corrections et contrats ajoutés :
@@ -807,7 +807,7 @@ $ arch -arm64 swift test
   RunClosedPersistenceTests     53 tests, 0 failures
   RunClosedHelperSupportTests   31 tests, 0 failures   (27 → 31)
   RunClosedAppTests             11 tests, 0 failures
-  → 429 tests, 0 failures (422 avant ce tour : +7)
+  → 431 tests, 0 failures (422 avant ce tour : +7)
 ```
 
 Le verdict est `WARN (advisory)`, 0 CRITICAL — la porte passe — mais 7 constats portaient sur du code
@@ -845,3 +845,41 @@ NOT_TESTED, inchangé : rien de tout cela n'a été mesuré sur matériel. Le po
 l'opt-out sont du code AppKit/`UserDefaults` couverts par lecture et par tests de la couche service ;
 `recover --backstop`, `backstop register`, `session start` et `lid-stay-awake on|off` n'ont toujours
 pas été lancés sur la machine réelle.
+
+### Relecture tour 4 (`ai-review-gate` WARN advisory, 0 CRITICAL, 6 constats) — 2026-11-07
+
+```
+$ arch -arm64 swift build --build-tests     → 0 error, 0 warning
+$ arch -arm64 swift test
+  RunClosedCoreTests           135 tests, 0 failures
+  RunClosedMacSystemTests      201 tests, 0 failures   (199 → 201)
+  RunClosedPersistenceTests     53 tests, 0 failures
+  RunClosedHelperSupportTests   31 tests, 0 failures
+  RunClosedAppTests             11 tests, 0 failures
+  → 431 tests, 0 failures (429 avant ce tour : +2)
+```
+
+- **Couverture CI des tests CLI (WARN, le seul vrai défaut)** — `cliURL()` ne cherchait que
+  `.build/out/Products/Debug/runclosed` (layout Xcode) et le bundle, alors que la CI fait
+  `swift build --build-tests && swift test`, donc le binaire est dans `.build/debug/` : en CI tous
+  les tests de sous-processus étaient **silencieusement skippés** et la CI restait verte sans jamais
+  vérifier le contrat exit-64, `backstop status --json` ni les blocs `doctor`/`status`. Pire en local :
+  un bundle périmé était testé à la place du code. Les trois chemins sont maintenant essayés du plus
+  frais au plus ancien, et l'absence de binaire en CI **échoue** au lieu de skipper.
+- **`noLockedRunYet` (suggestion, retenue)** — une minute `nothingToDo`/`appAlive` sort avant le verrou
+  et avant `pmset` : elle prouve que l'agent démarre, pas qu'il peut agir. `completedLockedRun` est
+  enregistré dans le heartbeat (collant sur le même boot seulement) et `runFreshnessFull` refuse tant
+  qu'aucune section verrouillée n'a abouti sur ce boot. 3 tests.
+- **`unregister` sur `notFound`** — macOS 26 rapporte l'état jamais-enregistré comme `notFound`, donc
+  `unregister()` y échouait et la CLI annonçait un faux échec pour un démontage sans effet. Traité
+  comme `notRegistered`.
+- **Test « unknown status »** — il ré-affirmait `.notRegistered`, déjà couvert. Il passe maintenant un
+  vrai statut non reconnu (`SMAppService.Status(rawValue: 99)`) et vérifie qu'il donne `.unknown`, pas
+  `.enabled`.
+- **Test d'isolation du heartbeat** — il ne comparait que les URL ; il capture désormais l'existence et
+  le mtime du fichier réel avant/après le run, donc un service qui écrirait aux DEUX chemins échoue.
+- **Répertoires temporaires** — `addTeardownBlock` supprime chaque arbre créé (le test de grille à lui
+  seul en construisait 32 par exécution).
+
+NOT_TESTED : inchangé. Rien de tout cela n'a été mesuré sur matériel ; les tests CLI tournent
+désormais réellement en CI, ce qui est vérifiable ici au prochain passage.

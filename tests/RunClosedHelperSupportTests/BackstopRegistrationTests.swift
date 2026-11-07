@@ -47,10 +47,17 @@ final class BackstopRegistrationTests: XCTestCase {
 
     /// `unknown` is a real state for a status this build does not know — it is
     /// never silently coerced into `enabled` (ADR 009 honesty).
-    func testUnknownStatusIsSurfacedNotTreatedAsEnabled() {
-        XCTAssertEqual(SMAppServiceAgentRegistrar.map(.notRegistered), .notRegistered)
+    ///
+    /// This feeds the mapper an actual UNRECOGNISED status: an earlier version
+    /// re-asserted `.notRegistered` (already covered above), so flipping the
+    /// mapper's `@unknown default` to `.enabled` would have gone unnoticed —
+    /// the exact regression the name claims to guard.
+    func testAnUnrecognisedStatusMapsToUnknownNotEnabled() throws {
+        let unrecognised = try XCTUnwrap(SMAppService.Status(rawValue: 99),
+                                         "the SDK should accept an unknown raw value")
+        XCTAssertEqual(SMAppServiceAgentRegistrar.map(unrecognised), .unknown)
+        XCTAssertNotEqual(SMAppServiceAgentRegistrar.map(unrecognised), .enabled)
         XCTAssertFalse(BackstopStatus.unknown.isProtecting)
-        XCTAssertNotEqual(BackstopStatus.unknown, .enabled)
     }
 
     /// Every state exists, and exactly one of them means "the net is up".

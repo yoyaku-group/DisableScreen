@@ -61,21 +61,33 @@ public struct BackstopHeartbeatStore {
         /// audited (ADR 024 review round 2 — the condition holds for every
         /// minute while it lasts, so auditing it each time floods the log).
         public var rearmWithheldReported: Bool
+        /// Whether this agent has ever completed a LOCKED run on this boot.
+        ///
+        /// A `nothingToDo` or `appAlive` minute exits before the lock and
+        /// before `pmset`, so it proves the agent *starts* but not that it can
+        /// *act*. If the locked path were broken in the agent's context (a
+        /// `pmset` that fails there, a lock file it cannot open), every minute
+        /// would still look healthy while nothing protective could happen.
+        /// Only a run that actually took `LidWriteLock` sets this.
+        public var completedLockedRun: Bool
 
         public init(schemaVersion: Int = kBackstopHeartbeatSchemaVersion,
                     at: Date,
                     bootID: String,
                     exitCode: Int32,
-                    rearmWithheldReported: Bool = false) {
+                    rearmWithheldReported: Bool = false,
+                    completedLockedRun: Bool = false) {
             self.schemaVersion = schemaVersion
             self.at = at
             self.bootID = bootID
             self.exitCode = exitCode
             self.rearmWithheldReported = rearmWithheldReported
+            self.completedLockedRun = completedLockedRun
         }
 
         private enum CodingKeys: String, CodingKey {
             case schemaVersion, at, bootID, exitCode, rearmWithheldReported
+            case completedLockedRun
         }
 
         /// Tolerant decoding: a key a later version adds must not make the file
@@ -89,7 +101,22 @@ public struct BackstopHeartbeatStore {
             exitCode = try c.decodeIfPresent(Int32.self, forKey: .exitCode) ?? 0
             rearmWithheldReported = try c.decodeIfPresent(
                 Bool.self, forKey: .rearmWithheldReported) ?? false
+            // An older record predates the field: absent means "not proven",
+            // the conservative reading.
+            completedLockedRun = try c.decodeIfPresent(
+                Bool.self, forKey: .completedLockedRun) ?? false
         }
+    }
+
+    /// The record in the shape `RecoveryPolicy.runFreshness` grades.
+    ///
+    /// One projection for every caller (the CLI's enforcer check, its
+    /// `status`/`doctor` blocks, and the app's popup row), so a record cannot
+    /// be read with one meaning in one place and another elsewhere.
+    public func freshnessInput() -> (at: Date, bootID: String, exitCode: Int32,
+                                     completedLockedRun: Bool)? {
+        load().map { (at: $0.at, bootID: $0.bootID, exitCode: $0.exitCode,
+                      completedLockedRun: $0.completedLockedRun) }
     }
 
     /// The last run, or nil when the file is absent or unreadable.

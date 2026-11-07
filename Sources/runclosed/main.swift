@@ -76,8 +76,8 @@ func backstopService() -> BackstopLifecycleService {
 func backstopJSON() -> [String: Any] {
     let report = backstopService().report()
     let heartbeat = BackstopHeartbeatStore().load()
-    let freshness = RecoveryPolicy.runFreshness(
-        heartbeat: heartbeat.map { (at: $0.at, bootID: $0.bootID, exitCode: $0.exitCode) },
+    let freshness = RecoveryPolicy.runFreshnessFull(
+        heartbeat: BackstopHeartbeatStore().freshnessInput(),
         currentBootID: clock.bootID,
         now: Date())
     let iso = ISO8601DateFormatter()
@@ -180,9 +180,8 @@ func cmdBackstop(_ rest: [String]) -> Int32 {
 /// check and the write otherwise.
 func backstopEnforcement() -> RecoveryPolicy.RunFreshness? {
     guard backstopService().report().isProtecting else { return nil }
-    let heartbeat = BackstopHeartbeatStore().load()
-    return RecoveryPolicy.runFreshness(
-        heartbeat: heartbeat.map { (at: $0.at, bootID: $0.bootID, exitCode: $0.exitCode) },
+    return RecoveryPolicy.runFreshnessFull(
+        heartbeat: BackstopHeartbeatStore().freshnessInput(),
         currentBootID: clock.bootID,
         now: Date())
 }
@@ -201,9 +200,8 @@ func backstopRefusalReason() -> String {
     guard status.isProtecting else {
         return "the recovery backstop is not enabled (status: \(status.rawValue)) — approve it in System Settings → Login Items, or open RunClosed"
     }
-    let heartbeat = BackstopHeartbeatStore().load()
-    let freshness = RecoveryPolicy.runFreshness(
-        heartbeat: heartbeat.map { (at: $0.at, bootID: $0.bootID, exitCode: $0.exitCode) },
+    let freshness = RecoveryPolicy.runFreshnessFull(
+        heartbeat: BackstopHeartbeatStore().freshnessInput(),
         currentBootID: clock.bootID,
         now: Date())
     if freshness.isEnforcing {

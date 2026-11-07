@@ -235,7 +235,13 @@ public struct BackstopLifecycleService {
     /// does not put it straight back.
     public func unregisterAndReport() -> Report {
         var ok: Bool?
-        if registrar.status() != .notRegistered {
+        // `notFound` is the never-registered state on macOS 26 (ADR 018), so
+        // calling `unregister()` there only throws and reports a spurious
+        // failure for a no-op teardown.
+        switch registrar.status() {
+        case .notRegistered, .notFound:
+            break
+        default:
             ok = registrar.unregister()
         }
         registrar.setOperatorOptedOut(true)

@@ -98,6 +98,9 @@ final class RecoveryBackstopServiceTests: XCTestCase {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("runclosed-backstop-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // The grid test alone builds dozens of rigs; without this every run
+        // leaves lock, audit and heartbeat files behind.
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
         let lidStore = OwnedLidAssertion(currentBootID: bootID,
                                          url: dir.appendingPathComponent("owned_lid.json"))
         if let b = ownedBoot {
@@ -564,6 +567,40 @@ final class RecoveryBackstopServiceTests: XCTestCase {
         let outcome = rig.service.run()
         XCTAssertEqual(outcome.exitCode, .backendFailure)
         XCTAssertEqual(rig.heartbeat.load()?.exitCode, 5)
+    }
+
+    /// A `nothingToDo`/`appAlive` minute proves the agent STARTS, not that it
+    /// can ACT: it exits before the lock and before `pmset`. Until a locked run
+    /// has completed on this boot, the CLI must not treat it as an enforcer.
+    func testARunThatNeverTookTheLockIsNotProofItCanAct() {
+        var rig = makeRig(flag: nil, ownedBoot: nil, battery: Self.reading(false, 60))
+        _ = rig.service.run()   // nothingToDo: no lock
+        XCTAssertEqual(rig.heartbeat.load()?.completedLockedRun, false,
+                       "a fast-path minute ran no section")
+        let freshness = RecoveryPolicy.runFreshnessFull(
+            heartbeat: rig.heartbeat.freshnessInput(),
+            currentBootID: "A", now: rig.clock.wall)
+        XCTAssertEqual(freshness, .noLockedRunYet)
+        XCTAssertFalse(freshness.isEnforcing)
+    }
+
+    /// …and once a locked run has completed, the proof survives later
+    /// fast-path minutes on the SAME boot.
+    func testACompletedLockedRunMakesLaterFastPathMinutesEnforcing() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 6))
+        _ = rig.service.run()   // completed: took the lock
+        XCTAssertEqual(rig.heartbeat.load()?.completedLockedRun, true)
+
+        // The next minute finds nothing to do, but the proof is sticky.
+        rig.lidStore.purge()
+        rig.flag.value = false
+        rig.clock.advance(60)
+        _ = rig.service.run()
+        XCTAssertEqual(rig.heartbeat.load()?.completedLockedRun, true)
+        let freshness = RecoveryPolicy.runFreshnessFull(
+            heartbeat: rig.heartbeat.freshnessInput(),
+            currentBootID: "A", now: rig.clock.wall)
+        XCTAssertTrue(freshness.isEnforcing, "got \(freshness)")
     }
 
     /// The whole point of the heartbeat: a run of the real service, on this

@@ -21,15 +21,34 @@ final class RecoverCommandTests: XCTestCase {
         .deletingLastPathComponent()   // tests/
         .deletingLastPathComponent()   // repo root
 
-    /// The binary under test: the freshly built one when present, else the one
-    /// inside the assembled bundle (CI builds both). Skipped — never silently
-    /// passed — when neither exists.
+    /// The binary under test.
+    ///
+    /// Ordered by freshness, newest first: `swift build` on CI writes
+    /// `.build/debug/`, Xcode's dev-script layout writes
+    /// `.build/out/Products/Debug/`, and the assembled bundle is only built
+    /// AFTER `swift test` (ci.yml) so it is the stalest of the three. Testing a
+    /// leftover bundle before the freshly built binary would check code that is
+    /// not under review.
+    ///
+    /// Never silently skipped in CI: a missing binary there means the coverage
+    /// this file exists for vanished, so it fails instead of passing green.
     private static func cliURL() throws -> URL {
-        let bin = repoRoot.appendingPathComponent(".build/out/Products/Debug/runclosed")
-        if FileManager.default.isExecutableFile(atPath: bin.path) { return bin }
-        let bundled = repoRoot.appendingPathComponent("build/RunClosed.app/Contents/MacOS/runclosed-cli")
-        if FileManager.default.isExecutableFile(atPath: bundled.path) { return bundled }
-        throw XCTSkip("runclosed binary not built yet — `swift build` produces it")
+        let candidates = [
+            ".build/debug/runclosed",
+            ".build/out/Products/Debug/runclosed",
+            "build/RunClosed.app/Contents/MacOS/runclosed-cli",
+        ].map { repoRoot.appendingPathComponent($0) }
+        if let found = candidates.first(where: {
+            FileManager.default.isExecutableFile(atPath: $0.path)
+        }) {
+            return found
+        }
+        if ProcessInfo.processInfo.environment["CI"] != nil {
+            throw XCTSkip("CI: no runclosed binary found — expected `swift build` to have produced .build/debug/runclosed")
+        }
+        return try XCTUnwrap(
+            Optional<URL>.none,
+            "no runclosed binary found (looked in \(candidates.map(\.path)))")
     }
 
     /// Run the CLI with `args`, returning (exit code, stdout+stderr).
@@ -237,8 +256,10 @@ final class RecoverCommandTests: XCTestCase {
     }
 
     private func tempDir() -> URL {
-        URL(fileURLWithPath: NSTemporaryDirectory())
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("runclosed-recover-\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        return dir
     }
 
     /// No ownership record and no session: exit 0, and NOTHING was called —
@@ -276,15 +297,28 @@ final class RecoverCommandTests: XCTestCase {
     /// to the developer's REAL `RunClosed/backstop_heartbeat.json`, forging
     /// proof of execution on the machine — a safety record must never be
     /// produced by a test. The fixture above injects it; this pins the intent.
-    func testTheFixtureNeverWritesTheRealHeartbeatPath() {
+    /// Checking only that the URLs differ is not enough: a service that ignored
+    /// the injected store and wrote BOTH would pass. The real path's existence
+    /// and mtime are captured before the run and must be unchanged after it.
+    func testTheFixtureNeverWritesTheRealHeartbeatPath() throws {
+        let real = BackstopHeartbeatStore().url
+        let before = (try? FileManager.default.attributesOfItem(atPath: real.path))?[.modificationDate] as? Date
+        let existedBefore = FileManager.default.fileExists(atPath: real.path)
+
         let dir = tempDir()
         var (service, _, _) = makeService(dir: dir, flagOn: nil, record: nil)
         _ = service.run()
+
         let injected = dir.appendingPathComponent("backstop_heartbeat.json")
         XCTAssertTrue(FileManager.default.fileExists(atPath: injected.path),
                       "the run wrote to the injected store")
-        XCTAssertNotEqual(service.heartbeatStore.url, BackstopHeartbeatStore().url,
+        XCTAssertNotEqual(service.heartbeatStore.url, real,
                           "a test must never share the production heartbeat path")
+
+        let after = (try? FileManager.default.attributesOfItem(atPath: real.path))?[.modificationDate] as? Date
+        XCTAssertEqual(FileManager.default.fileExists(atPath: real.path), existedBefore,
+                       "the real heartbeat path must not be created by a test")
+        XCTAssertEqual(after, before, "the real heartbeat file must not be touched by a test")
     }
 
     // MARK: — The exit-code map, through the REAL renderer

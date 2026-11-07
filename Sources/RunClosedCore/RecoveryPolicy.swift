@@ -190,6 +190,10 @@ public enum RecoveryPolicy {
         /// not act is not proof the agent CAN act — a lock held across every
         /// interval would otherwise grade fresh on nothing.
         case lastRunBusy(exitCode: Int32)
+        /// The agent is running but has never completed a LOCKED run on this
+        /// boot — every minute so far was `nothingToDo` or `appAlive`. It
+        /// starts; it has not proven it can act.
+        case noLockedRunYet
         /// A run finished recently on this boot and did not fail.
         case fresh(ageSeconds: TimeInterval)
 
@@ -211,6 +215,8 @@ public enum RecoveryPolicy {
             case .lastRunFailed(let code): return "its last run failed (exit \(code))"
             case .lastRunBusy:
                 return "its last run could not get the write lock, so it did nothing"
+            case .noLockedRunYet:
+                return "it has not completed a protective run on this boot yet"
             }
         }
     }
@@ -231,9 +237,37 @@ public enum RecoveryPolicy {
         now: Date,
         maximumAge: TimeInterval = maximumHeartbeatAge
     ) -> RunFreshness {
+        runFreshnessFull(
+            heartbeat: heartbeat.map {
+                (at: $0.at, bootID: $0.bootID, exitCode: $0.exitCode, completedLockedRun: true)
+            },
+            currentBootID: currentBootID,
+            now: now,
+            maximumAge: maximumAge)
+    }
+
+    /// The full rule, including whether the agent has ever completed a LOCKED
+    /// run on this boot.
+    ///
+    /// A `nothingToDo` or `appAlive` minute exits before the lock and before
+    /// `pmset`, so it proves the agent starts — not that it can act. Treating
+    /// those as enforcement would mean the CLI trusts an agent whose locked
+    /// path was never exercised on this boot; the first sign of breakage would
+    /// be an exit-5 heartbeat up to a minute AFTER the deadline passed.
+    public static func runFreshnessFull(
+        heartbeat: (at: Date, bootID: String, exitCode: Int32, completedLockedRun: Bool)?,
+        currentBootID: String,
+        now: Date,
+        maximumAge: TimeInterval = maximumHeartbeatAge
+    ) -> RunFreshness {
         guard let heartbeat else { return .never }
         guard heartbeat.bootID == currentBootID else {
             return .otherBoot(recordBootID: heartbeat.bootID)
+        }
+        // A recent run that never reached a sealed section is not proof the
+        // agent can enforce anything.
+        guard heartbeat.completedLockedRun else {
+            return .noLockedRunYet
         }
         // Checked before the age: a failed run is not made good by recency.
         guard heartbeat.exitCode != backendFailureExitCode else {

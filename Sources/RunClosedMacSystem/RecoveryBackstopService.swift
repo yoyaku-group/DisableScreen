@@ -238,18 +238,27 @@ public struct RecoveryBackstopService {
     /// app alive, busy): the previous flag is carried forward untouched, so a
     /// busy minute in the middle of an episode does not re-audit it.
     private func writeHeartbeat(for outcome: Outcome, bootID: String) {
+        let previous = heartbeatStore.load()
         let reported: Bool
+        let locked: Bool
         switch outcome {
         case .completed(let report):
             reported = report.rearmWithheldEpisode
+            // `.completed` is the ONLY outcome that ran inside `LidWriteLock`,
+            // so it is the only one that proves the agent can act.
+            locked = true
         case .nothingToDo, .appAlive, .busy:
-            reported = heartbeatStore.load()?.rearmWithheldReported ?? false
+            reported = previous?.rearmWithheldReported ?? false
+            // Sticky on THIS boot only: a previous boot's locked run says
+            // nothing about this one.
+            locked = previous.map { $0.bootID == bootID && $0.completedLockedRun } ?? false
         }
         heartbeatStore.save(.init(
             at: wallClock(),
             bootID: bootID,
             exitCode: outcome.exitCode.rawValue,
-            rearmWithheldReported: reported))
+            rearmWithheldReported: reported,
+            completedLockedRun: locked))
     }
 
     /// The ONE `LidWriteLock` section. It must not take the lock again:
