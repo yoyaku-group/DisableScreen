@@ -191,18 +191,11 @@ public enum RecoveryPolicy {
         /// heartbeat, and launchd fires the missed interval on wake, so the
         /// next minute restores the proof. Until then, refuse.
         case stale(ageSeconds: TimeInterval)
-        /// The last run FAILED. A backstop that cannot do its job is not an
-        /// enforcer, whatever its registration says.
+        /// The last run exited non-zero: it started and could not do its job
+        /// (5 a failed release, 75 a lock it never got, 3 a refusal that
+        /// protected nothing). Not an enforcer, whatever its registration
+        /// says.
         case lastRunFailed(exitCode: Int32)
-        /// The last run was BUSY: another writer held `LidWriteLock` for the
-        /// whole interval, so no protective section ran. A minute that could
-        /// not act is not proof the agent CAN act — a lock held across every
-        /// interval would otherwise grade fresh on nothing.
-        case lastRunBusy(exitCode: Int32)
-        /// The agent is running but has never completed a LOCKED run on this
-        /// boot — every minute so far was `nothingToDo` or `appAlive`. It
-        /// starts; it has not proven it can act.
-        case noLockedRunYet
         /// A run finished recently on this boot and did not fail.
         case fresh(ageSeconds: TimeInterval)
 
@@ -213,7 +206,7 @@ public enum RecoveryPolicy {
         }
 
         /// The precise cause, for the CLI refusal message — a generic "not
-        /// running" would hide which of the five situations the operator is in.
+        /// running" would hide which of the four situations the operator is in.
         public var refusalHint: String {
             switch self {
             case .fresh: return ""
@@ -222,10 +215,6 @@ public enum RecoveryPolicy {
             case .stale(let age):
                 return "its last run was \(Int(age)) s ago (more than \(Int(RecoveryPolicy.maximumHeartbeatAge)) s)"
             case .lastRunFailed(let code): return "its last run failed (exit \(code))"
-            case .lastRunBusy:
-                return "its last run could not get the write lock, so it did nothing"
-            case .noLockedRunYet:
-                return "it has not completed a protective run on this boot yet"
             }
         }
     }
@@ -240,41 +229,35 @@ public enum RecoveryPolicy {
     ///
     /// A timestamp in the FUTURE is not fresh: it means the wall clock moved
     /// backwards, so the age is not evidence of anything.
-    /// Convenience for a caller that has already established the locked-run
-    /// proof by other means, or for a test that supplies it explicitly.
     ///
-    /// It does NOT assume the proof: `completedLockedRun` is a parameter. An
-    /// earlier version hard-coded it to `true`, which let a heartbeat from a
-    /// run that only ever exited `nothingToDo`/`appAlive` grade `.fresh` — a
-    /// future caller picking this shorter API could have lifted the ADR 023
-    /// refusal for an agent whose locked path was never exercised.
+    /// The rule: the agent ran recently on THIS boot and reported no
+    /// failure.
+    ///
+    /// ## What this proof does and does not claim
+    ///
+    /// It claims exactly three things, and the CLI's message says the same:
+    /// the LaunchAgent fires, `BundleProgram` resolves to a binary that runs,
+    /// and that binary reaches its heartbeat write without failing. It does
+    /// NOT claim a protective section executed — on a machine where nothing is
+    /// ours yet, every minute is `nothingToDo`, and requiring a sealed section
+    /// here made the proof unreachable by construction: the only act that
+    /// would give the next minute something to do is the very
+    /// `session start --for` this rule gates (circular, review round 3).
+    ///
+    /// The `sudo -n pmset` rail is not covered here and does not need to be:
+    /// it is the same user, the same sudoers rule and the same code path
+    /// `session start` itself just used to turn the flag on, one statement
+    /// earlier. What is genuinely unproven is whether the agent's own
+    /// subprocess environment can write the flag, and that is what the
+    /// hardware qualification (PR5) measures.
+    ///
+    /// Only a clean exit counts. Every non-zero code means the agent started
+    /// and then could not do its job: 5 a failed release, 75 a lock it never
+    /// got, 3 a refusal (the flag is not provably ours, so nothing was
+    /// protected — grading that "enforcing" would lift the ADR 023 refusal on
+    /// the strength of a run that did nothing, the round-5 CRITICAL).
     public static func runFreshness(
         heartbeat: (at: Date, bootID: String, exitCode: Int32)?,
-        completedLockedRun: Bool,
-        currentBootID: String,
-        now: Date,
-        maximumAge: TimeInterval = maximumHeartbeatAge
-    ) -> RunFreshness {
-        runFreshnessFull(
-            heartbeat: heartbeat.map {
-                (at: $0.at, bootID: $0.bootID, exitCode: $0.exitCode,
-                 completedLockedRun: completedLockedRun)
-            },
-            currentBootID: currentBootID,
-            now: now,
-            maximumAge: maximumAge)
-    }
-
-    /// The full rule, including whether the agent has ever completed a LOCKED
-    /// run on this boot.
-    ///
-    /// A `nothingToDo` or `appAlive` minute exits before the lock and before
-    /// `pmset`, so it proves the agent starts — not that it can act. Treating
-    /// those as enforcement would mean the CLI trusts an agent whose locked
-    /// path was never exercised on this boot; the first sign of breakage would
-    /// be an exit-5 heartbeat up to a minute AFTER the deadline passed.
-    public static func runFreshnessFull(
-        heartbeat: (at: Date, bootID: String, exitCode: Int32, completedLockedRun: Bool)?,
         currentBootID: String,
         now: Date,
         maximumAge: TimeInterval = maximumHeartbeatAge
@@ -283,20 +266,9 @@ public enum RecoveryPolicy {
         guard heartbeat.bootID == currentBootID else {
             return .otherBoot(recordBootID: heartbeat.bootID)
         }
-        // A recent run that never reached a sealed section is not proof the
-        // agent can enforce anything.
-        guard heartbeat.completedLockedRun else {
-            return .noLockedRunYet
-        }
         // Checked before the age: a failed run is not made good by recency.
-        guard heartbeat.exitCode != backendFailureExitCode else {
+        guard heartbeat.exitCode == 0 else {
             return .lastRunFailed(exitCode: heartbeat.exitCode)
-        }
-        // A busy minute proves the agent started, not that it could act. If the
-        // lock were held across every interval, grading that fresh would let
-        // the CLI trust an enforcer that has not enforced anything.
-        if heartbeat.exitCode == busyExitCode {
-            return .lastRunBusy(exitCode: heartbeat.exitCode)
         }
         let age = now.timeIntervalSince(heartbeat.at)
         // A negative age means the wall clock moved backwards. That is not

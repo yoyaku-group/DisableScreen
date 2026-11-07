@@ -35,7 +35,10 @@ public enum BackstopStatus: String, Sendable, Equatable, CaseIterable {
     public var summary: String {
         switch self {
         case .enabled:
-            return "on — a session deadline and critical battery are enforced even when RunClosed is closed"
+            // Registration only. Whether the agent actually RUNS is a separate
+            // question the freshness rule answers (`recentRun`), and saying
+            // "enforced" here would claim a proof this state does not carry.
+            return "registered — approval granted; a session deadline is enforced only while it is also running"
         case .requiresApproval:
             return "off — approve it in System Settings"
         case .notRegistered:

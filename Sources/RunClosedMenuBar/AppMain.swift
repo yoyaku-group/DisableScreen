@@ -270,7 +270,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let report = BackstopLifecycleService(registrar: SMAppServiceAgentRegistrar()).report()
         let status = report.status
         if status.isProtecting {
-            let freshness = RecoveryPolicy.runFreshnessFull(
+            let freshness = RecoveryPolicy.runFreshness(
                 heartbeat: BackstopHeartbeatStore().freshnessInput(),
                 currentBootID: clock.bootID,
                 now: Date())

@@ -656,32 +656,25 @@ final class RecoveryBackstopServiceTests: XCTestCase {
         XCTAssertEqual(rig.heartbeat.load()?.exitCode, 5)
     }
 
-    /// A `nothingToDo` minute on a VIRGIN machine still takes the lock, and
-    /// that is what makes the CLI's proof reachable at all: with nothing on
-    /// disk every minute is a fast-path minute, so a rule that only counted a
-    /// protective section would never be satisfied — and the act that would
-    /// make the next minute take one is the very `session start --for` the
-    /// rule gates (third review, "circular proof").
-    ///
-    /// What it proves is precise: the agent starts, resolves its bundle and
-    /// can acquire `LidWriteLock`. It does NOT prove `pmset` works in that
-    /// context — that rail is the same `sudo -n` rule `session start` uses and
-    /// is proven by the session write itself.
-    func testAFastPathMinuteTakesTheLockAndIsProofTheAgentRuns() {
+    /// A `nothingToDo` minute on a VIRGIN machine is a CLEAN exit, and that is
+    /// the proof the CLI can actually obtain. Requiring a protective section
+    /// made it unreachable: with nothing on disk every minute is `nothingToDo`,
+    /// and the act that would give the next minute something to do is the very
+    /// `session start --for` the rule gates (review round 3).
+    func testACleanFastPathMinuteIsProofTheAgentRuns() {
         var rig = makeRig(flag: nil, ownedBoot: nil, battery: Self.reading(false, 60))
-        _ = rig.service.run()   // nothingToDo: no pmset, no battery read, but the lock is taken
-        XCTAssertEqual(rig.heartbeat.load()?.completedLockedRun, true,
-                       "the fast path takes the lock and releases it")
-        let freshness = RecoveryPolicy.runFreshnessFull(
+        _ = rig.service.run()   // nothingToDo: no lock needed, no pmset
+        XCTAssertEqual(rig.heartbeat.load()?.exitCode, 0)
+        let freshness = RecoveryPolicy.runFreshness(
             heartbeat: rig.heartbeat.freshnessInput(),
             currentBootID: "A", now: rig.clock.wall)
         XCTAssertEqual(freshness, .fresh(ageSeconds: 0))
         XCTAssertTrue(freshness.isEnforcing)
     }
 
-    /// A BUSY minute is the counter-case: it never got the lock, so it proves
-    /// the agent starts and nothing more. Grading it `fresh` would let the CLI
-    /// trust an enforcer that has never held the lock.
+    /// A BUSY minute is the counter-case: it never got the lock, so it exited
+    /// 75 and proves the agent started and nothing more. Grading it `fresh`
+    /// would let the CLI trust an enforcer that has enforced nothing.
     func testABusyMinuteIsNotProofTheAgentCanAct() {
         var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 60))
         saveSession(rig, duration: 60)
@@ -692,31 +685,34 @@ final class RecoveryBackstopServiceTests: XCTestCase {
             let outcome = rig.service.run()
             XCTAssertEqual(outcome, .busy)
         }
-        XCTAssertEqual(rig.heartbeat.load()?.completedLockedRun, false,
-                       "a minute that never held the lock proves nothing")
-        let freshness = RecoveryPolicy.runFreshnessFull(
+        XCTAssertEqual(rig.heartbeat.load()?.exitCode, 75)
+        let freshness = RecoveryPolicy.runFreshness(
             heartbeat: rig.heartbeat.freshnessInput(),
             currentBootID: "A", now: rig.clock.wall)
+        XCTAssertEqual(freshness, .lastRunFailed(exitCode: 75))
         XCTAssertFalse(freshness.isEnforcing)
     }
 
-    /// …and once a locked run has completed, the proof survives later
-    /// fast-path minutes on the SAME boot.
-    func testACompletedLockedRunMakesLaterFastPathMinutesEnforcing() {
-        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 6))
-        _ = rig.service.run()   // completed: took the lock
-        XCTAssertEqual(rig.heartbeat.load()?.completedLockedRun, true)
-
-        // The next minute finds nothing to do, but the proof is sticky.
-        rig.lidStore.purge()
-        rig.flag.value = false
-        rig.clock.advance(60)
-        _ = rig.service.run()
-        XCTAssertEqual(rig.heartbeat.load()?.completedLockedRun, true)
-        let freshness = RecoveryPolicy.runFreshnessFull(
+    /// A minute that REFUSED its release (exit 3) is the round-5 CRITICAL. The
+    /// flag is still ON and nothing was protected, so it must not read as
+    /// enforcing — however recent it is.
+    func testARefusedMinuteIsNotEnforcing() {
+        var rig = makeRig(flag: true, ownedBoot: "SOMEONE-ELSE", battery: Self.reading(false, 60))
+        saveSession(rig, duration: 60, bootID: "A")
+        rig.clock.advance(3_600)
+        let outcome = rig.service.run()
+        // A refused RELEASE is a backend failure, not a policy refusal: exit 3
+        // is reserved for the battery step, whose refusal is a deliberate B2
+        // stand-down. Here the deadline passed and the flag stayed ON, so the
+        // minute reports the most serious code it has.
+        XCTAssertEqual(outcome.exitCode, .backendFailure)
+        XCTAssertEqual(rig.flag.value, true, "B2: the flag was left on")
+        let freshness = RecoveryPolicy.runFreshness(
             heartbeat: rig.heartbeat.freshnessInput(),
             currentBootID: "A", now: rig.clock.wall)
-        XCTAssertTrue(freshness.isEnforcing, "got \(freshness)")
+        XCTAssertEqual(freshness, .lastRunFailed(exitCode: 5))
+        XCTAssertFalse(freshness.isEnforcing,
+                       "a run that protected nothing must not lift the CLI refusal")
     }
 
     /// The whole point of the heartbeat: a run of the real service, on this
@@ -725,7 +721,7 @@ final class RecoveryBackstopServiceTests: XCTestCase {
     /// the CLI would reject makes the agent unable to lift the ADR 023
     /// refusal, which is the failure this record exists to prevent.
     ///
-    /// It uses `runFreshnessFull` on `freshnessInput()`, the SAME pair every
+    /// It uses `runFreshness` on `freshnessInput()`, the SAME pair every
     /// production caller uses. An earlier version graded the run with the
     /// short wrapper, which hard-coded the locked-run proof — so it passed on a
     /// rule production never applies.
@@ -734,14 +730,14 @@ final class RecoveryBackstopServiceTests: XCTestCase {
         // something to do.
         var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 6))
         _ = rig.service.run()
-        let freshness = RecoveryPolicy.runFreshnessFull(
+        let freshness = RecoveryPolicy.runFreshness(
             heartbeat: rig.heartbeat.freshnessInput(),
             currentBootID: "A",
             now: rig.clock.wall)
         XCTAssertTrue(freshness.isEnforcing, "got \(freshness)")
 
         // A heartbeat from another boot is NOT enforcing, even if identical.
-        let otherBoot = RecoveryPolicy.runFreshnessFull(
+        let otherBoot = RecoveryPolicy.runFreshness(
             heartbeat: rig.heartbeat.freshnessInput(),
             currentBootID: "B",
             now: rig.clock.wall)

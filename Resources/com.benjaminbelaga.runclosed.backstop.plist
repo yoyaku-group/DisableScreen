@@ -47,5 +47,15 @@
          below the system's background policy. -->
     <key>LowPriorityIO</key>
     <true/>
+
+    <!-- launchd owns the agent's stdout/stderr; without these two keys a
+         refused scribe (the macOS 26 `notFound` state, a `pmset` that fails in
+         this context) is DISCARDED, and the operator has no way to see why the
+         net is not protecting them. Diagnostics go to a rotated-by-size file
+         rather than the audit log, which only records actions. -->
+    <key>StandardErrorPath</key>
+    <string>/tmp/com.benjaminbelaga.runclosed.backstop.err</string>
+    <key>StandardOutPath</key>
+    <string>/tmp/com.benjaminbelaga.runclosed.backstop.out</string>
 </dict>
 </plist>

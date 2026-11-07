@@ -236,20 +236,21 @@ final class RecoveryPolicyTests: XCTestCase {
     private func freshness(at offset: TimeInterval,
                           bootID: String = Boot.now,
                           exitCode: Int32 = 0,
-                          lockedRun: Bool = true,
                           now: Date? = nil) -> RecoveryPolicy.RunFreshness {
         RecoveryPolicy.runFreshness(
             heartbeat: (at: nowDate.addingTimeInterval(offset), bootID: bootID, exitCode: exitCode),
-            completedLockedRun: lockedRun,
             currentBootID: Boot.now,
             now: now ?? nowDate)
     }
 
-    /// A run that never took the lock proves the agent starts, not that it can
-    /// act — however recent and however successful it looks.
-    func testARunWithoutALockedSectionDoesNotEnforce() {
-        XCTAssertEqual(freshness(at: -10, lockedRun: false), .noLockedRunYet)
-        XCTAssertFalse(freshness(at: -10, lockedRun: false).isEnforcing)
+    /// A `nothingToDo` minute on a virgin machine is a CLEAN exit and therefore
+    /// proof the agent runs. Requiring a protective section instead made the
+    /// proof unreachable: with nothing on disk every minute is `nothingToDo`,
+    /// and the only act that would give the next minute something to do is the
+    /// `session start --for` the rule gates (review round 3, circular proof).
+    func testACleanNoOpMinuteOnAVirginMachineEnforces() {
+        XCTAssertTrue(freshness(at: -10).isEnforcing,
+                      "exit 0 with nothing to do proves the agent fired")
     }
 
     /// A run one minute ago on this boot is proof the agent fires.
@@ -261,7 +262,7 @@ final class RecoveryPolicyTests: XCTestCase {
 
     /// No heartbeat at all: the agent has never proven it runs.
     func testAMissingHeartbeatDoesNotEnforce() {
-        let f = RecoveryPolicy.runFreshness(heartbeat: nil, completedLockedRun: true,
+        let f = RecoveryPolicy.runFreshness(heartbeat: nil,
                                             currentBootID: Boot.now, now: nowDate)
         XCTAssertEqual(f, .never)
         XCTAssertFalse(f.isEnforcing)
@@ -309,15 +310,19 @@ final class RecoveryPolicyTests: XCTestCase {
     /// CLI trust an enforcer that has enforced nothing.
     func testABusyLastRunDoesNotEnforce() {
         let f = freshness(at: -30, exitCode: RecoveryPolicy.busyExitCode)
-        XCTAssertEqual(f, .lastRunBusy(exitCode: 75))
+        XCTAssertEqual(f, .lastRunFailed(exitCode: 75))
         XCTAssertFalse(f.isEnforcing)
         XCTAssertFalse(f.refusalHint.isEmpty)
     }
 
-    /// A refusal (exit 3) still proves the agent ran its section and the policy
-    /// said no — that IS the backstop working, so it stays fresh.
-    func testARefusedLastRunStillEnforces() {
-        XCTAssertTrue(freshness(at: -30, exitCode: 3).isEnforcing)
+    /// A REFUSAL (exit 3) is the round-5 CRITICAL: the agent started, the
+    /// policy said "release" and the ownership gate refused the write, so the
+    /// flag is still ON and nothing was protected. Grading that "enforcing"
+    /// lifts the ADR 023 refusal on the strength of a run that did nothing.
+    func testARefusedLastRunDoesNotEnforce() {
+        let f = freshness(at: -30, exitCode: 3)
+        XCTAssertEqual(f, .lastRunFailed(exitCode: 3))
+        XCTAssertFalse(f.isEnforcing, "a run that protected nothing is not an enforcer")
     }
 
     /// The refusal hint names the actual situation — the operator's next move
@@ -328,7 +333,8 @@ final class RecoveryPolicyTests: XCTestCase {
             .otherBoot(recordBootID: "x"),
             .stale(ageSeconds: 400),
             .lastRunFailed(exitCode: 5),
-            .lastRunBusy(exitCode: 75),
+            .lastRunFailed(exitCode: 75),
+            .lastRunFailed(exitCode: 3),
         ]
         for c in cases {
             XCTAssertFalse(c.refusalHint.isEmpty, "\(c) must say why")

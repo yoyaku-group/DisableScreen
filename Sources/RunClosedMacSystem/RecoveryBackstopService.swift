@@ -79,6 +79,14 @@ public struct RecoveryBackstopService {
             }
         }
 
+        /// Whether a `rearmWithheld` episode is open after this minute. `nil`
+        /// when the battery step did not run, so the caller carries the
+        /// previous value forward instead of guessing.
+        public var rearmWithheldEpisode: Bool? {
+            if case .completed(let report) = self { return report.rearmWithheldEpisode }
+            return nil
+        }
+
         /// What the battery step did, when it ran at all.
         public var batteryMutation: LowBatteryGuardService.ProtectiveMutation? {
             if case .completed(let report) = self { return report.batteryMutation }
@@ -234,18 +242,12 @@ public struct RecoveryBackstopService {
         let plan = RecoveryPolicy.plan(facts)
         let outcome: Outcome
         if !plan.needsWork {
-            // 1 — nothing is ours and nothing is scheduled: no `pmset`, no
-            // battery read. It still TAKES the lock, does nothing inside and
-            // releases it.
-            //
-            // This is what keeps the CLI's proof from being circular: on a
-            // virgin machine every minute is `nothingToDo`, so a "has it ever
-            // run under the lock?" rule would never be satisfied by any minute
-            // — and the one act that would make the next minute take the lock
-            // is the very `session start --for` the rule gates. One `flock`
-            // per minute is free; the expensive reads are what the fast path
-            // actually avoids.
-            outcome = lock.tryWithLock { () -> Bool in true } == nil ? .busy : .nothingToDo
+            // 1 — nothing is ours and nothing is scheduled: no lock, no
+            // `pmset`, no battery read. The proof this minute carries is
+            // "the agent ran and did not fail" — deliberately NOT "a
+            // protective section ran", which nothing on a virgin machine
+            // could ever satisfy (see `runFreshness`).
+            outcome = .nothingToDo
         } else if appIsAlive() {
             // 2 — the app is running: it owns enforcement, and the probe is free.
             outcome = .appAlive
@@ -272,32 +274,15 @@ public struct RecoveryBackstopService {
     /// busy minute in the middle of an episode does not re-audit it.
     private func writeHeartbeat(for outcome: Outcome, bootID: String) {
         let previous = heartbeatStore.load()
-        let reported: Bool
-        let locked: Bool
-        switch outcome {
-        case .completed(let report):
-            reported = report.rearmWithheldEpisode
-            // `.completed` ran a protective section inside `LidWriteLock`.
-            locked = true
-        case .nothingToDo:
-            // Also a locked run: the fast path takes the lock, does nothing
-            // inside and releases it. Without this, a machine where nothing is
-            // ours yet would never satisfy the CLI's proof — the circularity
-            // the third review found.
-            reported = previous?.rearmWithheldReported ?? false
-            locked = true
-        case .appAlive, .busy:
-            reported = previous?.rearmWithheldReported ?? false
-            // Sticky on THIS boot only: a previous boot's locked run says
-            // nothing about this one.
-            locked = previous.map { $0.bootID == bootID && $0.completedLockedRun } ?? false
-        }
+        // The `rearmWithheld` episode survives minutes that never evaluate the
+        // battery (fast path, app alive, busy), so the log stays
+        // once-per-episode instead of re-reporting on every no-op minute.
+        let reported = outcome.rearmWithheldEpisode ?? previous?.rearmWithheldReported ?? false
         let saved = heartbeatStore.save(.init(
             at: wallClock(),
             bootID: bootID,
             exitCode: outcome.exitCode.rawValue,
-            rearmWithheldReported: reported,
-            completedLockedRun: locked))
+            rearmWithheldReported: reported))
         guard !saved else { return }
         // Not fatal — the protective action already happened — but a heartbeat
         // that cannot be written silently breaks two things: the CLI refuses

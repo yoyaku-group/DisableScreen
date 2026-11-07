@@ -249,6 +249,11 @@ final class BackstopRegistrationTests: XCTestCase {
                      "BundleProgram is the SMAppService form; an absolute Program would "
                      + "point outside the bundle")
         XCTAssertNil(dict["MachServices"], "an agent exposes no listener")
+        // launchd discards an agent's output unless told where to put it, and
+        // that output is the only place a refusal or a failed `pmset` says WHY
+        // the net is not protecting the operator.
+        XCTAssertNotNil(dict["StandardErrorPath"], "a silent launchd agent hides its own failures")
+        XCTAssertNotNil(dict["StandardOutPath"], "a silent launchd agent hides its own failures")
     }
 
     /// The argv carries the protective subcommand: a plist that lost
