@@ -61,33 +61,20 @@ public struct BackstopHeartbeatStore {
         /// audited (ADR 024 review round 2 — the condition holds for every
         /// minute while it lasts, so auditing it each time floods the log).
         public var rearmWithheldReported: Bool
-        /// Whether this agent had the write lock when it wrote the record.
-        ///
-        /// INFORMATIONAL ONLY — no rule reads it. The CLI's proof of execution
-        /// is the exit code (`RecoveryPolicy.runFreshness`): an exit-0 minute
-        /// proves the agent runs, and requiring a locked section instead made
-        /// that proof unreachable on a machine where nothing is ours yet.
-        /// Kept because an operator diagnosing a silent agent wants to know
-        /// whether it ever got past the probe, and the field is additive.
-        public var completedLockedRun: Bool
-
         public init(schemaVersion: Int = kBackstopHeartbeatSchemaVersion,
                     at: Date,
                     bootID: String,
                     exitCode: Int32,
-                    rearmWithheldReported: Bool = false,
-                    completedLockedRun: Bool = false) {
+                    rearmWithheldReported: Bool = false) {
             self.schemaVersion = schemaVersion
             self.at = at
             self.bootID = bootID
             self.exitCode = exitCode
             self.rearmWithheldReported = rearmWithheldReported
-            self.completedLockedRun = completedLockedRun
         }
 
         private enum CodingKeys: String, CodingKey {
             case schemaVersion, at, bootID, exitCode, rearmWithheldReported
-            case completedLockedRun
         }
 
         /// Tolerant decoding: a key a later version adds must not make the file
@@ -101,10 +88,6 @@ public struct BackstopHeartbeatStore {
             exitCode = try c.decodeIfPresent(Int32.self, forKey: .exitCode) ?? 0
             rearmWithheldReported = try c.decodeIfPresent(
                 Bool.self, forKey: .rearmWithheldReported) ?? false
-            // An older record predates the field: absent means "not proven",
-            // the conservative reading.
-            completedLockedRun = try c.decodeIfPresent(
-                Bool.self, forKey: .completedLockedRun) ?? false
         }
     }
 

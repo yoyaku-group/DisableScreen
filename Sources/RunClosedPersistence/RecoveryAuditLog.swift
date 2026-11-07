@@ -70,12 +70,31 @@ public struct RecoveryAuditLog: Sendable {
     public func append(_ entry: Entry) {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        guard var data = try? encoder.encode(entry) else { return }
+        guard var data = try? encoder.encode(entry) else {
+            Self.reportFailure(url: url, reason: "the entry could not be encoded")
+            return
+        }
         data.append(0x0A)
         let fd = open(url.path, O_CREAT | O_WRONLY | O_APPEND | O_CLOEXEC, 0o600)
-        guard fd >= 0 else { return }
+        guard fd >= 0 else {
+            Self.reportFailure(url: url, reason: "open() failed (errno \(errno))")
+            return
+        }
         defer { close(fd) }
-        _ = data.withUnsafeBytes { buf in write(fd, buf.baseAddress, buf.count) }
+        let written = data.withUnsafeBytes { buf in write(fd, buf.baseAddress, buf.count) }
+        if written != data.count {
+            // The trail of protective actions is forensic evidence: a silent
+            // drop means a release that really happened leaves no trace, and
+            // an investigation later reads "nothing happened".
+            Self.reportFailure(url: url, reason: "short write (\(written)/\(data.count) bytes)")
+        }
+    }
+
+    /// stderr, never the audit file itself: a failure to write there must not
+    /// recurse into another failing write.
+    private static func reportFailure(url: URL, reason: String) {
+        FileHandle.standardError.write(Data(
+            "[RunClosed] recovery audit append FAILED at \(url.path): \(reason)\n".utf8))
     }
 
     /// All entries, oldest first (tests, CLI). Unparseable lines are skipped.

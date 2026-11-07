@@ -264,16 +264,18 @@ public struct SessionService {
         /// release must never look like a finished session.
         case retained(String)
 
-        /// The deadline was not enforced: the Mac is still being kept awake by
-        /// something, so callers must report a failure, never a healthy minute.
+        /// The deadline was NOT enforced: the Mac is still being kept awake,
+        /// so callers must report a failure and never a healthy minute.
         ///
-        /// Two shapes qualify. `.retained` (the write or its readback failed,
-        /// the record stays for a retry) and `.ended(.flagLeftOn)` — a refusal
-        /// that left the flag ON: the record is gone, but nothing turned the
-        /// flag off, so the Mac stays awake with no deadline and no RunClosed
-        /// owner. That is the 2026-10-14 class this backstop exists to close;
-        /// reporting it as `0 ok` would also feed a false "fresh" heartbeat to
-        /// the CLI's enforcer check.
+        /// Deliberately NOT the same question as `SessionEndOutcome.isFailure`,
+        /// which asks only "does the record stay for a retry?". Here `.retained`
+        /// and `.ended(.flagLeftOn)` both qualify: a refusal that left the flag
+        /// ON deleted the record but turned nothing off, so the Mac stays awake
+        /// with no deadline and no RunClosed owner — the 2026-10-14 class this
+        /// backstop exists to close. Reporting that as `0 ok` would also feed a
+        /// false "fresh" heartbeat to the CLI's enforcer check.
+        ///
+        /// Named `isFailure` for its callers; read it as `deadlineEnforced`.
         public var isFailure: Bool {
             switch self {
             case .retained: return true

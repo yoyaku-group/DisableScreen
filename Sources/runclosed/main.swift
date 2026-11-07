@@ -804,7 +804,10 @@ func cmdSession(_ rest: [String]) -> Int32 {
             // teardown finds the app gone, and an app seen alive here runs its
             // teardown (which ends the session) only after this start.
             if duration != nil, !AppLivenessLock().isHeld(), !backstopIsProtecting() {
-                refusal = backstopRefusalReason()
+                // The refusal message is built OUTSIDE the lock: it re-queries
+                // `SMAppService`, which is an XPC round-trip, and a slow daemon
+                // there would hold the write lock while the app's guard tick
+                // waits on it. The boolean above is all the decision needs.
                 return nil
             }
             // `start` itself clears a pending low-battery re-arm on success,
@@ -812,7 +815,10 @@ func cmdSession(_ rest: [String]) -> Int32 {
             return svc.start(for: duration)
         }
         guard let result = locked else {
-            FileHandler.err("refused: nothing would end this session at its deadline — RunClosed.app is not running, and \(refusal ?? "the recovery backstop cannot be relied on"). Open RunClosed, or see `runclosed-cli backstop status`.")
+            // Built here, outside the lock: `backstopRefusalReason()` re-queries
+            // `SMAppService` (an XPC round-trip), and a slow daemon would
+            // otherwise hold `LidWriteLock` while the app's guard tick waits.
+            FileHandler.err("refused: nothing would end this session at its deadline — RunClosed.app is not running, and \(backstopRefusalReason()). Open RunClosed, or see `runclosed-cli backstop status`.")
             return 3
         }
         switch result {
@@ -845,20 +851,18 @@ func cmdSession(_ rest: [String]) -> Int32 {
             step = parsed
         }
         var svc = makeSessionService()
-        var refusal: String?
         let locked = LidWriteLock().withLock { () -> Result<KeepAwakeSession, SessionError>? in
             // Same refusal as `start --for`, same place, same two enforcers
             // (ADR 024): a new deadline that nothing would enforce must not be
             // reported as "extended" (the app crashed during a timed session).
             // No session on record falls through to `extend`'s own `noSession`.
             if svc.load() != nil, !AppLivenessLock().isHeld(), !backstopIsProtecting() {
-                refusal = backstopRefusalReason()
                 return nil
             }
             return svc.extend(by: step)
         }
         guard let result = locked else {
-            FileHandler.err("refused: nothing would enforce this session's new deadline — RunClosed.app is not running, and \(refusal ?? "the recovery backstop cannot be relied on"). Open RunClosed, or see `runclosed-cli backstop status`.")
+            FileHandler.err("refused: nothing would enforce this session's new deadline — RunClosed.app is not running, and \(backstopRefusalReason()). Open RunClosed, or see `runclosed-cli backstop status`.")
             return 3
         }
         switch result {

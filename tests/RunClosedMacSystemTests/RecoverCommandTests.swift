@@ -67,8 +67,12 @@ final class RecoverCommandTests: XCTestCase {
         p.standardOutput = out
         p.standardError = out
         try p.run()
-        p.waitUntilExit()
+        // Drain BEFORE waiting: a CLI that writes more than the 64 KiB pipe
+        // buffer blocks on write() forever, and `waitUntilExit()` would then
+        // wait for a process that can never finish. Reading to EOF first lets
+        // the child complete, and terminates when it exits.
         let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
         return (p.terminationStatus, String(data: data, encoding: .utf8) ?? "")
     }
 

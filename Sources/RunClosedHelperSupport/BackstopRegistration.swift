@@ -88,8 +88,25 @@ public struct SMAppServiceAgentRegistrar: BackstopRegistrar {
 
     public init() {}
 
+    /// `agent(plistName:)` resolves against the CALLING process's main bundle.
+    ///
+    /// From `RunClosed.app` and from `runclosed-cli` inside `Contents/MacOS`
+    /// that is the right bundle. From a bare `swift run runclosed` (or a copied
+    /// binary) it is not, and the call answers `.notFound` for an agent that is
+    /// registered and running — which would make the CLI refuse every timed
+    /// session on a machine where the backstop works.
+    ///
+    /// A `.notFound` is therefore reported as `.unknown` when the calling bundle
+    /// is not RunClosed's, never as a definite "off": the honest answer there is
+    /// "this process cannot see the agent". The app itself always calls with the
+    /// right bundle, so its popup is unaffected.
     public func status() -> BackstopStatus {
-        Self.map(SMAppService.agent(plistName: RunClosedBackstopDescriptor.plistName).status)
+        let mapped = Self.map(
+            SMAppService.agent(plistName: RunClosedBackstopDescriptor.plistName).status)
+        guard mapped == .notFound,
+              Bundle.main.bundleIdentifier != RunClosedBackstopDescriptor.appBundleIdentifier
+        else { return mapped }
+        return .unknown
     }
 
     /// One mapping for the live call AND the fake-driven tests, so no state can

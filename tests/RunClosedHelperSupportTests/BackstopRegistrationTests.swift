@@ -52,6 +52,23 @@ final class BackstopRegistrationTests: XCTestCase {
     /// re-asserted `.notRegistered` (already covered above), so flipping the
     /// mapper's `@unknown default` to `.enabled` would have gone unnoticed —
     /// the exact regression the name claims to guard.
+    /// `SMAppService` resolves the plist against the CALLING bundle. A caller
+    /// that is not RunClosed (a bare `swift run`, a copied binary) therefore
+    /// sees `notFound` for an agent that IS registered — and reporting that as
+    /// a definite "off" made the CLI refuse every timed session on a machine
+    /// where the backstop works. The honest answer is "this process cannot
+    /// see it".
+    func testAnUnresolvableBundleNeverReportsTheAgentAsDefinitelyOff() {
+        // The test runner's bundle id is not RunClosed's, which is exactly the
+        // foreign-bundle case.
+        XCTAssertNotEqual(Bundle.main.bundleIdentifier,
+                          RunClosedBackstopDescriptor.appBundleIdentifier,
+                          "this test is only meaningful from a foreign bundle")
+        // A REAL registrar call from here must not claim `notFound`.
+        XCTAssertNotEqual(SMAppServiceAgentRegistrar().status(), .notFound,
+                          "a foreign bundle must read unknown, never a definite off")
+    }
+
     func testAnUnrecognisedStatusMapsToUnknownNotEnabled() throws {
         let unrecognised = try XCTUnwrap(SMAppService.Status(rawValue: 99),
                                          "the SDK should accept an unknown raw value")

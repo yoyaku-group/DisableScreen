@@ -25,6 +25,11 @@ public enum RunClosedBackstopDescriptor {
     /// `SMAppService.agent(plistName:)`.
     public static let plistName = "com.benjaminbelaga.runclosed.backstop.plist"
 
+    /// The app bundle identifier. `SMAppService.agent(plistName:)` resolves the
+    /// plist against the CALLING process's main bundle, so a caller whose bundle
+    /// is not this one cannot see the agent and must not report it as "off".
+    public static let appBundleIdentifier = "com.benjaminbelaga.RunClosed"
+
     /// The Label the plist declares. Kept next to `plistName` so the template,
     /// the packaging script and the code cannot drift.
     public static let agentLabel = "com.benjaminbelaga.runclosed.backstop"
