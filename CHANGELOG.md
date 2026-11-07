@@ -5,6 +5,35 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Recovery backstop (ADR 024). Until now only the running app enforced a
+  session deadline and the low-battery guard, so a crash or a quit left
+  `pmset disablesleep 1` on with nothing to turn it off: the Mac stayed awake
+  with the lid closed until the battery died (the 2026-10-14 incident behind
+  ADR 022). A per-user LaunchAgent now runs `runclosed-cli recover --backstop`
+  every 60 s. It takes only PROTECTIVE actions while the app is not running —
+  it ends a session whose deadline passed (releasing through the ownership
+  gate, `.sessionRecovery` for the session's own previous-boot record) and, at
+  critical battery, releases the flag and lets the Mac sleep. It never turns
+  the flag ON and never performs the low-battery re-arm: that debt is left on
+  disk for the app, so the agent cannot wake the Mac unattended. It takes the
+  cross-process lock non-blocking and exits 75 when another writer holds it,
+  the conventional "retry next minute"; when the app holds `app.lock` it exits
+  at once. A minute with nothing to protect costs no `pmset` call and no lock,
+  and `recovery_audit.jsonl` gets a line only when a step acted or failed.
+  Registered with `SMAppService.agent(plistName:)` — never `launchctl
+  bootstrap`, which would leave a job outliving a deleted bundle — and
+  registered at every launch when it is not registered yet. A pending approval
+  shows "Recovery backstop off — approve it in System Settings" in the popup
+  with a Login Items link. `status` and `doctor` gain a `backstop` block, and
+  the CLI gains `recover --backstop` and `backstop status|register|login-items|
+  unregister`. `session start --for` and `session extend` are now allowed while
+  the app is closed, provided the agent reports `enabled`; a merely pending
+  approval enforces nothing and keeps the refusal, whose message names both
+  ways out. Known limit, stated in the README: nothing protects the Mac while
+  no user is logged in.
+
 ### Fixed
 
 - ADR 023 follow-ups. Turning the lid switch on now records an indefinite

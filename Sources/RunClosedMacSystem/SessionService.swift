@@ -263,6 +263,14 @@ public struct SessionService {
         /// The record stays for the next tick. Retrying is correct: a failed
         /// release must never look like a finished session.
         case retained(String)
+
+        /// The release or its readback failed: the record stays on disk for a
+        /// retry, and callers must report a failure (`SessionEndOutcome
+        /// .isFailure`), never a finished session.
+        public var isFailure: Bool {
+            if case .retained = self { return true }
+            return false
+        }
     }
 
     /// End the session if a deadline has passed.
@@ -342,6 +350,15 @@ public struct SessionService {
     public struct StepOutcome: Equatable, Sendable {
         public var expiry: ExpiryOutcome
         public var reconciled: ReconcileOutcome?
+        /// The boot the step ran on, so a caller that only has the outcome
+        /// (the ADR 024 backstop writes an audit line) does not have to guess.
+        public var bootID: String = ""
+
+        public init(expiry: ExpiryOutcome, reconciled: ReconcileOutcome? = nil, bootID: String = "") {
+            self.expiry = expiry
+            self.reconciled = reconciled
+            self.bootID = bootID
+        }
     }
 
     /// The session's share of a tick: expire a due session, otherwise
@@ -351,7 +368,8 @@ public struct SessionService {
     public mutating func step() -> StepOutcome {
         let expiry = expireIfDue()
         let reconciled = expiry == .notDue ? reconcileOrphan() : nil
-        return StepOutcome(expiry: expiry, reconciled: reconciled)
+        return StepOutcome(expiry: expiry, reconciled: reconciled,
+                           bootID: continuous.bootID)
     }
 
     // MARK: — Low-battery interplay (ADR 023 §4)

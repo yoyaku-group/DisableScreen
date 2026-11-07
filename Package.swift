@@ -31,9 +31,14 @@ let package = Package(
             dependencies: ["RunClosedCore", "RunClosedMacSystem"]
         ),
         // G2a — menu-bar app shell (READ-ONLY; mutation toggles disabled).
+        // ADR 024: it also registers the recovery LaunchAgent at launch and
+        // surfaces its approval state, so it consumes the shared registration
+        // library (the same one the CLI and the helper use — one state model,
+        // not three).
         .executableTarget(
             name: "RunClosedMenuBar",
-            dependencies: ["RunClosedCore", "RunClosedMacSystem", "RunClosedPersistence", "RunClosedApp"]
+            dependencies: ["RunClosedCore", "RunClosedMacSystem", "RunClosedPersistence",
+                           "RunClosedApp", "RunClosedHelperSupport"]
         ),
         // A14 — privileged LaunchDaemon helper (registration skeleton, no
         // XPC yet) + its support lib. See ADR 016.

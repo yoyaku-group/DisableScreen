@@ -662,3 +662,92 @@ $ runclosed-cli definitely-not-a-command         → « unknown command », exit
 ```
 
 NOT_TESTED (matériel) : expiration réelle après une nuit capot fermé, tick au réveil, notifications macOS, rendu du popup et du titre de barre sur la build installée. Aucune de ces mesures n'a été faite ; rien n'est supposé.
+
+## ADR 024 — filet de secours launchd (2026-11-07, branche `agent/claude/20261106/2ad8bd6d-e42-runclosed-backstop`)
+
+Tout ce qui suit a réellement été exécuté dans ce worktree. Aucun `recover --backstop`, `backstop register`,
+`session start` ni `lid-stay-awake on|off` n'a été lancé contre la machine réelle : les chemins de mutation sont
+couverts par des fakes.
+
+Build et suite complète :
+
+```
+$ arch -arm64 swift build --build-tests
+  Build complete, 0 error, 0 warning
+$ arch -arm64 swift test
+  RunClosedCoreTests           46 tests, 0 failures
+  RunClosedMacSystemTests     183 tests, 0 failures
+  RunClosedPersistenceTests    27 tests, 0 failures
+  RunClosedHelperSupportTests 124 tests, 0 failures
+  RunClosedAppTests            11 tests, 0 failures
+  → 391 tests, 0 failures (329 avant ce lot : +62)
+```
+
+Suites ajoutées ou étendues, exécutées séparément :
+
+```
+$ arch -arm64 swift test --filter RunClosedCoreTests.RecoveryPolicyTests               → 16 tests, 0 failures
+$ arch -arm64 swift test --filter RunClosedMacSystemTests.RecoveryBackstopServiceTests → 20 tests, 0 failures
+$ arch -arm64 swift test --filter RunClosedHelperSupportTests.BackstopRegistrationTests→ 14 tests, 0 failures
+$ arch -arm64 swift test --filter RunClosedMacSystemTests.RecoverCommandTests          →  8 tests, 0 failures
+$ arch -arm64 swift test --filter RunClosedMacSystemTests.SessionGuardTickTests        → 26 tests, 0 failures (24 + 2)
+$ arch -arm64 swift test --filter RunClosedCoreTests.SessionPolicyTests               → 45 tests, 0 failures (43 + 2)
+```
+
+Bundle et CLI (binaire embarqué) :
+
+```
+$ bash scripts/build-runclosed-app.sh
+  → OK: build/RunClosed.app (ad-hoc, runtime)
+  → Contents/Library/LaunchAgents/com.benjaminbelaga.runclosed.backstop.plist présent
+$ codesign --verify --strict build/RunClosed.app                         → exit 0
+$ plutil -lint build/RunClosed.app/Contents/Library/LaunchAgents/*.plist → OK
+$ build/RunClosed.app/Contents/MacOS/runclosed-cli backstop status --json
+  backstop { status: "notFound", protecting: false, intervalSeconds: 60 }
+  plistName: "com.benjaminbelaga.runclosed.backstop.plist"
+  programArguments: ["runclosed-cli", "recover", "--backstop"]           (exit 0)
+$ build/RunClosed.app/Contents/MacOS/runclosed-cli recover --bogus       → exit 64
+```
+
+`notFound` est l'état honnête d'un agent jamais enregistré sur cette machine (ADR 018). Rien n'a été enregistré :
+ni `backstop register`, ni le lancement de l'app installée.
+
+Contrats verrouillés par les tests :
+
+- **Politique pure** : sortie rapide (aucun record ne revendique le flag ET aucune session) ; un record relâché ne
+  revendique rien ; un record nôtre sans session, ou d'un boot précédent, demande quand même le travail ; une session
+  seule aussi ; échéance due / non due / indéfinie jamais due ; batterie critique avec flag nôtre (relâche), étranger
+  (B2, jamais muté), record périmé (urgence), bon niveau (rien), flag illisible (`lidFlagUnknown`) ;
+  **dette de réarmement retenue, jamais exécutée** ; un balayage de la grille complète (flag × pourcentage × source ×
+  ownership × latch) prouve qu'aucune combinaison ne demande un `enable`.
+- **Service backstop sur fakes** : rien à faire ⇒ 0 sans aucun appel système (ni `pmset`, ni relevé batterie, ni
+  `sleepnow`) ; app vivante ⇒ 0, aucune mutation, aucun verrou laissé ; verrou tenu ⇒ 75, aucune mutation, aucune
+  ligne d'audit, et la sortie revient bien pendant qu'un autre fd tient le verrou (non bloquant prouvé) ; session due
+  ⇒ relâchée et effacée, une ligne d'audit ; session en cours ⇒ minute muette sans ligne ; record d'un autre boot +
+  session concordante ⇒ `sessionRecovery` ; record étranger sans session concordante ⇒ refusé, flag laissé ON ; échec
+  d'écriture ⇒ record gardé et sortie 5 ; orphelin ⇒ réconcilié sans écriture ; batterie critique avec session
+  indéfinie ⇒ relâchement + veille + session en pause + dette de réarmement ; sans session (interrupteur simple)
+  ⇒ relâchement + veille ; flag étranger ⇒ jamais relâché ; record périmé ⇒ `lowBatteryEmergency` ; bonne batterie
+  ⇒ rien ; dette de réarmement ⇒ `rearmWithheld`, flag resté OFF, dette conservée ; grille complète sans aucun
+  `enable` émis ; **régression : le backstop n'emboîte jamais `LidWriteLock`** (échec nommé après 10 s au lieu d'un
+  blocage) ; la section est exclusive de bout en bout, prouvée par une sonde dans le relevé batterie.
+- **Registrar** : chaque statut `SMAppService` mappé ; `unknown` n'est jamais traité comme `enabled` ; seul `enabled`
+  vaut `isProtecting` ; enregistrement tenté depuis `notFound` (réalité macOS 26) ; idempotence (jamais de
+  re-registration d'une approbation en attente) ; un `register()` qui lève est surfacé en `false`, sans état inventé ;
+  désenregistrement sans effet quand rien n'est enregistré ; cycle complet ; deep link sans travail privilégié ;
+  **le plist livré est conforme au descripteur** (Label, `BundleProgram`, argv, `StartInterval`, `RunAtLoad`, absence
+  de `KeepAlive` / `Program` / `MachServices`).
+- **CLI** : `recover` sans `--backstop`, `recover --bogus`, `recover --backstop --force`, `recover --backstop extra`,
+  `backstop` seul, `backstop <inconnu>`, `backstop status --bogus`, `backstop register extra` ⇒ tous 64 ;
+  `backstop status --json` est une lecture (statut et `protecting` cohérents, argv et intervalle présents) ;
+  `doctor` et `status` portent le bloc `backstop` ; le chemin rapide sort en 0 sans appel système ; le verrou tenu
+  sort en 75.
+- **Premier tick au lancement** : une session devenue due pendant que l'app était fermée est terminée par ce premier
+  tick, garde batterie active ou coupée.
+- **`rowLabel`** : le jour est affiché quand l'échéance n'est pas aujourd'hui, pas quand elle l'est.
+
+NOT_TESTED (matériel) : enregistrement réel de l'agent (`backstop register`), geste d'approbation dans Réglages
+Système → Items d'ouverture, cadence réelle de 60 s, résolution de `SMAppService.agent(plistName:)` depuis
+`runclosed-cli` dans `Contents/MacOS`, relâchement réel et `pmset sleepnow` du backstop, rendu de la ligne de popup
+et du bouton « Ouvrir les items d'ouverture… » sur la build installée. Rien de tout cela n'a été mesuré ; rien n'est
+supposé.

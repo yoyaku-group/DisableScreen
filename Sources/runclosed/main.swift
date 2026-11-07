@@ -53,10 +53,108 @@ func cmdStatus() {
             "state": $0.state.rawValue, "workSource": $0.workSource.rawValue,
             "idleSleep": $0.requestedIdleSleep, "closedLid": $0.requestedClosedLid,
         ] },
+        // ADR 024: is anything enforcing a deadline while the app is closed?
+        "backstop": backstopJSON(),
     ])
 }
 
 func cmdDisplays() { emitJSON(displaysJSON()) }
+
+// ── ADR 024 — recovery backstop registration surface ────────────────────────
+
+func backstopService() -> BackstopLifecycleService {
+    BackstopLifecycleService(registrar: SMAppServiceAgentRegistrar())
+}
+
+/// The registration state, for `status`/`doctor` and for the CLI's own
+/// refusals. Read-only: `status()` performs no registration.
+func backstopJSON() -> [String: Any] {
+    let report = backstopService().report()
+    return [
+        "status": report.status.rawValue,
+        "protecting": report.isProtecting,
+        "summary": report.status.summary,
+        "boundedAction": report.boundedAction,
+        "intervalSeconds": report.intervalSeconds,
+    ]
+}
+
+let backstopUsage = """
+usage: runclosed backstop status [--json]
+       runclosed backstop register          (registers the LaunchAgent; approval may be required)
+       runclosed backstop login-items       (opens System Settings → Login Items)
+       runclosed backstop unregister
+"""
+
+func cmdBackstop(_ rest: [String]) -> Int32 {
+    guard let sub = rest.first else {
+        FileHandler.err(backstopUsage)
+        return 64
+    }
+    let svc = backstopService()
+    switch sub {
+    case "status":
+        let args = Array(rest.dropFirst())
+        guard args.isEmpty || args == ["--json"] else {
+            FileHandler.err(backstopUsage)
+            return 64
+        }
+        if args == ["--json"] {
+            emitJSON([
+                "schemaVersion": kSchemaVersion,
+                "bootID": clock.bootID,
+                "backstop": backstopJSON(),
+                "plistName": RunClosedBackstopDescriptor.plistName,
+                "agentLabel": RunClosedBackstopDescriptor.agentLabel,
+                "bundleProgram": RunClosedBackstopDescriptor.bundleProgramRelativePath,
+                "programArguments": RunClosedBackstopDescriptor.programArguments,
+            ])
+        } else {
+            let report = svc.report()
+            print("recovery backstop: \(report.status.rawValue) — \(report.status.summary)")
+        }
+        return 0
+    case "register":
+        guard rest.count == 1 else { FileHandler.err(backstopUsage); return 64 }
+        let r = svc.registerAndReport()
+        emitJSON([
+            "schemaVersion": kSchemaVersion,
+            "action": "register",
+            "backstop": backstopJSON(),
+            "lastOperationSucceeded": r.lastOperationSucceeded as Any? ?? NSNull(),
+        ])
+        return r.lastOperationSucceeded == false ? 5 : 0
+    case "login-items":
+        guard rest.count == 1 else { FileHandler.err(backstopUsage); return 64 }
+        svc.openApprovalSettings()
+        emitJSON(["schemaVersion": kSchemaVersion, "action": "login-items",
+                  "backstop": backstopJSON()])
+        return 0
+    case "unregister":
+        guard rest.count == 1 else { FileHandler.err(backstopUsage); return 64 }
+        let r = svc.unregisterAndReport()
+        emitJSON([
+            "schemaVersion": kSchemaVersion,
+            "action": "unregister",
+            "backstop": backstopJSON(),
+            "lastOperationSucceeded": r.lastOperationSucceeded as Any? ?? NSNull(),
+        ])
+        return r.lastOperationSucceeded == false ? 5 : 0
+    default:
+        FileHandler.err(backstopUsage)
+        return 64
+    }
+}
+
+/// ADR 024 §5 — may a CLI command that needs an enforcer rely on the backstop?
+///
+/// The launchd agent must report `enabled` (approved AND registered). A pending
+/// approval is surfaced, not trusted: it enforces nothing yet. Called under
+/// `LidWriteLock`, as today — the state can change between the check and the
+/// write otherwise.
+func backstopIsProtecting() -> Bool {
+    backstopService().report().isProtecting
+}
 
 func cmdDoctor() {
     // Two distinct facts, reported as such (ADR 020): the app's closed-lid
@@ -75,6 +173,9 @@ func cmdDoctor() {
         ],
         "idleAssertion": ["backend": "IOPMAssertionCreateWithName", "capability": "supported"],
         "displays": displaysJSON().count,
+        // ADR 024: the out-of-app safety net. Reported as a fact, with the
+        // honest consequence when it is not up.
+        "backstop": backstopJSON(),
     ])
 }
 
@@ -635,21 +736,24 @@ func cmdSession(_ rest: [String]) -> Int32 {
         // and the flag, so it must not interleave with a guard tick.
         var svc = makeSessionService()
         let locked = LidWriteLock().withLock { () -> Result<SessionService.StartOutcome, SessionError>? in
-            // Today only the menu-bar app enforces a deadline (the L2 launchd
-            // backstop will add a second enforcer). A timed session with
-            // nothing to end it would keep the Mac awake past its deadline:
-            // refuse it. Checked INSIDE the lock: the app's quit teardown
-            // gives up `app.lock` inside this same lock section, so a start
-            // queued behind a teardown finds the app gone, and an app seen
-            // alive here runs its teardown (which ends the session) only
-            // after this start. A crash in between is the backstop's case.
-            if duration != nil, !AppLivenessLock().isHeld() { return nil }
+            // A timed session needs something to end it at its deadline. Two
+            // enforcers qualify (ADR 023, amended by ADR 024): the menu-bar app
+            // (`app.lock`) or the launchd recovery backstop, once it is
+            // APPROVED and enabled. A backstop that merely exists is not enough
+            // — a pending approval enforces nothing, so the refusal stands.
+            // Both checks run INSIDE the lock: the app's quit teardown gives up
+            // `app.lock` in this same section, so a start queued behind a
+            // teardown finds the app gone, and an app seen alive here runs its
+            // teardown (which ends the session) only after this start.
+            if duration != nil, !AppLivenessLock().isHeld(), !backstopIsProtecting() {
+                return nil
+            }
             // `start` itself clears a pending low-battery re-arm on success,
             // for the popup and the CLI alike.
             return svc.start(for: duration)
         }
         guard let result = locked else {
-            FileHandler.err("refused: RunClosed.app is not running, so nothing would end this session at its deadline. Open RunClosed first.")
+            FileHandler.err("refused: nothing would end this session at its deadline — RunClosed.app is not running and the recovery backstop is not enabled. Open RunClosed, or approve the backstop in System Settings → Login Items (`runclosed-cli backstop register`, then `runclosed-cli backstop login-items`).")
             return 3
         }
         switch result {
@@ -683,15 +787,17 @@ func cmdSession(_ rest: [String]) -> Int32 {
         }
         var svc = makeSessionService()
         let locked = LidWriteLock().withLock { () -> Result<KeepAwakeSession, SessionError>? in
-            // Same refusal as `start --for`, same place: a new deadline that
-            // nothing would enforce must not be reported as "extended" (the
-            // app crashed during a timed session). No session on record
-            // falls through to `extend`'s own `noSession`.
-            if svc.load() != nil, !AppLivenessLock().isHeld() { return nil }
+            // Same refusal as `start --for`, same place, same two enforcers
+            // (ADR 024): a new deadline that nothing would enforce must not be
+            // reported as "extended" (the app crashed during a timed session).
+            // No session on record falls through to `extend`'s own `noSession`.
+            if svc.load() != nil, !AppLivenessLock().isHeld(), !backstopIsProtecting() {
+                return nil
+            }
             return svc.extend(by: step)
         }
         guard let result = locked else {
-            FileHandler.err("refused: RunClosed.app is not running, so nothing would end this session at its new deadline. Open RunClosed first.")
+            FileHandler.err("refused: nothing would enforce this session's new deadline — RunClosed.app is not running and the recovery backstop is not enabled. Open RunClosed, or approve the backstop in System Settings → Login Items (`runclosed-cli backstop register`, then `runclosed-cli backstop login-items`).")
             return 3
         }
         switch result {
@@ -738,6 +844,67 @@ func cmdSession(_ rest: [String]) -> Int32 {
         FileHandler.err(sessionUsage)
         return 64
     }
+}
+
+// ── ADR 024 — `recover --backstop` (the LaunchAgent's one command) ──────────
+
+let recoverUsage = """
+usage: runclosed recover --backstop
+
+`recover --backstop` is run by the RunClosed recovery LaunchAgent every 60 s.
+It takes ONLY protective actions while RunClosed.app is not running: it ends a
+session whose deadline passed and releases lid stay-awake on a critical
+battery (then lets the Mac sleep). It never turns lid stay-awake ON.
+
+Exit codes: 0 ok / nothing to do, 3 refused by policy, 5 backend failure,
+            64 usage, 75 busy (another writer holds the lock — retry next minute)
+"""
+
+func cmdRecover(_ rest: [String]) -> Int32 {
+    // `--backstop` is MANDATORY. Without it this command would be a bare
+    // mutation reachable by anyone; the agent's plist carries the flag, so a
+    // hand-edited caller that drops it gets a usage error, not a release.
+    guard rest == ["--backstop"] else {
+        FileHandler.err(recoverUsage)
+        return 64
+    }
+    return renderRecover(RecoveryBackstopService.live(bootID: clock.bootID))
+}
+
+/// The rendering seam: the tests build the same service on fakes and assert
+/// the exit code and the JSON shape through THIS function, so what they prove
+/// is what the LaunchAgent actually runs.
+func renderRecover(_ service: RecoveryBackstopService) -> Int32 {
+    var service = service
+    let outcome = service.run()
+    var obj: [String: Any] = [
+        "schemaVersion": kSchemaVersion,
+        "bootID": clock.bootID,
+        "action": "recover",
+        "backstop": true,
+        "outcome": outcome.rawValue,
+        "exitCode": Int(outcome.exitCode.rawValue),
+    ]
+    if case .completed(let report) = outcome {
+        obj["ownership"] = report.plan.ownership.rawValue
+        obj["steps"] = [
+            "session": report.plan.session,
+            "sessionDue": report.plan.sessionDue,
+            "battery": report.plan.battery,
+        ]
+        if let step = report.session {
+            obj["sessionExpiry"] = String(describing: step.expiry)
+            obj["sessionReconciled"] = step.reconciled.map { String(describing: $0) } as Any? ?? NSNull()
+        }
+        obj["batteryReason"] = report.batteryReason?.rawValue as Any? ?? NSNull()
+        obj["batteryMutation"] = report.batteryMutation as Any? ?? NSNull()
+        obj["batteryError"] = report.batteryError as Any? ?? NSNull()
+        obj["sleepAttempted"] = report.sleepAttempted
+        obj["sleepRC"] = report.sleepRC as Any? ?? NSNull()
+        obj["audited"] = report.audited
+    }
+    emitJSON(obj)
+    return outcome.exitCode.rawValue
 }
 
 // ── G2b — display mutation subcommands ───────────────────────────────────────
@@ -893,7 +1060,7 @@ func cmdLoginItem(_ rest: [String]) -> Int32 {
 // ── dispatch ─────────────────────────────────────────────────────────────────
 let args = Array(CommandLine.arguments.dropFirst())
 guard let sub = args.first else {
-    FileHandler.err("usage: runclosed <status|displays|doctor|run|restore|disable|enable|lid-stay-awake|login-item|helper|low-battery|session> [...]")
+    FileHandler.err("usage: runclosed <status|displays|doctor|run|restore|disable|enable|lid-stay-awake|login-item|helper|low-battery|session|recover|backstop> [...]")
     exit(64)
 }
 let rest = Array(args.dropFirst())
@@ -910,6 +1077,8 @@ case "login-item": exit(cmdLoginItem(rest))
 case "helper":   exit(cmdHelper(rest))
 case "low-battery": exit(cmdLowBattery(rest))
 case "session":  exit(cmdSession(rest))
+case "recover":  exit(cmdRecover(rest))
+case "backstop": exit(cmdBackstop(rest))
 case "restore":
     // restore --owned = re-enable every display we previously disabled (B3).
     // restore --lid = closed-lid keep-awake restore (G3 stub, unchanged).

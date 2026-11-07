@@ -27,8 +27,16 @@ final class PopupPanel: NSPanel {
     private static let hLidSessionLine: CGFloat = 13
     private static let hLidSessionButtons: CGFloat = 26
     private static let hLogin: CGFloat = 36
+    /// The recovery backstop line (ADR 024): only shown when the agent is NOT
+    /// protecting, with a Login Items button when it needs approval.
+    private static let hBackstop: CGFloat = 34
     private static let hLeases: CGFloat = 26
     private static let pad: CGFloat = 8
+
+    /// Height of the backstop block: nothing when the net is up.
+    static func backstopHeight(_ state: PopupState) -> CGFloat {
+        state.backstop.summary == nil ? 0 : hBackstop
+    }
 
     /// Total height of the lid block for a given state. Kept next to the row
     /// builder so the frame and the drawing can never disagree.
@@ -82,6 +90,8 @@ final class PopupPanel: NSPanel {
         total += hQuit + hSeparator
         total += hLogin + hSeparator
         total += lidHeight(state) + hSeparator
+        let backstopH = backstopHeight(state)
+        if backstopH > 0 { total += backstopH + hSeparator }
         total += hLeases + hSeparator
         for card in state.displays {
             total += cardHeight(card)
@@ -125,6 +135,16 @@ final class PopupPanel: NSPanel {
 
         root.addSubview(separator(at: y))
         y += hSeparator
+
+        // — Recovery backstop (ADR 024), only when it is NOT protecting
+        if backstopH > 0 {
+            let row = backstopRow(state, target: target)
+            row.frame = NSMakeRect(0, y, width, backstopH)
+            root.addSubview(row)
+            y += backstopH
+            root.addSubview(separator(at: y))
+            y += hSeparator
+        }
 
         // — Leases summary (read-only CLI view)
         let leases = NSTextField(labelWithString: state.leasesSummary ?? L10n.t("Active sessions: none"))
@@ -381,6 +401,41 @@ final class PopupPanel: NSPanel {
         end.action = #selector(AppDelegate.endSession(_:))
         end.isEnabled = !state.busy
         view.addSubview(end)
+    }
+
+    /// The recovery backstop's state line (ADR 024). Shown only when the agent
+    /// is not enforcing, so the popup says nothing about a net that is up. A
+    /// pending approval gets the System Settings deep link: that is the only
+    /// way to turn it on, and it is not something to hide in a log.
+    private static func backstopRow(_ state: PopupState, target: AnyObject) -> NSView {
+        let view = NSView(frame: NSMakeRect(0, 0, width, hBackstop))
+        let icon = NSImageView(frame: NSMakeRect(14, 11, 14, 14))
+        icon.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath",
+                             accessibilityDescription: nil)
+        icon.imageScaling = .scaleProportionallyDown
+        view.addSubview(icon)
+
+        let label = NSTextField(labelWithString: state.backstop.summary ?? "")
+        label.font = .systemFont(ofSize: 10.5)
+        label.textColor = .secondaryLabelColor
+        label.lineBreakMode = .byTruncatingTail
+        view.addSubview(label)
+
+        if state.backstop.needsApproval && !state.busy {
+            label.frame = NSMakeRect(34, 19, width - 48, 12)
+            let btn = NSButton(frame: NSMakeRect(34, 3, width - 48, 16))
+            btn.title = L10n.t("Open Login Items…")
+            btn.bezelStyle = .inline
+            btn.isBordered = false
+            btn.font = .systemFont(ofSize: 10.5)
+            btn.contentTintColor = .systemBlue
+            btn.target = target
+            btn.action = #selector(AppDelegate.openBackstopApproval(_:))
+            view.addSubview(btn)
+        } else {
+            label.frame = NSMakeRect(34, 11, width - 48, 13)
+        }
+        return view
     }
 
     private static func loginRow(_ state: PopupState, target: AnyObject) -> (NSView, CGFloat) {

@@ -496,4 +496,49 @@ final class SessionGuardTickTests: XCTestCase {
         XCTAssertEqual(rig.flag.value, false)
         XCTAssertNil(rig.sessionStore.load())
     }
+
+    // MARK: — A session that became due while the app was CLOSED (ADR 024 §4)
+
+    /// The app's FIRST tick at launch must end a session whose deadline passed
+    /// while it was not running — otherwise the session record (written by the
+    /// previous run, kept because the quit could not read the flag off) would
+    /// count down for a deadline nobody enforces.
+    ///
+    /// Modelled on the real case: the record is from a PREVIOUS boot, so the
+    /// continuous deadline is meaningless and the wall clock decides; the
+    /// ownership record is from that same previous boot, so the release runs
+    /// `.sessionRecovery(bootID:)`.
+    func testFirstLaunchTickEndsASessionThatBecameDueWhileTheAppWasClosed() {
+        var rig = makeRig(flag: true, ownedBoot: "OLD",
+                          battery: Self.reading(false, 80))
+        rig.sessionStore.save(KeepAwakeSession(
+            startedAt: epoch.addingTimeInterval(-8 * 3600),
+            endsAtWall: epoch.addingTimeInterval(-3600),   // lapsed an hour ago
+            endsAtContinuous: ContinuousClockTimebase.nanoseconds(fromSeconds: 1_000),
+            bootID: "OLD"))
+        // The app opens and its first guard tick runs.
+        let outcome = rig.guardService.tick()
+        XCTAssertEqual(outcome.session, .ended(.released))
+        XCTAssertTrue(outcome.sessionEndedNaturally)
+        XCTAssertEqual(rig.lid.calls, [false], "the release is the only write")
+        XCTAssertEqual(rig.flag.value, false)
+        XCTAssertNil(rig.sessionStore.load())
+    }
+
+    /// Same case with the low-battery guard switched off: the launch runs the
+    /// session step alone, and the deadline still ends.
+    func testFirstLaunchSessionOnlyTickEndsALapsedSession() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 80))
+        rig.sessionStore.save(KeepAwakeSession(
+            startedAt: epoch,
+            endsAtWall: epoch.addingTimeInterval(60),
+            endsAtContinuous: ContinuousClockTimebase.nanoseconds(fromSeconds: 1_060),
+            bootID: "A"))
+        // Closed for three hours: the deadline lapsed while the app was gone.
+        rig.clock.advance(3 * 3600)
+        let step = LidWriteLock(url: rig.lockURL).withLock { rig.session.step() }
+        XCTAssertEqual(step.expiry, .ended(.released))
+        XCTAssertEqual(rig.flag.value, false)
+        XCTAssertNil(rig.sessionStore.load())
+    }
 }
