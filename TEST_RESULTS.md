@@ -996,3 +996,30 @@ aboutir un `backstop unregister` pendant qu'un `session start` attend `LidWriteL
 inter-processus que la suite ne peut pas scénariser honnêtement. `backstopStillEnforcingLocked()` est une
 lecture de fichier et de `UserDefaults` sans XPC ; sa couverture est la relecture, pas un test. Marqué
 `NOT_TESTED` dans cette section plutôt que revendiqué.
+
+## Relecture tour 12 — deux WARN, dont un test qui passait à vide (2026-11-07)
+
+- `scripts/build-runclosed-app.sh` : `$HOME` était échappé pour `sed` mais inséré brut dans un
+  nœud texte XML. Un répertoire personnel contenant `&` ou `<` produisait un plist que
+  `plutil -lint` rejette — donc un agent qui ne charge jamais, sur une machine où tout le reste
+  fonctionne. L'échappement XML (`&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`) précède maintenant
+  l'échappement `sed`, et dans cet ordre : le `&` de `&amp;` doit être échappé pour sed après
+  coup, jamais avant.
+- `tests/.../RecoveryBackstopServiceTests.swift` : `testANewFailureEpisodeIsAuditedAgainAfterARecovery`
+  comptait toutes les lignes `batteryRelease`. Le run de rétablissement en écrit une (le
+  relâchement réussit), donc l'assertion finale à 2 était satisfaite par cette ligne et la panne
+  suivante n'était jamais exercée. Il compte désormais par résultat (`releaseFailed`).
+
+Durcir le test a révélé une seconde erreur : après un relâchement vérifié, `LidMutationService`
+passe le record à `ownedEnabled: false`, donc la politique répond `.notOwned` et n'essaie aucun
+relâchement — c'est B2 qui s'applique correctement. Le test modélise maintenant ce que fait
+réellement le réarmement (le record redevient nôtre) pour exercer la clé de dédoublonnage et non
+le contrôle de propriété.
+
+**Contre-épreuve** : en restaurant `outcome.auditedFailureKey ?? previous?.lastAuditedFailureKey`,
+le test échoue sur les DEUX assertions — la clé survit au rétablissement et la nouvelle panne
+n'est pas auditée.
+
+Suite : **452/452**, 0 warning. Bundle reconstruit, `plutil -lint` OK, `codesign --verify
+--strict` OK, chemin de log substitué, `backstop status --json` → `notFound` / `enforcing:false` /
+`operatorOptedOut:false`.

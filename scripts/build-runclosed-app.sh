@@ -76,10 +76,22 @@ cp Resources/com.benjaminbelaga.runclosed.helper.plist \
 # path: /tmp is world-writable and sticky, so another local account could
 # pre-create the name as a symlink and launchd would open it AS THIS USER.
 #
-# The replacement is escaped for `sed`: a home directory containing `&` (which
-# sed expands to the whole match) or the `|` delimiter would otherwise corrupt
-# the plist. Every other character is literal.
-_escaped_home="$(printf '%s' "$HOME" | sed 's/[&|\\]/\\&/g')"
+# Two escaping layers, because the value lands in an XML text node:
+#
+# 1. XML first — `&` and `<` are not legal raw in a plist text node. A home
+#    directory containing `&` (perfectly legal in a POSIX path) would otherwise
+#    produce a plist `plutil -lint` rejects, so the agent would never load.
+# 2. Then `sed` — `&` in the REPLACEMENT means "the whole match" and `|` is the
+#    delimiter, so both need a backslash for sed itself. Escaping for XML first
+#    turns `&` into `&amp;`, whose sed metacharacter has to be escaped again.
+#
+# Order matters: sed's escape of `&` must be applied to the XML-escaped text,
+# never the reverse (a `${_xml_home}` still holding `&` would be re-expanded by
+# sed into the match).
+_xml_home="${HOME//&/&amp;}"
+_xml_home="${_xml_home//</\&lt;}"
+_xml_home="${_xml_home//>/\&gt;}"
+_escaped_home="$(printf '%s' "$_xml_home" | sed 's/[&|\\]/\\&/g')"
 sed "s|__HOME__|${_escaped_home}|g" Resources/com.benjaminbelaga.runclosed.backstop.plist \
    > "$APP/Contents/Library/LaunchAgents/com.benjaminbelaga.runclosed.backstop.plist"
 # launchd creates the file but not the directory; without this the agent's

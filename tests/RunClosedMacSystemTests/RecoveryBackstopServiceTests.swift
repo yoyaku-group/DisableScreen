@@ -950,27 +950,45 @@ final class RecoveryBackstopServiceTests: XCTestCase {
         var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 6))
         rig.lid.failWrites = true
 
+        // Count FAILED releases specifically. Counting every `batteryRelease`
+        // line would also count the successful one the recovery run writes,
+        // so the final assertion would be satisfied by the recovery line and
+        // the new-episode path would never be exercised (review round 12).
+        func failedAudits() -> Int {
+            rig.auditLog.load().filter {
+                $0.step == "batteryRelease" && $0.outcome == "releaseFailed"
+            }.count
+        }
+
         _ = rig.service.run()
-        let afterFirst = rig.auditLog.load().filter { $0.step == "batteryRelease" }.count
-        XCTAssertEqual(afterFirst, 1, "the first failure is audited")
+        XCTAssertEqual(failedAudits(), 1, "the first failure is audited")
 
         rig.clock.advance(60)
         _ = rig.service.run()
-        XCTAssertEqual(rig.auditLog.load().filter { $0.step == "batteryRelease" }.count, 1,
-                       "the same failure repeating is deduped")
+        XCTAssertEqual(failedAudits(), 1, "the same failure repeating is deduped")
 
-        // Recovered: the battery step runs and finds a healthy release.
+        // Recovered: the battery step runs and the release now succeeds.
         rig.lid.failWrites = false
         _ = rig.service.run()
+        XCTAssertEqual(rig.flag.value, false, "the recovery run released the flag")
         XCTAssertNil(rig.heartbeat.load()?.lastAuditedFailureKey,
                      "a healthy battery step forgets the episode")
 
         // A NEW failure with the SAME reason is a new episode: it must be
         // audited, not compared against a key left over from the old one.
+        //
+        // The successful release above left the record at `ownedEnabled:
+        // false`, so the flag is now ON but NOT ours — the policy answers
+        // `.notOwned` and never attempts a release (B2, correctly). A real
+        // second episode starts after the guard's re-arm, which restores
+        // ownership; that is what this record models, so the assertion below
+        // exercises the dedupe key and not the ownership gate.
+        rig.flag.value = true
+        rig.lidStore.save(.init(bootID: "A", ownedEnabled: true, referenceState: "on"))
         rig.lid.failWrites = true
         rig.clock.advance(60)
         _ = rig.service.run()
-        XCTAssertEqual(rig.auditLog.load().filter { $0.step == "batteryRelease" }.count, 2,
+        XCTAssertEqual(failedAudits(), 2,
                        "a new failure episode gets its own audit line")
     }
 
