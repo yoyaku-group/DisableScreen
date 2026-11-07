@@ -305,7 +305,11 @@ final class RecoveryBackstopServiceTests: XCTestCase {
         XCTAssertTrue(rig.lid.calls.isEmpty, "B2: no write on a foreign record")
         XCTAssertEqual(rig.flag.value, true)
         XCTAssertNil(rig.sessionStore.load(), "the record still goes: nothing enforces it")
-        XCTAssertEqual(outcome.exitCode, .ok)
+        // NOT `ok`: the deadline passed, the record is gone, and the Mac is
+        // still being kept awake by a flag nothing enforces. That is the
+        // 2026-10-14 class, so the minute reports a failure — and the CLI must
+        // never read it as a healthy enforcer heartbeat (third review).
+        XCTAssertEqual(outcome.exitCode, .backendFailure)
     }
 
     /// The release failed (the write did not verify): the record is RETAINED,
@@ -351,7 +355,7 @@ final class RecoveryBackstopServiceTests: XCTestCase {
         guard case .completed(let report) = outcome else {
             return XCTFail("expected a completed run, got \(outcome)")
         }
-        XCTAssertEqual(report.batteryMutation, "released")
+        XCTAssertEqual(report.batteryMutation?.rawValue, "released")
         XCTAssertEqual(report.batteryReason, .criticalOwned)
         XCTAssertTrue(report.sleepAttempted)
         XCTAssertEqual(rig.flag.value, false)
@@ -395,7 +399,7 @@ final class RecoveryBackstopServiceTests: XCTestCase {
             return XCTFail("expected a completed run, got \(outcome)")
         }
         XCTAssertEqual(report.batteryReason, .emergencyStaleOwnership)
-        XCTAssertEqual(report.batteryMutation, "released")
+        XCTAssertEqual(report.batteryMutation?.rawValue, "released")
         XCTAssertEqual(rig.flag.value, false)
         XCTAssertEqual(rig.sleeper.count, 1)
     }
@@ -504,7 +508,7 @@ final class RecoveryBackstopServiceTests: XCTestCase {
         guard case .completed(let report) = outcome else {
             return XCTFail("expected a completed run, got \(outcome)")
         }
-        XCTAssertEqual(report.batteryMutation, "rearmWithheld")
+        XCTAssertEqual(report.batteryMutation?.rawValue, "rearmWithheld")
         XCTAssertEqual(rig.lid.calls, [], "no enable call, ever")
         XCTAssertEqual(rig.flag.value, false, "the flag stays OFF")
         let latch = rig.latchStore.load().latch
@@ -547,7 +551,7 @@ final class RecoveryBackstopServiceTests: XCTestCase {
             return XCTFail("expected a completed run, got \(outcome)")
         }
         XCTAssertEqual(report.session?.expiry, .retained("sudo: a password is required"))
-        XCTAssertEqual(report.batteryMutation, "releaseFailed", "the battery step ran anyway")
+        XCTAssertEqual(report.batteryMutation?.rawValue, "releaseFailed", "the battery step ran anyway")
         XCTAssertEqual(outcome.exitCode, .backendFailure)
         XCTAssertNotNil(rig.sessionStore.load(), "the session record is kept for a retry")
     }
@@ -652,18 +656,47 @@ final class RecoveryBackstopServiceTests: XCTestCase {
         XCTAssertEqual(rig.heartbeat.load()?.exitCode, 5)
     }
 
-    /// A `nothingToDo`/`appAlive` minute proves the agent STARTS, not that it
-    /// can ACT: it exits before the lock and before `pmset`. Until a locked run
-    /// has completed on this boot, the CLI must not treat it as an enforcer.
-    func testARunThatNeverTookTheLockIsNotProofItCanAct() {
+    /// A `nothingToDo` minute on a VIRGIN machine still takes the lock, and
+    /// that is what makes the CLI's proof reachable at all: with nothing on
+    /// disk every minute is a fast-path minute, so a rule that only counted a
+    /// protective section would never be satisfied — and the act that would
+    /// make the next minute take one is the very `session start --for` the
+    /// rule gates (third review, "circular proof").
+    ///
+    /// What it proves is precise: the agent starts, resolves its bundle and
+    /// can acquire `LidWriteLock`. It does NOT prove `pmset` works in that
+    /// context — that rail is the same `sudo -n` rule `session start` uses and
+    /// is proven by the session write itself.
+    func testAFastPathMinuteTakesTheLockAndIsProofTheAgentRuns() {
         var rig = makeRig(flag: nil, ownedBoot: nil, battery: Self.reading(false, 60))
-        _ = rig.service.run()   // nothingToDo: no lock
-        XCTAssertEqual(rig.heartbeat.load()?.completedLockedRun, false,
-                       "a fast-path minute ran no section")
+        _ = rig.service.run()   // nothingToDo: no pmset, no battery read, but the lock is taken
+        XCTAssertEqual(rig.heartbeat.load()?.completedLockedRun, true,
+                       "the fast path takes the lock and releases it")
         let freshness = RecoveryPolicy.runFreshnessFull(
             heartbeat: rig.heartbeat.freshnessInput(),
             currentBootID: "A", now: rig.clock.wall)
-        XCTAssertEqual(freshness, .noLockedRunYet)
+        XCTAssertEqual(freshness, .fresh(ageSeconds: 0))
+        XCTAssertTrue(freshness.isEnforcing)
+    }
+
+    /// A BUSY minute is the counter-case: it never got the lock, so it proves
+    /// the agent starts and nothing more. Grading it `fresh` would let the CLI
+    /// trust an enforcer that has never held the lock.
+    func testABusyMinuteIsNotProofTheAgentCanAct() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 60))
+        saveSession(rig, duration: 60)
+        rig.clock.advance(3_600)
+        // Another writer holds the lock for the whole interval.
+        let holder = LidWriteLock(url: rig.lockURL)
+        holder.withLock {
+            let outcome = rig.service.run()
+            XCTAssertEqual(outcome, .busy)
+        }
+        XCTAssertEqual(rig.heartbeat.load()?.completedLockedRun, false,
+                       "a minute that never held the lock proves nothing")
+        let freshness = RecoveryPolicy.runFreshnessFull(
+            heartbeat: rig.heartbeat.freshnessInput(),
+            currentBootID: "A", now: rig.clock.wall)
         XCTAssertFalse(freshness.isEnforcing)
     }
 
@@ -727,7 +760,7 @@ final class RecoveryBackstopServiceTests: XCTestCase {
         guard case .completed(let report) = outcome else {
             return XCTFail("expected a completed run, got \(outcome)")
         }
-        XCTAssertEqual(report.batteryMutation, "releaseFailed")
+        XCTAssertEqual(report.batteryMutation?.rawValue, "releaseFailed")
         XCTAssertEqual(outcome.exitCode, .backendFailure)
         XCTAssertEqual(outcome.exitCode.rawValue, 5)
         XCTAssertEqual(rig.heartbeat.load()?.exitCode, 5)
@@ -749,7 +782,7 @@ final class RecoveryBackstopServiceTests: XCTestCase {
                 recordBootID: "A", recordOwnedEnabled: true, currentBootID: "A",
                 session: nil,
                 now: SessionPolicy.Now(wall: epoch, continuousNanoseconds: 0, bootID: "A"))))
-        report.batteryMutation = "releaseRefused"
+        report.batteryMutation = .releaseRefused
         report.batteryReason = .criticalOwned
         report.batteryError = "notOwned"
 
@@ -759,11 +792,11 @@ final class RecoveryBackstopServiceTests: XCTestCase {
         // And the other battery outcomes, side by side, so a change to any of
         // them fails here rather than in production.
         var released = report
-        released.batteryMutation = "released"
+        released.batteryMutation = .released
         XCTAssertEqual(released.exitCode, .ok)
 
         var withheld = report
-        withheld.batteryMutation = "rearmWithheld"
+        withheld.batteryMutation = .rearmWithheld
         withheld.batteryError = "a re-arm is the app's"
         XCTAssertEqual(withheld.exitCode, .ok)
     }

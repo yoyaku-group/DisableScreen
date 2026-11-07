@@ -80,7 +80,7 @@ public struct RecoveryBackstopService {
         }
 
         /// What the battery step did, when it ran at all.
-        public var batteryMutation: String? {
+        public var batteryMutation: LowBatteryGuardService.ProtectiveMutation? {
             if case .completed(let report) = self { return report.batteryMutation }
             return nil
         }
@@ -92,7 +92,10 @@ public struct RecoveryBackstopService {
         public var session: SessionService.StepOutcome?
         /// Battery step: the policy reason and what the guard service did.
         public var batteryReason: LowBatteryPolicy.Reason?
-        public var batteryMutation: String?
+        /// Typed, not a `String`: comparing `rawValue` literals from another
+        /// file let a renamed case silently turn a FAILED critical release into
+        /// `.ok`, with no compile error.
+        public var batteryMutation: LowBatteryGuardService.ProtectiveMutation?
         public var batteryError: String?
         public var sleepAttempted = false
         public var sleepRC: Int32?
@@ -117,10 +120,15 @@ public struct RecoveryBackstopService {
             // that FAILED reported success — a protective action that did not
             // happen, announced as fine.
             switch batteryMutation {
-            case "releaseFailed": return .backendFailure
-            case "releaseRefused": return .refused
-            default: break
+            case .releaseFailed: return .backendFailure
+            case .releaseRefused: return .refused
+            case .released, .rearmWithheld, nil: break
             }
+            // A critical-battery release that is followed by a failed
+            // `pmset sleepnow` did not do its job: the Mac drains on. The
+            // record is gone by then, so the next minute takes the fast path
+            // and never retries — an exit 0 here would hide it for good.
+            if let rc = sleepRC, rc != 0 { return .backendFailure }
             if let error = batteryError, !error.isEmpty, batteryMutation == nil {
                 return .backendFailure
             }
@@ -205,7 +213,8 @@ public struct RecoveryBackstopService {
     ///
     /// Order matters and is the fast path, cheapest first:
     ///   1. file facts only — no record claiming the flag AND no session →
-    ///      exit 0 without a `pmset` call and without the lock;
+    ///      exit 0 with no `pmset` call and no battery read, inside a lock it
+    ///      takes and immediately releases (the CLI's proof of execution);
     ///   2. `app.lock` held → exit 0 (the app is in charge);
     ///   3. `LidWriteLock`, NON-blocking → busy → exit 75;
     ///   4. inside that one section: session step, then battery step.
@@ -225,8 +234,18 @@ public struct RecoveryBackstopService {
         let plan = RecoveryPolicy.plan(facts)
         let outcome: Outcome
         if !plan.needsWork {
-            // 1 — nothing is ours and nothing is scheduled: no lock, no pmset.
-            outcome = .nothingToDo
+            // 1 — nothing is ours and nothing is scheduled: no `pmset`, no
+            // battery read. It still TAKES the lock, does nothing inside and
+            // releases it.
+            //
+            // This is what keeps the CLI's proof from being circular: on a
+            // virgin machine every minute is `nothingToDo`, so a "has it ever
+            // run under the lock?" rule would never be satisfied by any minute
+            // — and the one act that would make the next minute take the lock
+            // is the very `session start --for` the rule gates. One `flock`
+            // per minute is free; the expensive reads are what the fast path
+            // actually avoids.
+            outcome = lock.tryWithLock { () -> Bool in true } == nil ? .busy : .nothingToDo
         } else if appIsAlive() {
             // 2 — the app is running: it owns enforcement, and the probe is free.
             outcome = .appAlive
@@ -240,8 +259,7 @@ public struct RecoveryBackstopService {
         // including the fast path and a busy minute. A minute that legitimately
         // did nothing still proves the agent itself is running, which is what
         // the CLI needs before trusting it to end a session deadline. One small
-        // atomic file, outside the lock: the fast path stays free of `pmset`
-        // and of `LidWriteLock`.
+        // atomic file, written AFTER the lock is released.
         writeHeartbeat(for: outcome, bootID: now.bootID)
         return outcome
     }
@@ -259,10 +277,16 @@ public struct RecoveryBackstopService {
         switch outcome {
         case .completed(let report):
             reported = report.rearmWithheldEpisode
-            // `.completed` is the ONLY outcome that ran inside `LidWriteLock`,
-            // so it is the only one that proves the agent can act.
+            // `.completed` ran a protective section inside `LidWriteLock`.
             locked = true
-        case .nothingToDo, .appAlive, .busy:
+        case .nothingToDo:
+            // Also a locked run: the fast path takes the lock, does nothing
+            // inside and releases it. Without this, a machine where nothing is
+            // ours yet would never satisfy the CLI's proof — the circularity
+            // the third review found.
+            reported = previous?.rearmWithheldReported ?? false
+            locked = true
+        case .appAlive, .busy:
             reported = previous?.rearmWithheldReported ?? false
             // Sticky on THIS boot only: a previous boot's locked run says
             // nothing about this one.
@@ -314,7 +338,7 @@ public struct RecoveryBackstopService {
         guard plan.battery else { return report }
         let battery = guardService.protectiveStep()
         report.batteryReason = battery.decision.reason
-        report.batteryMutation = battery.mutation?.rawValue
+        report.batteryMutation = battery.mutation
         report.batteryError = battery.mutationError
         report.sleepAttempted = battery.sleepAttempted
         report.sleepRC = battery.sleepRC
@@ -377,7 +401,7 @@ public struct RecoveryBackstopService {
                 obj["sessionReconciled"] = step.reconciled.map { String(describing: $0) } as Any? ?? NSNull()
             }
             obj["batteryReason"] = report.batteryReason?.rawValue as Any? ?? NSNull()
-            obj["batteryMutation"] = report.batteryMutation as Any? ?? NSNull()
+            obj["batteryMutation"] = report.batteryMutation?.rawValue as Any? ?? NSNull()
             obj["batteryError"] = report.batteryError as Any? ?? NSNull()
             obj["sleepAttempted"] = report.sleepAttempted
             obj["sleepRC"] = report.sleepRC as Any? ?? NSNull()

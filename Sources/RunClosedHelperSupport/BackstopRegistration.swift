@@ -244,7 +244,15 @@ public struct BackstopLifecycleService {
         default:
             ok = registrar.unregister()
         }
-        registrar.setOperatorOptedOut(true)
+        // The opt-out is what stops the app from registering the agent again at
+        // launch, so it may only be recorded once the agent is really GONE. On
+        // a failed `unregister()` the agent keeps firing every 60 s (releasing
+        // the flag, sleeping the Mac at critical battery) and, with the opt-out
+        // set, nothing would ever retry the teardown: the operator's "off"
+        // would be recorded and never executed. Leaving it unset makes the next
+        // app launch retry, which is the honest state — the CLI already
+        // reports `lastOperationSucceeded: false`.
+        if ok == nil || ok == true { registrar.setOperatorOptedOut(true) }
         var r = report()
         r.lastOperationSucceeded = ok
         return r

@@ -541,4 +541,31 @@ final class SessionGuardTickTests: XCTestCase {
         XCTAssertEqual(rig.flag.value, false)
         XCTAssertNil(rig.sessionStore.load())
     }
+
+    /// The DISCRIMINATING cross-boot case (third review): the record's own
+    /// continuous deadline is far in the FUTURE of the previous boot, while the
+    /// wall deadline is already past.
+    ///
+    /// A previous boot's continuous counter is meaningless here — it restarts
+    /// near zero, so `endsAtContinuous` (an absolute count from THAT boot)
+    /// reads as "not due yet" on a fresher uptime. If the deadline were judged
+    /// on it, the expired session would never end, `disablesleep 1` would stay
+    /// on and the Mac would never sleep: exactly the incident this lot closes.
+    /// The wall clock must decide.
+    func testACrossBootDeadlineIsJudgedOnTheWallClockNotAStaleContinuousCount() {
+        var rig = makeRig(flag: true, ownedBoot: "OLD",
+                          battery: Self.reading(false, 80))
+        rig.sessionStore.save(KeepAwakeSession(
+            startedAt: epoch.addingTimeInterval(-8 * 3600),
+            endsAtWall: epoch.addingTimeInterval(-3600),      // lapsed an hour ago
+            // Written by boot OLD: a huge absolute count, far beyond this
+            // boot's continuous clock — reads as "not due" if compared raw.
+            endsAtContinuous: ContinuousClockTimebase.nanoseconds(fromSeconds: 100_000),
+            bootID: "OLD"))
+        let step = LidWriteLock(url: rig.lockURL).withLock { rig.session.step() }
+        XCTAssertEqual(step.expiry, .ended(.released),
+                       "a previous boot's continuous deadline proves nothing on this one")
+        XCTAssertEqual(rig.flag.value, false)
+        XCTAssertNil(rig.sessionStore.load())
+    }
 }

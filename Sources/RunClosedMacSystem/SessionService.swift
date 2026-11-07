@@ -264,12 +264,22 @@ public struct SessionService {
         /// release must never look like a finished session.
         case retained(String)
 
-        /// The release or its readback failed: the record stays on disk for a
-        /// retry, and callers must report a failure (`SessionEndOutcome
-        /// .isFailure`), never a finished session.
+        /// The deadline was not enforced: the Mac is still being kept awake by
+        /// something, so callers must report a failure, never a healthy minute.
+        ///
+        /// Two shapes qualify. `.retained` (the write or its readback failed,
+        /// the record stays for a retry) and `.ended(.flagLeftOn)` — a refusal
+        /// that left the flag ON: the record is gone, but nothing turned the
+        /// flag off, so the Mac stays awake with no deadline and no RunClosed
+        /// owner. That is the 2026-10-14 class this backstop exists to close;
+        /// reporting it as `0 ok` would also feed a false "fresh" heartbeat to
+        /// the CLI's enforcer check.
         public var isFailure: Bool {
-            if case .retained = self { return true }
-            return false
+            switch self {
+            case .retained: return true
+            case .noSession, .notDue: return false
+            case .ended(let end): return !end.stopsKeepingAwake
+            }
         }
     }
 
