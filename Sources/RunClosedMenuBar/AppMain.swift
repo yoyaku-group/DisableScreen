@@ -4,6 +4,7 @@ import RunClosedCore
 import RunClosedMacSystem
 import RunClosedPersistence
 import RunClosedApp
+import RunClosedHelperSupport
 
 // G2d — menu-bar app, MUTATING (supersedes the G2a read-only tranche).
 //
@@ -107,6 +108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         ensureLivenessLock()
+        registerBackstop()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.target = self
         statusItem.button?.action = #selector(statusItemClicked(_:))
@@ -224,6 +226,87 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             store: OwnedLidAssertion(currentBootID: clock.bootID),
             priorProvider: { PowerReadback.lidStayAwake() }
         )
+    }
+
+    /// Register the ADR 024 recovery agent at launch when it is not registered
+    /// yet. Idempotent by construction (`registerIfNeeded` never re-registers a
+    /// pending or enabled service), and NEVER blocking: registration ends in
+    /// `requiresApproval` on a fresh machine, which is a state to surface (the
+    /// popup's backstop line + the Login Items deep link), not to fight.
+    ///
+    /// Off the main thread: `SMAppService` calls can take a moment and the menu
+    /// bar must not stall on launch. A failure is logged, never swallowed into
+    /// a phantom "enabled".
+    private func registerBackstop() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            // launchd writes the agent's diagnostics into this directory but
+            // creates only the FILE, and the bundle may have been built on
+            // another machine — so it is prepared here, at runtime, not only
+            // in the build script.
+            RunClosedBackstopDescriptor.prepareLogDirectory()
+            // `automatic: true` — an app launch must never undo an explicit
+            // `runclosed backstop unregister`.
+            let report = BackstopLifecycleService(registrar: SMAppServiceAgentRegistrar())
+                .registerIfNeeded(automatic: true)
+            DispatchQueue.main.async {
+                if report.lastOperationSucceeded == false {
+                    FileHandle.standardError.write(Data(
+                        "[RunClosed] backstop registration failed (status=\(report.status.rawValue))\n".utf8))
+                } else if report.status == .requiresApproval {
+                    FileHandle.standardError.write(Data(
+                        "[RunClosed] backstop registered, waiting for approval in System Settings → Login Items\n".utf8))
+                }
+                self?.rebuildPanelIfVisible()
+            }
+        }
+    }
+
+    /// The backstop's state for the popup (ADR 024). Read on the main thread:
+    /// `SMAppService.status` is a cheap, in-process dictionary lookup (it is
+    /// the same call the login-item row already makes on every rebuild).
+    ///
+    /// It applies the SAME rule as the CLI: registration (`enabled`) is not
+    /// enough, the agent must also have proven it RUNS (a fresh, successful
+    /// heartbeat on this boot). Showing nothing on `enabled` alone would tell
+    /// the operator the Mac is protected while they quit the app, in exactly
+    /// the case the heartbeat exists to catch — an approved agent whose program
+    /// never resolves.
+    private func backstopRow() -> PopupState.BackstopRow {
+        let report = BackstopLifecycleService(registrar: SMAppServiceAgentRegistrar()).report()
+        let status = report.status
+        if status.isProtecting {
+            let freshness = RecoveryPolicy.runFreshness(
+                heartbeat: BackstopHeartbeatStore().freshnessInput(),
+                currentBootID: clock.bootID,
+                now: Date())
+            guard !freshness.isEnforcing else {
+                // The net is genuinely up: the popup stays quiet.
+                return PopupState.BackstopRow(status: status.rawValue, summary: nil,
+                                             needsApproval: false)
+            }
+            // Registered and approved, but not provably running.
+            return PopupState.BackstopRow(
+                status: status.rawValue,
+                summary: L10n.t("Recovery backstop enabled but not running (see log)"),
+                needsApproval: false)
+        }
+        return PopupState.BackstopRow(
+            status: status.rawValue,
+            // The operator's own "off" is named. Without it the row reads
+            // "off (see log)" forever and points at a System Settings screen
+            // where nothing will ever be waiting (review round 7).
+            summary: report.operatorOptedOut
+                ? L10n.t("Recovery backstop off — you turned it off")
+                : (status == .requiresApproval
+                   ? L10n.t("Recovery backstop off — approve it in System Settings")
+                   : L10n.t("Recovery backstop off (see log)")),
+            needsApproval: status == .requiresApproval)
+    }
+
+    /// Open System Settings → Login Items so the operator can approve the
+    /// `requiresApproval` backstop agent. Performs no privileged work.
+    @objc func openBackstopApproval(_ sender: Any?) {
+        BackstopLifecycleService(registrar: SMAppServiceAgentRegistrar()).openApprovalSettings()
     }
 
     private func recoverAtLaunch() {
@@ -541,7 +624,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             loginItemAvailable: LoginItemControl.isActionable(),
             leasesSummary: summary,
             busy: busy,
-            session: sessionRow()
+            session: sessionRow(),
+            backstop: backstopRow()
         )
     }
 
@@ -676,8 +760,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         existing: sessionStore.load(), now: now))
                 }
                 switch r {
-                case .success where target:
+                case .success(let op) where target && op.state == .verified:
                     switchedOn()
+                case .success(let op) where target:
+                    // The write reported success but its readback did not
+                    // confirm the flag ON (`pending`/`unknown`/`conflict`): for
+                    // the session record this is a FAILURE, like the `.failure`
+                    // branch below. Recording an indefinite session here would
+                    // put a deadline-less "running session" on every surface
+                    // for a flag that is not observed ON — and the record is
+                    // what `status`, the popup and the log read.
+                    FileHandle.standardError.write(Data(
+                        "[RunClosed] lid -> on: state=\(op.state.rawValue) readback not verified; no session recorded\n".utf8))
                 case .success:
                     sessionStore.clear()
                 case .failure(.noChangeRequested(let requested)) where requested:

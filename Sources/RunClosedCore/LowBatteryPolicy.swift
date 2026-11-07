@@ -96,17 +96,32 @@ public enum LowBatteryPolicy {
         /// already tried this episode: later ticks keep retrying the release
         /// but do not re-run `sleepnow` / re-notify every 30 s.
         public var failedReleaseSleepTried: Bool
+        /// The same once-per-episode sleep, recorded by a caller that may only
+        /// PROTECT (the recovery backstop, ADR 024).
+        ///
+        /// It has to be a SEPARATE field, not a reuse of
+        /// `failedReleaseSleepTried`: that one is also the app's
+        /// notify-once latch, and the backstop deliberately does not consume
+        /// the operator's warnings — it shows none (review round 10). Restoring
+        /// it wholesale, though, erased the backstop's own memory of having
+        /// slept, so a persistently failing release put the Mac to sleep again
+        /// every 60 s, forever, even after the operator woke it. Sleep
+        /// suppression and notification suppression are two states.
+        public var protectiveSleepTried: Bool
 
         public init(warnedLow: Bool = false, warnedCritical: Bool = false,
-                    releasedByGuard: Bool = false, failedReleaseSleepTried: Bool = false) {
+                    releasedByGuard: Bool = false, failedReleaseSleepTried: Bool = false,
+                    protectiveSleepTried: Bool = false) {
             self.warnedLow = warnedLow
             self.warnedCritical = warnedCritical
             self.releasedByGuard = releasedByGuard
             self.failedReleaseSleepTried = failedReleaseSleepTried
+            self.protectiveSleepTried = protectiveSleepTried
         }
 
         private enum CodingKeys: String, CodingKey {
-            case warnedLow, warnedCritical, releasedByGuard, failedReleaseSleepTried
+            case warnedLow, warnedCritical, releasedByGuard, failedReleaseSleepTried,
+                 protectiveSleepTried
         }
 
         /// Tolerant decoding: a key added by a later version is optional, so
@@ -117,6 +132,7 @@ public enum LowBatteryPolicy {
             warnedCritical = try c.decodeIfPresent(Bool.self, forKey: .warnedCritical) ?? false
             releasedByGuard = try c.decodeIfPresent(Bool.self, forKey: .releasedByGuard) ?? false
             failedReleaseSleepTried = try c.decodeIfPresent(Bool.self, forKey: .failedReleaseSleepTried) ?? false
+            protectiveSleepTried = try c.decodeIfPresent(Bool.self, forKey: .protectiveSleepTried) ?? false
         }
 
         /// Write-from-outcome (B3): set only after a readback-verified release.
@@ -235,6 +251,7 @@ public enum LowBatteryPolicy {
                 next.warnedLow = false
                 next.warnedCritical = false
                 next.failedReleaseSleepTried = false
+                next.protectiveSleepTried = false
             }
             if latch.releasedByGuard, !next.releasedByGuard {
                 return (Decision(action: .none, reason: .rearmObservedOn, level: lvl), next)

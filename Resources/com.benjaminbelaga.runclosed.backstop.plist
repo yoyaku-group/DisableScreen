@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- ADR 024 recovery backstop — a PER-USER LaunchAgent registered through
+         SMAppService.agent(plistName:). Lives in the app bundle at
+         Contents/Library/LaunchAgents/. The Label MUST match
+         RunClosedBackstopDescriptor.agentLabel. -->
+    <key>Label</key>
+    <string>com.benjaminbelaga.runclosed.backstop</string>
+
+    <!-- BundleProgram — the path is relative to the bundle root, the same
+         rule the helper daemon follows (Apple: "make the path relative to the
+         bundle"). The value MUST match
+         RunClosedBackstopDescriptor.bundleProgramRelativePath (a unit test
+         asserts this). -->
+    <key>BundleProgram</key>
+    <string>Contents/MacOS/runclosed-cli</string>
+
+    <!-- ProgramArguments — argv[0] is the program name, then the one
+         protective command. `--backstop` is mandatory: without it `recover`
+         refuses (exit 64), so a hand-edited plist cannot turn this job into a
+         bare mutation. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>runclosed-cli</string>
+        <string>recover</string>
+        <string>--backstop</string>
+    </array>
+
+    <!-- Every minute. A crashed app therefore costs at most ~60 s of an
+         unprotected awake Mac before the deadline or the battery rule fires. -->
+    <key>StartInterval</key>
+    <integer>60</integer>
+
+    <!-- Run once at load as well, so registering the agent takes effect
+         immediately instead of at the next interval. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- No KeepAlive: the job is a one-shot every 60 s, and KeepAlive on a
+         short-lived process would respawn it in a tight loop. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <!-- It writes nothing but the audit line; it never needs to be reniced
+         below the system's background policy. -->
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <!-- launchd owns the agent's stdout/stderr; without these two keys a
+         refused run (the macOS 26 `notFound` state, a `pmset` that fails in
+         this context) is DISCARDED, and the operator has no way to see why the
+         net is not protecting them. Diagnostics go to a file rather than the
+         audit log, which only records actions.
+
+         NO StandardErrorPath/StandardOutPath. Those keys are FIXED bytes in a
+         signed bundle, so any path they name is the build machine's: a bundle
+         built by another account would send the agent's diagnostics into a
+         directory the running user may not own, or fail the open and lose them
+         — launchd expands no variable here. The agent therefore writes its own
+         trace under NSHomeDirectory()/Library/Logs/RunClosed/backstop.log,
+         resolved at RUNTIME by the process launchd started as the right user
+         (`RunClosedBackstopDescriptor.appendAgentLog`). Its PROTECTIVE audit
+         trail (recovery_audit.jsonl) was always written that way and is
+         unaffected. A unit test refuses both keys, so this cannot regress. -->
+
+</dict>
+</plist>

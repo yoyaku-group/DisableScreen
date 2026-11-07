@@ -57,13 +57,32 @@ test -x "$BIN/runclosed"        || { echo "missing $BIN/runclosed" >&2; exit 1; 
 
 echo "==> assembling $APP"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Library/LaunchDaemons"
+mkdir -p "$APP/Contents/MacOS" \
+         "$APP/Contents/Library/LaunchDaemons" \
+         "$APP/Contents/Library/LaunchAgents"
 
 cp "$BIN/RunClosedMenuBar" "$APP/Contents/MacOS/RunClosed"
 cp "$BIN/runclosed"        "$APP/Contents/MacOS/runclosed-cli"
 cp "$BIN/RunClosedHelper"  "$APP/Contents/MacOS/runclosed-privileged-helper"
 cp Resources/com.benjaminbelaga.runclosed.helper.plist \
    "$APP/Contents/Library/LaunchDaemons/"
+# ADR 024 — the per-user recovery backstop agent. `SMAppService.agent(
+# plistName:)` resolves it against this bundle's LaunchAgents directory, and
+# its BundleProgram points back at the runclosed-cli copied above, so the job
+# dies with the app instead of surviving a deleted bundle.
+#
+# The plist carries NO log path and needs no substitution. `StandardOutPath`
+# and `StandardErrorPath` are fixed bytes in a signed bundle, so whatever path
+# they name belongs to the machine that BUILT the bundle: installed by another
+# account, the agent would write its diagnostics into a directory the running
+# user may not own, or fail the open and lose them. launchd expands no variable
+# there, so there is no correct value to substitute. The agent writes its own
+# trace under NSHomeDirectory()/Library/Logs/RunClosed/backstop.log, resolved at
+# RUNTIME by the process launchd started as the right user (review round 16).
+cp Resources/com.benjaminbelaga.runclosed.backstop.plist \
+   "$APP/Contents/Library/LaunchAgents/"
+# The directory itself is created at runtime by `prepareLogDirectory()`, so a
+# bundle installed on another machine is not left with a missing directory.
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -112,6 +131,7 @@ codesign --verify --strict --verbose=1 "$APP"
 
 echo "==> verify"
 plutil -lint "$APP/Contents/Library/LaunchDaemons/"*.plist
+plutil -lint "$APP/Contents/Library/LaunchAgents/"*.plist
 echo "--- structure"
 (cd "$OUT_DIR" && find RunClosed.app -print | sort)
 echo "--- bundle signature"
