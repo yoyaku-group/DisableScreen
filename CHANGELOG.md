@@ -43,7 +43,15 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   about an approved-but-never-running agent. A busy minute (another writer held
   the lock) no longer counts as proof the agent could act, and unregistering is
   remembered as an explicit operator decision so the next app launch does not
-  silently register the agent again. Known limit, stated in the README: nothing
+  silently register the agent again — that decision is now SHOWN (`backstop
+  status`, the popup and the refusal message name it) instead of reading as
+  "never registered", which pointed the operator at a System Settings screen
+  where nothing would ever appear. An agent minute pre-empted by another writer
+  (exit 75) is reported as busy rather than as a failed run. The agent's
+  diagnostics go to `~/Library/Logs/RunClosed/`, never `/tmp`: that directory is
+  world-writable, so a fixed name there let another local account pre-create it
+  as a symlink and have launchd write to a file of its choosing with your
+  privileges. Known limit, stated in the README: nothing
   protects the Mac while no user is logged in.
 
 ### Fixed
