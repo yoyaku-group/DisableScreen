@@ -1071,3 +1071,28 @@ Le second WARN (chemins de diagnostic liés au compte de build) est la limite co
 non corrigée et documentée dans le plist, PROGRESS, cet onglet et l'ADR.
 
 Suite : **454/454**, 0 warning.
+
+## Relecture tour 15 — le flood d'audit de l'étape session (2026-11-07)
+
+- `Sources/RunClosedMacSystem/RecoveryBackstopService.swift` + `BackstopHeartbeatStore.swift` —
+  `.retained` garde le record exprès pour que la minute suivante réessaie, donc un relâchement qui
+  échoue en boucle écrivait la MÊME ligne `sessionExpiry`/`retained` toutes les 60 s : 1 440 par
+  jour, exactement le flood que le dédoublonnage de l'étape batterie empêche depuis le tour 9, mais
+  l'étape session n'en avait pas. Clé dédiée `lastAuditedSessionFailureKey`, séparée de celle de la
+  batterie — les deux étapes auditent indépendamment, une panne batterie ne doit pas taire une panne
+  de session — avec le même contrat tri-état via `sessionStepRan`.
+
+  Le dédoublonnage ne change PAS le code de sortie : une échéance non appliquée reste une panne à
+  chaque minute, asserté dans le test. Un log silencieux ne doit jamais devenir une minute saine.
+
+  Tests : `testARetainedSessionFailureIsAuditedOncePerEpisode` (4 minutes, 1 ligne, sortie 5 à
+  chaque fois) et `testANewRetainedEpisodeIsAuditedAfterTheRecordIsGone` (la clé est oubliée quand
+  le record disparaît, une nouvelle session qui échoue de la même façon est auditée).
+  **Contre-épreuve mesurée** — sans le `return`, le premier test lit 4 lignes au lieu d'1.
+
+Deux autres WARN du même tour sont des limites déjà consignées, non re-corrigées : la course
+`backstop unregister` / `session start` (résidu documenté au tour 11 — le chemin local instantané est
+fermé, la révocation dans Réglages Système pendant la même fenêtre ne l'est pas) et les chemins de
+diagnostic liés au compte de build (tour 13).
+
+Suite : **456/456**, 0 warning.

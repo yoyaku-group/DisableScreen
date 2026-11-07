@@ -67,23 +67,32 @@ public struct BackstopHeartbeatStore {
         /// sudoers rule holds the condition every 60 s, and 1 440 identical
         /// audit lines a day is the flood the rule exists to stop (round 9).
         public var lastAuditedFailureKey: String?
+        /// The same dedupe, for a SESSION expiry whose deadline cannot be
+        /// enforced. `.retained` keeps the record precisely so the next minute
+        /// retries, so a release that keeps failing writes the same line 1 440
+        /// times a day — the same flood, from the other step (review round 15).
+        /// Kept apart from `lastAuditedFailureKey` because the two steps audit
+        /// independently: a battery failure must not suppress a session one.
+        public var lastAuditedSessionFailureKey: String?
         public init(schemaVersion: Int = kBackstopHeartbeatSchemaVersion,
                     at: Date,
                     bootID: String,
                     exitCode: Int32,
                     rearmWithheldReported: Bool = false,
-                    lastAuditedFailureKey: String? = nil) {
+                    lastAuditedFailureKey: String? = nil,
+                    lastAuditedSessionFailureKey: String? = nil) {
             self.schemaVersion = schemaVersion
             self.at = at
             self.bootID = bootID
             self.exitCode = exitCode
             self.rearmWithheldReported = rearmWithheldReported
             self.lastAuditedFailureKey = lastAuditedFailureKey
+            self.lastAuditedSessionFailureKey = lastAuditedSessionFailureKey
         }
 
         private enum CodingKeys: String, CodingKey {
             case schemaVersion, at, bootID, exitCode, rearmWithheldReported,
-                 lastAuditedFailureKey
+                 lastAuditedFailureKey, lastAuditedSessionFailureKey
         }
 
         /// Tolerant decoding: a key a later version adds must not make the file
@@ -99,6 +108,8 @@ public struct BackstopHeartbeatStore {
                 Bool.self, forKey: .rearmWithheldReported) ?? false
             lastAuditedFailureKey = try c.decodeIfPresent(
                 String.self, forKey: .lastAuditedFailureKey)
+            lastAuditedSessionFailureKey = try c.decodeIfPresent(
+                String.self, forKey: .lastAuditedSessionFailureKey)
         }
     }
 

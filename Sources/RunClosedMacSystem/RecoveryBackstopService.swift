@@ -110,6 +110,20 @@ public struct RecoveryBackstopService {
             if case .completed(let report) = self { return report.batteryStepRan }
             return false
         }
+
+        /// The repeating SESSION-expiry failure key, same tri-state contract as
+        /// `auditedFailureKey` and gated by `sessionStepRan` (review round 15).
+        public var auditedSessionFailureKey: String? {
+            if case .completed(let report) = self { return report.auditedSessionFailureKey }
+            return nil
+        }
+
+        /// Whether the session step ran. A run with no session to expire never
+        /// touches the session key, so it must carry it forward.
+        public var sessionStepRan: Bool {
+            if case .completed(let report) = self { return report.sessionStepRan }
+            return false
+        }
     }
 
     /// What the protected section did. `nil` fields are steps that did not run.
@@ -138,6 +152,13 @@ public struct RecoveryBackstopService {
         /// proves nothing about the failure episode, so the heartbeat must
         /// carry its key forward (see `Outcome.batteryStepRan`).
         public var batteryStepRan = false
+        /// The identifier of a repeating SESSION-expiry failure this run
+        /// audited, plus whether the session step ran at all — the same
+        /// once-per-episode discipline the battery step uses. `.retained` keeps
+        /// the record so the next minute retries, which is correct, but it also
+        /// repeats the same audit line 1 440 times a day (review round 15).
+        public var auditedSessionFailureKey: String?
+        public var sessionStepRan = false
 
         public init(plan: RecoveryPolicy.Plan) {
             self.plan = plan
@@ -321,12 +342,23 @@ public struct RecoveryBackstopService {
         } else {
             auditedKey = outcome.auditedFailureKey
         }
+        // Same tri-state for the session step: a minute with no session to
+        // expire proved nothing about the retained-record failure, so it must
+        // not forget it; a session step that ran and is no longer retained
+        // clears it.
+        let auditedSessionKey: String?
+        if !outcome.sessionStepRan {
+            auditedSessionKey = previous?.lastAuditedSessionFailureKey
+        } else {
+            auditedSessionKey = outcome.auditedSessionFailureKey
+        }
         let saved = heartbeatStore.save(.init(
             at: wallClock(),
             bootID: bootID,
             exitCode: outcome.exitCode.rawValue,
             rearmWithheldReported: reported,
-            lastAuditedFailureKey: auditedKey))
+            lastAuditedFailureKey: auditedKey,
+            lastAuditedSessionFailureKey: auditedSessionKey))
         guard !saved else { return }
         // Not fatal — the protective action already happened — but a heartbeat
         // that cannot be written silently breaks two things: the CLI refuses
@@ -356,7 +388,26 @@ public struct RecoveryBackstopService {
         if plan.session {
             let step = sessionService.step()
             report.session = step
-            if auditSession(step, recordBootID: recordBootID) { report.audited = true }
+            // Set BEFORE the decision, so a `nil` key below means "measured,
+            // nothing repeating" rather than "the step never ran".
+            report.sessionStepRan = true
+            let wrote = auditSession(step, recordBootID: recordBootID,
+                                     previousKey: previous?.lastAuditedSessionFailureKey)
+            switch step.expiry {
+            case .retained(let message):
+                // Carried only while the SAME record keeps failing the SAME
+                // way; any other outcome leaves this nil, which clears the key.
+                report.auditedSessionFailureKey =
+                    "sessionExpiryRetained:\(recordBootID):\(message)"
+                // A deduped line still means the deadline was NOT enforced: the
+                // failure is real whether or not it was written again, and the
+                // exit code already reports it.
+                report.audited = true
+            case .ended:
+                report.audited = true
+            default:
+                if wrote { report.audited = true }
+            }
         }
 
         // — Battery step: only while our record claims the flag. The decision
@@ -475,9 +526,18 @@ public struct RecoveryBackstopService {
 
     /// One line for the session step, and ONLY when it did something: a
     /// running session that is not due yet is a no-op minute.
+    ///
+    /// `previousKey` is the session-failure key already audited, and
+    /// `recordBootID` doubles as the episode identity for a retained record.
+    /// `.retained` is the only REPEATING outcome — the record stays so the next
+    /// minute retries, which is right, but the same line would then land 1 440
+    /// times a day. Same once-per-episode rule as the battery step (review
+    /// round 15). A different error message is a different episode and always
+    /// writes, so a changed failure is never hidden behind the old one.
     @discardableResult
     private mutating func auditSession(_ step: SessionService.StepOutcome,
-                                       recordBootID: String) -> Bool {
+                                       recordBootID: String,
+                                       previousKey: String?) -> Bool {
         let boot = step.bootID.isEmpty ? sessionService.continuous.bootID : step.bootID
         switch step.expiry {
         case .noSession, .notDue:
@@ -504,6 +564,9 @@ public struct RecoveryBackstopService {
                 error: end.failureMessage))
             return true
         case .retained(let message):
+            // The key names the episode: the same record failing the same way.
+            let key = "sessionExpiryRetained:\(recordBootID):\(message)"
+            if previousKey == key { return false }
             audit(.init(
                 ts: timestamp(),
                 bootID: boot,

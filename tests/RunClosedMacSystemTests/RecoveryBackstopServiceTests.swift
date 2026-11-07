@@ -1047,6 +1047,70 @@ final class RecoveryBackstopServiceTests: XCTestCase {
                        "the backstop shows no notification, so it must not consume it")
     }
 
+    /// Review round 15 (WARNING): `.retained` keeps the record precisely so the
+    /// next minute retries, so a release that keeps failing wrote the same
+    /// audit line every 60 s — 1 440 identical lines a day, the flood the
+    /// battery step's dedupe already prevented. The session step had no
+    /// equivalent.
+    func testARetainedSessionFailureIsAuditedOncePerEpisode() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 60))
+        saveSession(rig, duration: 60)
+        rig.clock.advance(3_600)
+        rig.lid.failWrites = true
+
+        func retainedLines() -> Int {
+            rig.auditLog.load().filter {
+                $0.step == "sessionExpiry" && $0.outcome == "retained"
+            }.count
+        }
+
+        _ = rig.service.run()
+        XCTAssertEqual(retainedLines(), 1, "the first retained failure is audited")
+
+        for _ in 0..<3 {
+            rig.clock.advance(60)
+            _ = rig.service.run()
+        }
+        XCTAssertEqual(retainedLines(), 1,
+                       "a persistently failing release must not write 1 440 lines a day")
+        XCTAssertNotNil(rig.heartbeat.load()?.lastAuditedSessionFailureKey)
+
+        // The failure is still reported as a failure every minute: deduping the
+        // LOG must not turn a non-enforced deadline into a healthy minute.
+        rig.clock.advance(60)
+        XCTAssertEqual(rig.service.run().exitCode, .backendFailure)
+    }
+
+    /// ...and the key is forgotten once the failure stops, so a LATER episode
+    /// with the same message is audited again — the tri-state contract.
+    func testANewRetainedEpisodeIsAuditedAfterTheRecordIsGone() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 60))
+        saveSession(rig, duration: 60)
+        rig.clock.advance(3_600)
+        rig.lid.failWrites = true
+        _ = rig.service.run()
+        XCTAssertNotNil(rig.heartbeat.load()?.lastAuditedSessionFailureKey)
+
+        // The release now succeeds: the session ends and the record is gone.
+        rig.lid.failWrites = false
+        _ = rig.service.run()
+        XCTAssertNil(rig.heartbeat.load()?.lastAuditedSessionFailureKey,
+                     "a session step that no longer retains forgets the episode")
+
+        // A new session fails the same way: a new episode, a new line. The flag
+        // has to read ON again, or the release answers `.flagAlreadyOff` and
+        // ends the session instead of retaining it.
+        rig.flag.value = true
+        rig.lidStore.save(.init(bootID: "A", ownedEnabled: true, referenceState: "on"))
+        saveSession(rig, duration: 60, continuousStart: 2_000)
+        rig.clock.advance(3_600)
+        rig.lid.failWrites = true
+        _ = rig.service.run()
+        XCTAssertEqual(rig.auditLog.load().filter {
+            $0.step == "sessionExpiry" && $0.outcome == "retained"
+        }.count, 2)
+    }
+
     // MARK: — Exit codes
 
     func testExitCodeValues() {
