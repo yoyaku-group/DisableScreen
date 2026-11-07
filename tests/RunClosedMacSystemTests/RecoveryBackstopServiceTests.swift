@@ -94,7 +94,8 @@ final class RecoveryBackstopServiceTests: XCTestCase {
                          ownedBoot: String?,
                          battery: BatteryState,
                          appAlive: Bool = false,
-                         bootID: String = "A") -> Rig {
+                         bootID: String = "A",
+                         batteryGuardEnabled: Bool = true) -> Rig {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("runclosed-backstop-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -149,6 +150,7 @@ final class RecoveryBackstopServiceTests: XCTestCase {
             auditLog: auditLog,
             heartbeatStore: heartbeatStore,
             appIsAlive: { aliveBox.alive },
+            batteryGuardEnabled: { batteryGuardEnabled },
             wallClock: { clock.wall })
 
         return Rig(service: service, lid: lid, sleeper: sleeper, flag: flagBox, clock: clock,
@@ -408,6 +410,87 @@ final class RecoveryBackstopServiceTests: XCTestCase {
         XCTAssertTrue(rig.auditLog.load().isEmpty)
     }
 
+    // MARK: — The operator's battery kill switch (round 2 addendum)
+
+    /// The app skips the battery step when the guard is switched off and still
+    /// runs the session step. The backstop is the same guard, so it must obey
+    /// the same switch — otherwise an operator who turned it off would still
+    /// get a `disablesleep 0` plus `pmset sleepnow` from launchd a minute later.
+    func testTheBatteryKillSwitchStopsTheReleaseAndTheSleep() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 6),
+                          batteryGuardEnabled: false)
+        let outcome = rig.service.run()
+        XCTAssertEqual(outcome.exitCode, .ok)
+        XCTAssertEqual(rig.flag.value, true, "the flag must stay ON when the guard is off")
+        XCTAssertTrue(rig.lid.calls.isEmpty, "no release may be attempted")
+        XCTAssertEqual(rig.sleeper.count, 0, "and no pmset sleepnow")
+        XCTAssertEqual(outcome.batteryMutation, nil, "the battery step did not run")
+        XCTAssertTrue(rig.auditLog.load().filter { $0.step == "batteryRelease" }.isEmpty)
+    }
+
+    /// …but the kill switch must NOT switch deadlines off with it: a due
+    /// session still ends, the same split the app makes.
+    func testTheBatteryKillSwitchDoesNotStopTheSessionStep() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 6),
+                          batteryGuardEnabled: false)
+        saveSession(rig, duration: 60)
+        rig.clock.advance(3_600)
+        let outcome = rig.service.run()
+        guard case .completed(let report) = outcome else {
+            return XCTFail("expected a completed run, got \(outcome)")
+        }
+        XCTAssertEqual(report.session?.expiry, .ended(.released),
+                       "the deadline is not the battery guard's to switch off")
+        XCTAssertEqual(rig.flag.value, false, "released by the session step")
+        XCTAssertNil(rig.sessionStore.load())
+        XCTAssertEqual(rig.sleeper.count, 0, "the session step never sleeps the Mac")
+        XCTAssertEqual(report.batteryMutation, nil, "…and the battery step still did not run")
+    }
+
+    /// With the guard off and nothing scheduled, the minute stays free: no
+    /// lock, no `pmset`.
+    func testTheKillSwitchKeepsALoneClaimOnTheFastPath() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 6),
+                          batteryGuardEnabled: false)
+        XCTAssertEqual(rig.service.run(), .nothingToDo)
+        XCTAssertTrue(rig.lid.calls.isEmpty)
+        XCTAssertEqual(rig.sleeper.count, 0)
+    }
+
+    /// The switch defaults to ON, so the production wiring is unchanged for
+    /// everyone who never touched it.
+    func testTheGuardDefaultsToEnabled() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 6))
+        _ = rig.service.run()
+        XCTAssertEqual(rig.flag.value, false, "a critical battery still releases by default")
+        XCTAssertEqual(rig.sleeper.count, 1)
+    }
+
+    // MARK: — The backstop never consumes the app's warnings
+
+    /// The backstop shows NO notification, so it must not persist the
+    /// warn-once latch bits on the app's behalf. If it did, the app's next tick
+    /// would answer `.alreadyWarned` after the operator reopens it, and the
+    /// low-battery warning would never be shown — in the one situation where
+    /// they most need it.
+    func testABackstopWarningMinuteDoesNotConsumeTheAppsLatch() {
+        // 15 % on battery, flag ours: `LowBatteryPolicy` warns (<= 20 %) and
+        // would set `warnedLow`.
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 15))
+        _ = rig.service.run()
+        let latch = rig.latchStore.load().latch
+        XCTAssertFalse(latch.warnedLow,
+                       "the backstop delivers no warning, so it must leave the app's to deliver")
+    }
+
+    /// The re-arm debt IS this caller's to write: it is the app's signal to
+    /// re-enable the flag, not a claim that anyone was informed.
+    func testABackstopReleaseStillRecordsTheRearmDebt() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 6))
+        _ = rig.service.run()
+        XCTAssertTrue(rig.latchStore.load().latch.releasedByGuard)
+    }
+
     // MARK: — Never an ON action
 
     /// THE invariant: a pending re-arm debt with a good battery and AC power is
@@ -608,19 +691,25 @@ final class RecoveryBackstopServiceTests: XCTestCase {
     /// enforcing. This ties the writer and the reader together — a heartbeat
     /// the CLI would reject makes the agent unable to lift the ADR 023
     /// refusal, which is the failure this record exists to prevent.
+    ///
+    /// It uses `runFreshnessFull` on `freshnessInput()`, the SAME pair every
+    /// production caller uses. An earlier version graded the run with the
+    /// short wrapper, which hard-coded the locked-run proof — so it passed on a
+    /// rule production never applies.
     func testARealRunProducesAHeartbeatTheCLIAcceptsAsEnforcing() {
-        var rig = makeRig(flag: nil, ownedBoot: nil, battery: Self.reading(false, 60))
+        // A run that takes the lock: a critical battery with our flag gives it
+        // something to do.
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 6))
         _ = rig.service.run()
-        let hb = rig.heartbeat.load()
-        let freshness = RecoveryPolicy.runFreshness(
-            heartbeat: hb.map { (at: $0.at, bootID: $0.bootID, exitCode: $0.exitCode) },
+        let freshness = RecoveryPolicy.runFreshnessFull(
+            heartbeat: rig.heartbeat.freshnessInput(),
             currentBootID: "A",
             now: rig.clock.wall)
         XCTAssertTrue(freshness.isEnforcing, "got \(freshness)")
 
         // A heartbeat from another boot is NOT enforcing, even if identical.
-        let otherBoot = RecoveryPolicy.runFreshness(
-            heartbeat: hb.map { (at: $0.at, bootID: $0.bootID, exitCode: $0.exitCode) },
+        let otherBoot = RecoveryPolicy.runFreshnessFull(
+            heartbeat: rig.heartbeat.freshnessInput(),
             currentBootID: "B",
             now: rig.clock.wall)
         XCTAssertFalse(otherBoot.isEnforcing)

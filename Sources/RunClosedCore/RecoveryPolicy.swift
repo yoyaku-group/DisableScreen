@@ -40,6 +40,11 @@ public enum RecoveryPolicy {
         /// `LowBatteryGuardService` re-reads and re-decides from live values.
         public var battery: LowBatteryPolicy.Input?
         public var latch: LowBatteryPolicy.Latch
+        /// The battery guard's operator kill switch
+        /// (`LowBatteryGuardSettings.isEnabled()`). The app skips the battery
+        /// step when it is off and still runs the session step; the backstop is
+        /// the same guard and must obey the same switch.
+        public var batteryGuardEnabled: Bool
 
         public init(
             recordBootID: String,
@@ -48,7 +53,8 @@ public enum RecoveryPolicy {
             session: KeepAwakeSession?,
             now: SessionPolicy.Now,
             battery: LowBatteryPolicy.Input? = nil,
-            latch: LowBatteryPolicy.Latch = LowBatteryPolicy.Latch()
+            latch: LowBatteryPolicy.Latch = LowBatteryPolicy.Latch(),
+            batteryGuardEnabled: Bool = true
         ) {
             self.recordBootID = recordBootID
             self.recordOwnedEnabled = recordOwnedEnabled
@@ -57,6 +63,7 @@ public enum RecoveryPolicy {
             self.now = now
             self.battery = battery
             self.latch = latch
+            self.batteryGuardEnabled = batteryGuardEnabled
         }
     }
 
@@ -125,12 +132,14 @@ public enum RecoveryPolicy {
         let verdict: BatteryVerdict = facts.battery.map {
             batteryVerdict(input: $0, latch: facts.latch)
         } ?? .unread
+        // The operator kill switch gates the BATTERY step only, exactly as in
+        // the app: deadlines are not the battery guard's to switch off.
         return Plan(
             session: session != nil,
             sessionDue: session.map { SessionPolicy.dueReason($0, now: facts.now) != nil } ?? false,
-            battery: claimsFlag,
+            battery: claimsFlag && facts.batteryGuardEnabled,
             ownership: ownership,
-            batteryVerdict: verdict)
+            batteryVerdict: facts.batteryGuardEnabled ? verdict : .unread)
     }
 
     /// The battery step's decision, mapped onto what a protective-only caller
@@ -231,15 +240,25 @@ public enum RecoveryPolicy {
     ///
     /// A timestamp in the FUTURE is not fresh: it means the wall clock moved
     /// backwards, so the age is not evidence of anything.
+    /// Convenience for a caller that has already established the locked-run
+    /// proof by other means, or for a test that supplies it explicitly.
+    ///
+    /// It does NOT assume the proof: `completedLockedRun` is a parameter. An
+    /// earlier version hard-coded it to `true`, which let a heartbeat from a
+    /// run that only ever exited `nothingToDo`/`appAlive` grade `.fresh` — a
+    /// future caller picking this shorter API could have lifted the ADR 023
+    /// refusal for an agent whose locked path was never exercised.
     public static func runFreshness(
         heartbeat: (at: Date, bootID: String, exitCode: Int32)?,
+        completedLockedRun: Bool,
         currentBootID: String,
         now: Date,
         maximumAge: TimeInterval = maximumHeartbeatAge
     ) -> RunFreshness {
         runFreshnessFull(
             heartbeat: heartbeat.map {
-                (at: $0.at, bootID: $0.bootID, exitCode: $0.exitCode, completedLockedRun: true)
+                (at: $0.at, bootID: $0.bootID, exitCode: $0.exitCode,
+                 completedLockedRun: completedLockedRun)
             },
             currentBootID: currentBootID,
             now: now,

@@ -763,7 +763,7 @@ $ arch -arm64 swift test
   RunClosedPersistenceTests     53 tests, 0 failures   (46 → 53)
   RunClosedHelperSupportTests   27 tests, 0 failures   (inchangé)
   RunClosedAppTests             11 tests, 0 failures   (inchangé)
-  → 431 tests, 0 failures (391 avant ce tour : +30)
+  → 438 tests, 0 failures (391 avant ce tour : +30)
 ```
 
 Corrections et contrats ajoutés :
@@ -807,7 +807,7 @@ $ arch -arm64 swift test
   RunClosedPersistenceTests     53 tests, 0 failures
   RunClosedHelperSupportTests   31 tests, 0 failures   (27 → 31)
   RunClosedAppTests             11 tests, 0 failures
-  → 431 tests, 0 failures (422 avant ce tour : +7)
+  → 438 tests, 0 failures (422 avant ce tour : +7)
 ```
 
 Le verdict est `WARN (advisory)`, 0 CRITICAL — la porte passe — mais 7 constats portaient sur du code
@@ -856,7 +856,7 @@ $ arch -arm64 swift test
   RunClosedPersistenceTests     53 tests, 0 failures
   RunClosedHelperSupportTests   31 tests, 0 failures
   RunClosedAppTests             11 tests, 0 failures
-  → 431 tests, 0 failures (429 avant ce tour : +2)
+  → 438 tests, 0 failures (429 avant ce tour : +2)
 ```
 
 - **Couverture CI des tests CLI (WARN, le seul vrai défaut)** — `cliURL()` ne cherchait que
@@ -883,3 +883,76 @@ $ arch -arm64 swift test
 
 NOT_TESTED : inchangé. Rien de tout cela n'a été mesuré sur matériel ; les tests CLI tournent
 désormais réellement en CI, ce qui est vérifiable ici au prochain passage.
+
+### Relecture tour 5 (`ai-review-gate` WARN advisory, 0 CRITICAL, 7 constats) — 2026-11-07
+
+```
+$ arch -arm64 swift build --build-tests     → 0 error, 0 warning
+$ arch -arm64 swift test
+  RunClosedCoreTests           136 tests, 0 failures
+  RunClosedMacSystemTests      203 tests, 0 failures   (201 → 203)
+  RunClosedPersistenceTests     53 tests, 0 failures
+  RunClosedHelperSupportTests   31 tests, 0 failures
+  RunClosedAppTests             11 tests, 0 failures
+  → 438 tests, 0 failures (431 avant ce tour : +3)
+$ CI=true swift test --filter RunClosedMacSystemTests.RecoverCommandTests → 13 tests, 0 échec, 0 skip
+```
+
+- **La garde CI faisait l'inverse de sa doc (WARN, régression du tour 4)** — mon
+  `if CI { throw XCTSkip }` skippait en CI et échouait en local, exactement le contraire de ce que le
+  commentaire annonçait, annulant le commit `9bee394`. Corrigé : en CI un binaire manquant
+  **`XCTFail`**, en local c'est un skip. Vérifié avec `CI=true` : les 13 tests CLI s'exécutent
+  réellement, aucun skip.
+- **Le backstop consommait les alertes de l'app (WARN)** — `protectiveStep` persistait le latch issu de
+  la politique, donc `warnedLow` / `warnedCritical` / `failedReleaseSleepTried` étaient marqués alors
+  que le backstop n'affiche AUCUNE notification. L'opérateur rouvrait l'app dans le même épisode de
+  décharge et recevait `.alreadyWarned` : l'alerte batterie faible n'était jamais montrée. Seule la
+  dette de réarmement (`releasedByGuard`) est désormais écrite par ce chemin — c'est le signal de
+  réactivation pour l'app, pas une affirmation que quelqu'un a été prévenu. 2 tests.
+- **Test contre la mauvaise règle (WARN)** — `testARealRunProducesAHeartbeatTheCLIAcceptsAsEnforcing`
+  notait un run de chemin rapide avec `runFreshness`, le wrapper qui forçait la preuve de section
+  verrouillée ; la production utilise `runFreshnessFull`. Le test passait donc sur une règle que
+  personne n'applique. Il utilise maintenant `runFreshnessFull` + `freshnessInput()` sur un run qui a
+  réellement pris le verrou.
+- **Wrapper dangereux** — `runFreshness(heartbeat:…)` codait `completedLockedRun: true` en dur ; un
+  futur appelant aurait pu lever le refus ADR 023 pour un agent dont le chemin verrouillé n'a jamais
+  tourné. Le paramètre est maintenant requis.
+- **Échec d'écriture du heartbeat silencieux** — `save` était ignoré ; en cas d'échec,
+  `rearmWithheldReported` ne persistait pas (retour du flood) et le CLI refusait sans explication. Une
+  ligne stderr rend la panne diagnosticable (l'action protectrice, elle, a déjà eu lieu).
+- **Détail, non retenu** — l'assertion `rowLabel` dépend de l'époque fixe ; et un `lid -> on` non
+  vérifié laisse un ancien record de session en place. Les deux sont sans effet observable (les étapes
+  sont idempotentes et confirmées par readback) ; non modifiés, pour ne pas élargir le diff sans
+  défaut.
+
+NOT_TESTED : inchangé. Rien de tout cela n'a été mesuré sur matériel.
+
+### Addendum round 2 — le backstop respecte le coupe-circuit batterie (2026-11-07)
+
+```
+$ arch -arm64 swift build --build-tests     → 0 error, 0 warning
+$ arch -arm64 swift test
+  RunClosedCoreTests           136 tests, 0 failures
+  RunClosedMacSystemTests      207 tests, 0 failures   (203 → 207)
+  RunClosedPersistenceTests     53 tests, 0 failures
+  RunClosedHelperSupportTests   31 tests, 0 failures
+  RunClosedAppTests             11 tests, 0 failures
+  → 438 tests, 0 failures (434 avant : +4)
+```
+
+Constat du Lord : l'app saute l'étape batterie quand `LowBatteryGuardSettings.isEnabled()` est faux et garde
+l'étape session (`AppMain.runLowBatteryTick`) ; le backstop tournait `protectiveStep()` quand même, donc un
+opérateur ayant coupé la garde recevait `disablesleep 0` + `pmset sleepnow` de launchd une minute plus tard.
+
+`batteryGuardEnabled` est injecté (live = `LowBatteryGuardSettings.isEnabled()`) et porté par
+`RecoveryPolicy.Facts`. 4 tests :
+
+- garde coupée + batterie critique + flag nôtre ⇒ flag ON inchangé, aucun relâchement, aucun `sleepnow`,
+  aucune ligne d'audit `batteryRelease` ;
+- garde coupée + session échue ⇒ la session se termine (relâchement vérifié) et la veille n'est JAMAIS
+  appelée par l'étape session ;
+- garde coupée + rien d'autre ⇒ la minute reste gratuite (`nothingToDo`) ;
+- garde par défaut ⇒ le relâchement critique a toujours lieu.
+
+**Contre-épreuve** : en retirant `&& facts.batteryGuardEnabled` de `plan()`, le premier test échoue sur le
+flag, le relâchement, la veille et l'audit — la correction est porteuse, pas décorative.

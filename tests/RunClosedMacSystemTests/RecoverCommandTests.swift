@@ -43,12 +43,17 @@ final class RecoverCommandTests: XCTestCase {
         }) {
             return found
         }
+        // In CI a missing binary is a FAILURE, not a skip: it means the build
+        // step stopped producing it, and skipping would silently drop the
+        // exit-code, status-JSON and doctor/status coverage this file exists
+        // for while the run stays green. Locally it is only a skip — a
+        // developer may not have built the executable yet.
+        let searched = candidates.map(\.path).joined(separator: ", ")
         if ProcessInfo.processInfo.environment["CI"] != nil {
-            throw XCTSkip("CI: no runclosed binary found — expected `swift build` to have produced .build/debug/runclosed")
+            XCTFail("CI: no runclosed binary found (looked in \(searched)) — "
+                    + "`swift build --build-tests` must produce .build/debug/runclosed")
         }
-        return try XCTUnwrap(
-            Optional<URL>.none,
-            "no runclosed binary found (looked in \(candidates.map(\.path)))")
+        throw XCTSkip("no runclosed binary yet (looked in \(searched)) — run `swift build`")
     }
 
     /// Run the CLI with `args`, returning (exit code, stdout+stderr).

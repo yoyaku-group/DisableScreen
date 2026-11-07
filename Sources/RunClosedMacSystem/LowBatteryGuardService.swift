@@ -266,6 +266,21 @@ public struct LowBatteryGuardService {
             outcome.sleepAttempted = tick.sleepAttempted
             outcome.sleepRC = tick.sleepRC
         }
+        // The backstop shows NO notification, so it must not consume the
+        // operator's warnings on the app's behalf. `LowBatteryPolicy` sets
+        // `warnedLow` on `.warn`, and a refused release sets `warnedCritical`;
+        // persisting those would make the app's next tick answer
+        // `.alreadyWarned` and the low-battery (or critical-not-owned) warning
+        // would never be shown at all — the one case where the operator most
+        // needs to be told. `failedReleaseSleepTried` is the same story: it
+        // suppresses the app's notify-once.
+        //
+        // Only the re-arm debt (`releasedByGuard` / `releasedBootID`) is this
+        // caller's to write: that is the app's signal to re-enable the flag,
+        // not a claim that anyone was informed.
+        record.latch.warnedLow = before.latch.warnedLow
+        record.latch.warnedCritical = before.latch.warnedCritical
+        record.latch.failedReleaseSleepTried = before.latch.failedReleaseSleepTried
         if record != before {
             latchStore.save(record)
         }

@@ -138,6 +138,16 @@ public struct RecoveryBackstopService {
     public let heartbeatStore: BackstopHeartbeatStore
     /// `app.lock` probe (ADR 023 `AppLivenessLock`, shared-lock probe).
     public let appIsAlive: @Sendable () -> Bool
+    /// The battery guard's operator kill switch (`LowBatteryGuardSettings`).
+    ///
+    /// The app already honours it: with the guard switched off it skips the
+    /// battery step and still runs the session step
+    /// (`AppMain.runLowBatteryTick`). The backstop is the SAME guard, so it must
+    /// obey the same switch — otherwise an operator who turned the guard off
+    /// would still get a `disablesleep 0` plus `pmset sleepnow` from launchd,
+    /// one minute after saying no. Injected for the same reason every other
+    /// system read is: so the rule is testable without touching this Mac.
+    public let batteryGuardEnabled: @Sendable () -> Bool
     public var wallClock: @Sendable () -> Date
 
     public init(
@@ -147,6 +157,9 @@ public struct RecoveryBackstopService {
         auditLog: RecoveryAuditLog = RecoveryAuditLog(),
         heartbeatStore: BackstopHeartbeatStore = BackstopHeartbeatStore(),
         appIsAlive: @escaping @Sendable () -> Bool,
+        batteryGuardEnabled: @escaping @Sendable () -> Bool = {
+            LowBatteryGuardSettings.isEnabled()
+        },
         wallClock: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.sessionService = sessionService
@@ -155,6 +168,7 @@ public struct RecoveryBackstopService {
         self.auditLog = auditLog
         self.heartbeatStore = heartbeatStore
         self.appIsAlive = appIsAlive
+        self.batteryGuardEnabled = batteryGuardEnabled
         self.wallClock = wallClock
     }
 
@@ -206,7 +220,8 @@ public struct RecoveryBackstopService {
             session: session,
             now: now,
             battery: nil,
-            latch: guardService.latchStore.load().latch)
+            latch: guardService.latchStore.load().latch,
+            batteryGuardEnabled: batteryGuardEnabled())
         let plan = RecoveryPolicy.plan(facts)
         let outcome: Outcome
         if !plan.needsWork {
@@ -253,12 +268,22 @@ public struct RecoveryBackstopService {
             // nothing about this one.
             locked = previous.map { $0.bootID == bootID && $0.completedLockedRun } ?? false
         }
-        heartbeatStore.save(.init(
+        let saved = heartbeatStore.save(.init(
             at: wallClock(),
             bootID: bootID,
             exitCode: outcome.exitCode.rawValue,
             rearmWithheldReported: reported,
             completedLockedRun: locked))
+        guard !saved else { return }
+        // Not fatal — the protective action already happened — but a heartbeat
+        // that cannot be written silently breaks two things: the CLI refuses
+        // timed sessions without saying why (it fails safe, but
+        // undiagnosably), and `rearmWithheldReported` never persists, so every
+        // minute of an episode re-audits and the log flood comes back.
+        FileHandle.standardError.write(Data(
+            ("[RunClosed] recover --backstop: heartbeat could not be written to "
+             + "\(heartbeatStore.url.path) — the CLI will not trust the agent "
+             + "until this succeeds\n").utf8))
     }
 
     /// The ONE `LidWriteLock` section. It must not take the lock again:

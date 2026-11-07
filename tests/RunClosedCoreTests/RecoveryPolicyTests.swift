@@ -236,11 +236,20 @@ final class RecoveryPolicyTests: XCTestCase {
     private func freshness(at offset: TimeInterval,
                           bootID: String = Boot.now,
                           exitCode: Int32 = 0,
+                          lockedRun: Bool = true,
                           now: Date? = nil) -> RecoveryPolicy.RunFreshness {
         RecoveryPolicy.runFreshness(
             heartbeat: (at: nowDate.addingTimeInterval(offset), bootID: bootID, exitCode: exitCode),
+            completedLockedRun: lockedRun,
             currentBootID: Boot.now,
             now: now ?? nowDate)
+    }
+
+    /// A run that never took the lock proves the agent starts, not that it can
+    /// act — however recent and however successful it looks.
+    func testARunWithoutALockedSectionDoesNotEnforce() {
+        XCTAssertEqual(freshness(at: -10, lockedRun: false), .noLockedRunYet)
+        XCTAssertFalse(freshness(at: -10, lockedRun: false).isEnforcing)
     }
 
     /// A run one minute ago on this boot is proof the agent fires.
@@ -252,7 +261,8 @@ final class RecoveryPolicyTests: XCTestCase {
 
     /// No heartbeat at all: the agent has never proven it runs.
     func testAMissingHeartbeatDoesNotEnforce() {
-        let f = RecoveryPolicy.runFreshness(heartbeat: nil, currentBootID: Boot.now, now: nowDate)
+        let f = RecoveryPolicy.runFreshness(heartbeat: nil, completedLockedRun: true,
+                                            currentBootID: Boot.now, now: nowDate)
         XCTAssertEqual(f, .never)
         XCTAssertFalse(f.isEnforcing)
         XCTAssertFalse(f.refusalHint.isEmpty)
