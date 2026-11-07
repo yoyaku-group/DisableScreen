@@ -87,6 +87,13 @@ public struct RecoveryAuditLog: Sendable {
             // drop means a release that really happened leaves no trace, and
             // an investigation later reads "nothing happened".
             Self.reportFailure(url: url, reason: "short write (\(written)/\(data.count) bytes)")
+            // A partial write leaves NO trailing newline, so the next append
+            // would be glued onto the truncated JSON and destroy that record
+            // too — one lost line becomes two, and the second one was fine.
+            // Closing the line costs an unparseable stub (skipped on read) and
+            // keeps every later record intact (review round 8).
+            let newline = Data([0x0A])
+            _ = newline.withUnsafeBytes { buf in write(fd, buf.baseAddress, buf.count) }
         }
     }
 

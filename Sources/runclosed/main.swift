@@ -804,6 +804,17 @@ func cmdSession(_ rest: [String]) -> Int32 {
         // Same lock as `lid-stay-awake on|off`: the session writes the record
         // and the flag, so it must not interleave with a guard tick.
         var svc = makeSessionService()
+        // The backstop probe is read BEFORE the lock, not inside it: it is an
+        // `SMAppService` XPC round-trip to `smd`, and holding `LidWriteLock`
+        // (a blocking flock) across it stalls the app's guard tick and every
+        // other CLI command — precisely when a slow `smd` is already the
+        // problem. Nothing is lost by reading it first: the rule it feeds is
+        // deliberately tolerant to 180 s of heartbeat age, so microseconds of
+        // extra staleness cannot change the answer. The `app.lock` probe stays
+        // INSIDE, where it must be: the app's quit teardown releases it in this
+        // same section, so a start queued behind a teardown must find the app
+        // already gone.
+        let backstopEnforcing = backstopIsProtecting()
         let locked = LidWriteLock().withLock { () -> Result<SessionService.StartOutcome, SessionError>? in
             // A timed session needs something to end it at its deadline. Two
             // enforcers qualify (ADR 023, amended by ADR 024): the menu-bar app
@@ -811,15 +822,7 @@ func cmdSession(_ rest: [String]) -> Int32 {
             // backstop, being APPROVED is not enough: it must have PROVEN it
             // runs (a heartbeat on this boot, recent, not a failed run). An
             // approved agent whose program never resolves enforces nothing.
-            // Both checks run INSIDE the lock: the app's quit teardown gives up
-            // `app.lock` in this same section, so a start queued behind a
-            // teardown finds the app gone, and an app seen alive here runs its
-            // teardown (which ends the session) only after this start.
-            if duration != nil, !AppLivenessLock().isHeld(), !backstopIsProtecting() {
-                // The refusal message is built OUTSIDE the lock: it re-queries
-                // `SMAppService`, which is an XPC round-trip, and a slow daemon
-                // there would hold the write lock while the app's guard tick
-                // waits on it. The boolean above is all the decision needs.
+            if duration != nil, !AppLivenessLock().isHeld(), !backstopEnforcing {
                 return nil
             }
             // `start` itself clears a pending low-battery re-arm on success,
@@ -863,12 +866,16 @@ func cmdSession(_ rest: [String]) -> Int32 {
             step = parsed
         }
         var svc = makeSessionService()
+        // Read outside the lock for the same reason as `start --for`: it is an
+        // XPC round-trip and the answer is age-tolerant by 180 s. `svc.load()`
+        // stays inside — that is a record read the lock actually protects.
+        let backstopEnforcing = backstopIsProtecting()
         let locked = LidWriteLock().withLock { () -> Result<KeepAwakeSession, SessionError>? in
-            // Same refusal as `start --for`, same place, same two enforcers
-            // (ADR 024): a new deadline that nothing would enforce must not be
-            // reported as "extended" (the app crashed during a timed session).
-            // No session on record falls through to `extend`'s own `noSession`.
-            if svc.load() != nil, !AppLivenessLock().isHeld(), !backstopIsProtecting() {
+            // Same refusal as `start --for`, same two enforcers (ADR 024): a new
+            // deadline that nothing would enforce must not be reported as
+            // "extended" (the app crashed during a timed session). No session on
+            // record falls through to `extend`'s own `noSession`.
+            if svc.load() != nil, !AppLivenessLock().isHeld(), !backstopEnforcing {
                 return nil
             }
             return svc.extend(by: step)

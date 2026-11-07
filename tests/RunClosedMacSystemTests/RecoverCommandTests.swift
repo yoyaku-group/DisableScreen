@@ -32,16 +32,28 @@ final class RecoverCommandTests: XCTestCase {
     ///
     /// Never silently skipped in CI: a missing binary there means the coverage
     /// this file exists for vanished, so it fails instead of passing green.
+    ///
+    /// Among the candidates that EXIST, the NEWEST wins. Taking the first that
+    /// exists let a leftover `.build/debug/runclosed` from an earlier build
+    /// shadow a freshly assembled bundle (or the reverse), so the suite could
+    /// assert against code that is not the code under review — the same failure
+    /// mode the three-path search was introduced to fix, one level down (review
+    /// round 8).
     private static func cliURL() throws -> URL {
         let candidates = [
             ".build/debug/runclosed",
             ".build/out/Products/Debug/runclosed",
             "build/RunClosed.app/Contents/MacOS/runclosed-cli",
         ].map { repoRoot.appendingPathComponent($0) }
-        if let found = candidates.first(where: {
+        let existing = candidates.filter {
             FileManager.default.isExecutableFile(atPath: $0.path)
+        }
+        if let newest = existing.max(by: { a, b in
+            let ma = (try? FileManager.default.attributesOfItem(atPath: a.path))?[.modificationDate] as? Date
+            let mb = (try? FileManager.default.attributesOfItem(atPath: b.path))?[.modificationDate] as? Date
+            return (ma ?? .distantPast) < (mb ?? .distantPast)
         }) {
-            return found
+            return newest
         }
         // In CI a missing binary is a FAILURE, not a skip: it means the build
         // step stopped producing it, and skipping would silently drop the
@@ -74,16 +86,43 @@ final class RecoverCommandTests: XCTestCase {
         p.standardOutput = out
         p.standardError = err
         try p.run()
-        // Drain BOTH before waiting: a child that writes more than the 64 KiB
-        // pipe buffer blocks on write() forever, and `waitUntilExit()` would
-        // then wait for a process that can never finish. Reading to EOF first
-        // lets the child complete, and terminates when it exits.
-        let outData = out.fileHandleForReading.readDataToEndOfFile()
-        let errData = err.fileHandleForReading.readDataToEndOfFile()
+        // Both pipes must be drained CONCURRENTLY. Reading stdout to EOF first
+        // returns only once the child closes it, i.e. once it exits — so
+        // nothing drains stderr during that read, and a child whose stderr
+        // fills the 64 KiB pipe buffer blocks in write(2), never exits, never
+        // closes stdout, and `swift test` hangs with no timeout (review round
+        // 8 — the sequential version shipped in round 7 had exactly this bug).
+        let box = DataBox()
+        let group = DispatchGroup()
+        DispatchQueue.global().async(group: group) {
+            box.setOut(out.fileHandleForReading.readDataToEndOfFile())
+        }
+        DispatchQueue.global().async(group: group) {
+            box.setErr(err.fileHandleForReading.readDataToEndOfFile())
+        }
+        group.wait()
         p.waitUntilExit()
         return (p.terminationStatus,
-                String(data: outData, encoding: .utf8) ?? "",
-                String(data: errData, encoding: .utf8) ?? "")
+                String(data: box.out, encoding: .utf8) ?? "",
+                String(data: box.err, encoding: .utf8) ?? "")
+    }
+
+    /// Holds the two buffers the concurrent drains fill.
+    ///
+    /// A class with a lock rather than two captured `var`s: mutating a captured
+    /// variable from a concurrently-executing closure is exactly what the
+    /// Swift 6 concurrency checker warns about, and silencing the warning
+    /// would not make the race go away. The group wait orders every read after
+    /// both writes, so the lock is belt-and-braces on top of that.
+    private final class DataBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var outData = Data()
+        private var errData = Data()
+
+        func setOut(_ d: Data) { lock.lock(); outData = d; lock.unlock() }
+        func setErr(_ d: Data) { lock.lock(); errData = d; lock.unlock() }
+        var out: Data { lock.lock(); defer { lock.unlock() }; return outData }
+        var err: Data { lock.lock(); defer { lock.unlock() }; return errData }
     }
 
     /// `recover` without `--backstop` is a usage error: this command is the

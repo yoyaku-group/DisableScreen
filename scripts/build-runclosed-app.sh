@@ -75,7 +75,12 @@ cp Resources/com.benjaminbelaga.runclosed.helper.plist \
 # StandardOutPath/StandardErrorPath, and the template must not carry a /tmp
 # path: /tmp is world-writable and sticky, so another local account could
 # pre-create the name as a symlink and launchd would open it AS THIS USER.
-sed "s|__HOME__|$HOME|g" Resources/com.benjaminbelaga.runclosed.backstop.plist \
+#
+# The replacement is escaped for `sed`: a home directory containing `&` (which
+# sed expands to the whole match) or the `|` delimiter would otherwise corrupt
+# the plist. Every other character is literal.
+_escaped_home="$(printf '%s' "$HOME" | sed 's/[&|\\]/\\&/g')"
+sed "s|__HOME__|${_escaped_home}|g" Resources/com.benjaminbelaga.runclosed.backstop.plist \
    > "$APP/Contents/Library/LaunchAgents/com.benjaminbelaga.runclosed.backstop.plist"
 # launchd creates the file but not the directory; without this the agent's
 # diagnostics vanish into a failed open.

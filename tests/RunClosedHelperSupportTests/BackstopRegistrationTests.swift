@@ -15,9 +15,14 @@ final class BackstopRegistrationTests: XCTestCase {
         var registerShouldFail = false
         /// The operator's explicit opt-out (`backstop unregister`).
         var optedOut = false
+        /// Whether the agent was ever seen registered — what lets the app tell
+        /// a first run from a revocation made in System Settings.
+        var everRegistered = false
 
         func operatorOptedOut() -> Bool { optedOut }
         func setOperatorOptedOut(_ value: Bool) { optedOut = value }
+        func wasEverRegistered() -> Bool { everRegistered }
+        func setWasEverRegistered(_ value: Bool) { everRegistered = value }
 
         func status() -> BackstopStatus { current }
         func register() -> Bool {
@@ -32,6 +37,63 @@ final class BackstopRegistrationTests: XCTestCase {
             return true
         }
         func openLoginItemsSettings() { openLoginItemsCalls += 1 }
+    }
+
+    /// A revocation made in System Settings → Login Items is a decision, and
+    /// `SMAppService` reports it exactly like "never registered". Without the
+    /// memory, the next app launch put the agent straight back — undoing, with
+    /// no prompt, a choice the operator had just made on the very screen macOS
+    /// provides for it (review round 8).
+    func testAnAutomaticRegisterRespectsARevocationMadeInSystemSettings() {
+        let fake = FakeRegistrar()
+        fake.current = .notRegistered
+        fake.everRegistered = true      // it WAS registered, then revoked
+        let svc = BackstopLifecycleService(registrar: fake)
+        let r = svc.registerIfNeeded(automatic: true)
+        XCTAssertEqual(fake.registerCalls, 0, "a System Settings revocation must not be undone by a launch")
+        XCTAssertEqual(r.status, .notRegistered)
+    }
+
+    /// …but a machine that never registered must still register, or the net
+    /// would never exist on a fresh install. `notFound` is how macOS 26 reports
+    /// that state (ADR 018).
+    func testAFreshMachineStillRegistersAtLaunch() {
+        let fake = FakeRegistrar()
+        fake.current = .notFound
+        fake.everRegistered = false
+        let svc = BackstopLifecycleService(registrar: fake)
+        _ = svc.registerIfNeeded(automatic: true)
+        XCTAssertEqual(fake.registerCalls, 1, "a fresh machine has no decision to respect")
+    }
+
+    /// The explicit `backstop register` is the operator asking for it back, so
+    /// it overrides a revocation — and it clears the opt-out only when the
+    /// registration actually happened: a failed register that also erased the
+    /// recorded "off" would silently re-register on the next launch.
+    func testAFailedExplicitRegisterKeepsTheOptOut() {
+        let fake = FakeRegistrar()
+        fake.current = .notRegistered
+        fake.optedOut = true
+        fake.registerShouldFail = true
+        let svc = BackstopLifecycleService(registrar: fake)
+        let r = svc.registerAndReport()
+        XCTAssertEqual(r.lastOperationSucceeded, false)
+        XCTAssertTrue(fake.optedOut,
+                      "a register that failed must not erase the operator's recorded off")
+    }
+
+    /// A successful explicit register DOES clear it, and reports the state it
+    /// now reports rather than the one from before the clear.
+    func testASuccessfulExplicitRegisterClearsTheOptOutAndReportsIt() {
+        let fake = FakeRegistrar()
+        fake.current = .notRegistered
+        fake.optedOut = true
+        fake.registerShouldFail = false
+        let r = BackstopLifecycleService(registrar: fake).registerAndReport()
+        XCTAssertEqual(r.lastOperationSucceeded, true)
+        XCTAssertFalse(fake.optedOut, "the operator asked for it back")
+        XCTAssertFalse(r.operatorOptedOut, "the report must describe the state AFTER the clear")
+        XCTAssertEqual(r.status, .requiresApproval)
     }
 
     // MARK: — Every SMAppService state maps to a surfaced state

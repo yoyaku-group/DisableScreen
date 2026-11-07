@@ -68,6 +68,17 @@ public protocol BackstopRegistrar: Sendable {
     /// silently undo that decision. Cleared by an explicit re-register.
     func operatorOptedOut() -> Bool
     func setOperatorOptedOut(_ value: Bool)
+    /// Whether the agent was ever seen REGISTERED (or awaiting approval) on
+    /// this machine.
+    ///
+    /// `SMAppService` reports `notRegistered` both for "never registered" and
+    /// for "the operator revoked it in System Settings", so without a memory
+    /// the app cannot tell a first run from a decision it would be undoing. It
+    /// records what it has seen, and `registerIfNeeded(automatic:)` treats
+    /// `notRegistered` AFTER a registration as a revocation to respect, not as
+    /// a gap to fill (review round 8).
+    func wasEverRegistered() -> Bool
+    func setWasEverRegistered(_ value: Bool)
 }
 
 public extension BackstopRegistrar {
@@ -75,6 +86,8 @@ public extension BackstopRegistrar {
     /// "no opt-out", so nothing changes for them.
     func operatorOptedOut() -> Bool { false }
     func setOperatorOptedOut(_ value: Bool) {}
+    func wasEverRegistered() -> Bool { false }
+    func setWasEverRegistered(_ value: Bool) {}
 }
 
 /// Production registrar wrapping `SMAppService.agent(plistName:)`.
@@ -163,11 +176,30 @@ public struct SMAppServiceAgentRegistrar: BackstopRegistrar {
         Self.defaults()?.bool(forKey: Self.optedOutKey) ?? false
     }
 
+    public func wasEverRegistered() -> Bool {
+        Self.defaults()?.bool(forKey: Self.wasRegisteredKey) ?? false
+    }
+
+    public func setWasEverRegistered(_ value: Bool) {
+        guard let d = Self.defaults() else { return }
+        d.set(value, forKey: Self.wasRegisteredKey)
+        d.synchronize()
+    }
+
     public func setOperatorOptedOut(_ value: Bool) {
-        Self.defaults()?.set(value, forKey: Self.optedOutKey)
+        guard let d = Self.defaults() else { return }
+        d.set(value, forKey: Self.optedOutKey)
+        // `runclosed-cli backstop unregister` sets this and exits immediately.
+        // UserDefaults writes on its own schedule, and a short-lived process
+        // that never reaches that point loses the write — the operator's "off"
+        // would then be forgotten and the next app launch would register the
+        // agent again. `synchronize()` is the documented way to force it before
+        // exit (review round 8).
+        d.synchronize()
     }
 
     static let optedOutKey = "backstopOperatorOptedOut"
+    static let wasRegisteredKey = "backstopWasEverRegistered"
 
     /// Same bundle dance as `LowBatteryGuardSettings`: inside the bundle the
     /// main bundle id IS the suite, and `UserDefaults(suiteName: <own id>)` is
@@ -244,11 +276,25 @@ public struct BackstopLifecycleService {
             // the state is surfaced as `notRegistered`, not fought.
             return report()
         }
-        switch registrar.status() {
+        let status = registrar.status()
+        if automatic, status == .notRegistered, registrar.wasEverRegistered() {
+            // It WAS registered and now reads `notRegistered`: the operator
+            // revoked it in System Settings → Login Items, which is a decision
+            // exactly like `backstop unregister` and equally invisible
+            // afterwards. Re-registering at launch would undo it silently, in a
+            // screen they just used to say no. `notFound` is excluded on
+            // purpose: macOS 26 reports a never-registered agent that way
+            // (ADR 018), so a fresh machine must still register.
+            return report()
+        }
+        switch status {
         case .notRegistered, .notFound:
             ok = registrar.register()
+            if ok == true { registrar.setWasEverRegistered(true) }
         default:
-            break
+            // Already registered or awaiting approval: remember it, so a later
+            // `notRegistered` is read as a revocation rather than a first run.
+            registrar.setWasEverRegistered(true)
         }
         var r = report()
         r.lastOperationSucceeded = ok
@@ -258,9 +304,23 @@ public struct BackstopLifecycleService {
     /// Explicit `runclosed backstop register`: same rule as `registerIfNeeded`
     /// (never re-register a pending approval), but it CLEARS the operator
     /// opt-out — this IS the operator asking for it back.
+    ///
+    /// The opt-out is cleared only once the registration actually happened (or
+    /// was unnecessary). Clearing it first meant a `register` that FAILED — a
+    /// slow `smd`, a transient XPC error — also erased the operator's recorded
+    /// "off", so the next app launch would silently register the agent they had
+    /// turned off, for an operation they were told had failed. On failure the
+    /// opt-out stays, and `lastOperationSucceeded: false` says so.
     public func registerAndReport() -> Report {
+        let r = registerIfNeeded()
+        guard r.lastOperationSucceeded != false else { return r }
         registrar.setOperatorOptedOut(false)
-        return registerIfNeeded()
+        // Re-read so the returned report reflects the state it now reports:
+        // a report built before the clear would still say "opted out" about
+        // the very call that just undid it.
+        var fresh = report()
+        fresh.lastOperationSucceeded = r.lastOperationSucceeded
+        return fresh
     }
 
     /// Reversible teardown: no launchd call when nothing is registered. Records
