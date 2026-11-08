@@ -285,8 +285,12 @@ public struct LidCloseActionJournal: Sendable {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion)
                 ?? kLidCloseActionSchemaVersion
-            sessionID = try c.decodeIfPresent(UUID.self, forKey: .sessionID)
-            startedAt = try c.decodeIfPresent(String.self, forKey: .startedAt)
+            // METADATA must not be able to fail the whole record: a mis-typed
+            // `sessionID` or `startedAt` is cosmetic, and throwing here
+            // discarded every valid obligation with it (gate finding,
+            // `Malformed metadata discards valid recovery obligations`).
+            sessionID = try? c.decodeIfPresent(UUID.self, forKey: .sessionID)
+            startedAt = try? c.decodeIfPresent(String.self, forKey: .startedAt)
             // Decoded ENTRY BY ENTRY: one malformed element must not discard
             // every other device's recovery record. A whole-array `try?` made a
             // single bad field flatten the list to `[]` while the record still

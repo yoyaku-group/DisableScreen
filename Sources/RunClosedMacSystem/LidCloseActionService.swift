@@ -1357,7 +1357,18 @@ public struct LidCloseActionService {
                 failedThisPass.append(prior.deviceUID)
             }
         }
-        guard !failedThisPass.isEmpty else { return }
+        guard !failedThisPass.isEmpty else {
+            // A device that is still stranded is an obligation even when this
+            // pass restored a DIFFERENT one successfully: reporting a clean undo
+            // hid it (gate finding, `Une restauration réussie masque un autre
+            // périphérique toujours muet`).
+            if !record.unverifiedAudio.isEmpty {
+                outcome.shouldNotify = true
+                outcome.notice = outcome.notice ?? .audioLeftMuted
+                outcome.audioRestoreFailed = true
+            }
+            return
+        }
         outcome.shouldNotify = true
         outcome.notice = .audioLeftMuted
         outcome.audioRestoreFailed = true
