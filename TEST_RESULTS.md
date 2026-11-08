@@ -1868,3 +1868,26 @@ avant de m'arrêter et de lire. Aplatir explicitement dans un `let` intermédiai
 est la seule forme lisible.
 
 Suite : **720/720**, 0 échec, 0 warning, rc=0.
+
+### Tour 26 — mon correctif du tour 25 transformait une corruption en preuve de succès
+
+Le reçu du head `431ef76` a rendu **0 CRITICAL, 2 WARN**. Le premier est l'ordre
+d'expiration. Le second est **une régression que j'ai introduite au tour 25** :
+
+En rendant `exitCode` tolérant, je l'ai fait retomber sur `0`. Or `0` est
+exactement la preuve que `RecoveryPolicy` utilise pour accepter que la dernière
+récupération a réellement protégé la machine. Un heartbeat endommagé devenait
+donc une preuve valide — la seule direction dans laquelle ce champ ne doit
+jamais échouer.
+
+`-1` maintenant : ce n'est pas un code de sortie réel, donc le contrôle de
+fraîcheur le refuse et le filet s'exécute simplement. Échouer dans le sens
+« je ne sais pas » plutôt que dans le sens « tout va bien ».
+
+C'est la septième fois dans ce lot qu'un correctif de tolérance crée exactement
+le défaut qu'il était censé éviter, dans l'autre sens. La règle que j'en tire et
+qui vaut pour les stores : **la tolérance de décodage ne doit jamais fabriquer
+une valeur qui a un sens métier**. Une métadonnée peut retomber sur un défaut
+inerte ; une preuve doit retomber sur « invalide ».
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.

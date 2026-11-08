@@ -113,8 +113,15 @@ public struct BackstopHeartbeatStore {
             // Flattened explicitly: `try?` around `decodeIfPresent` yields a
             // DOUBLE optional, and chaining `??` on that is how three of my
             // earlier attempts produced nonsense that still compiled.
+            // An UNREADABLE exit code must never read as SUCCESS. `0` is the
+            // proof `RecoveryPolicy` uses to accept that the last run really
+            // protected the machine, so defaulting a corrupt value to 0 turned a
+            // damaged heartbeat into a valid proof — the one direction this
+            // field must never fail in (gate finding, `Un code de sortie
+            // illisible devient un succès`). `-1` is not a real exit status, so
+            // the freshness check refuses it and the backstop simply runs.
             let rawExit = try? c.decodeIfPresent(Int32.self, forKey: .exitCode)
-            exitCode = (rawExit ?? nil) ?? 0
+            exitCode = (rawExit ?? nil) ?? -1
             let rawRearm = try? c.decodeIfPresent(Bool.self, forKey: .rearmWithheldReported)
             rearmWithheldReported = (rawRearm ?? nil) ?? false
             lastAuditedFailureKey = (try? c.decodeIfPresent(
