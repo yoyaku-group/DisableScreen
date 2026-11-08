@@ -136,7 +136,15 @@ while [[ "$interrupted" == "0" ]]; do
   # gate a run with no session measures ordinary lid-close sleep, which proves
   # nothing about the conditions the verdict talks about (gate finding,
   # `Qualification ignores session and external-display conditions`).
+  # ALL FOUR must agree: the sample's own clamshell read, the PRODUCT's
+  # lidClosed reading, an active session and no external display. Checking only
+  # session/external qualified samples that SPANNED a lid transition — the
+  # operator opens the lid between the two probes, `panel()` then reports the
+  # now-active built-in display, and the run produced a definitive
+  # closed-lid-ACTIVE verdict from an open-lid sample (gate finding,
+  # `Sequential probes can qualify an open-lid panel reading`).
   if [[ "$l" == "1" || "$l" == "Yes" || "$l" == "yes" ]] \
+     && [[ "$c" == *"lidClosed=True"* ]] \
      && [[ "$c" == *"sessionActive=True"* ]] \
      && [[ "$c" == *"external=False"* ]]; then
     saw_lid_closed=1

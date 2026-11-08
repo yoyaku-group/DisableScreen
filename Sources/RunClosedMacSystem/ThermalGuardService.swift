@@ -454,7 +454,18 @@ public struct ThermalGuardService {
         }
     }
 
-    private func attemptSleep(_ outcome: inout TickOutcome) {
+    private mutating func attemptSleep(_ outcome: inout TickOutcome) {
+        // The lid-close undo must run BEFORE `sleepnow` on THIS path too.
+        // `LowBatteryGuardService.attemptSleep` was protected, but the thermal
+        // service sleeps through its own call — so a heat emergency could
+        // suspend the Mac with the sound muted and apps suspended, and the
+        // restoration in `thermalOutcome` would only run on wake (gate finding,
+        // `Thermal sleep precedes restoration of paused apps and audio`).
+        if var actions = lidCloseActions {
+            let undo = actions.undoAll()
+            if outcome.lidCloseUndo == nil { outcome.lidCloseUndo = undo }
+            lidCloseActions = actions
+        }
         let r = sleeper.sleepNow()
         outcome.sleepAttempted = true
         outcome.sleepRC = r.rc
