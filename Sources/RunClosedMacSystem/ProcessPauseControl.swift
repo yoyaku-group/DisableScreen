@@ -25,7 +25,7 @@ public protocol ProcessPauseBackend: Sendable {
     /// Returns `nil` when the enumeration FAILED — deliberately distinct from
     /// an empty array, which means "nothing matched". Collapsing the two let a
     /// failed enumeration report the pause as applied.
-    func runningProcesses(matching appNames: [String]) -> [RunningProcess]?
+    func runningProcesses(matching appNames: [String]) -> ProcessScan?
 
     /// The identity currently behind `pid`, or `nil` when no such process
     /// exists. Used to re-prove identity before a resume.
@@ -42,6 +42,28 @@ public protocol ProcessPauseBackend: Sendable {
 
     /// Is the process stopped right now? Tri-state, `nil` = unreadable.
     func isStopped(pid: Int32) -> Bool?
+}
+
+/// The result of one enumeration.
+///
+/// The old interface returned `[RunningProcess]?`, where `nil` meant "could not
+/// enumerate" — but it also had to mean "some candidate was unreadable", and
+/// those two wants produced a boolean whose meaning flipped with the ORDER of
+/// the pid list (three review rounds on the same line). The ambiguity is in the
+/// SHAPE, not the condition: report the targets AND how many candidates could
+/// not be read, and let the service decide.
+public struct ProcessScan: Equatable, Sendable {
+    public var targets: [RunningProcess]
+    /// Candidates whose state or path could not be read. They MAY be targets.
+    public var unreadable: Int
+
+    public init(targets: [RunningProcess], unreadable: Int = 0) {
+        self.targets = targets
+        self.unreadable = unreadable
+    }
+
+    /// Nothing found AND something unreadable: the enumeration proved nothing.
+    public var isInconclusive: Bool { targets.isEmpty && unreadable > 0 }
 }
 
 /// One live process, as the backend found it.
@@ -95,13 +117,16 @@ public struct LibprocPauseBackend: ProcessPauseBackend {
         return path.split(separator: "/").contains { $0 == component }
     }
 
-    public func runningProcesses(matching appNames: [String]) -> [RunningProcess]? {
-        guard !appNames.isEmpty else { return [] }
+    public func runningProcesses(matching appNames: [String]) -> ProcessScan? {
+        guard !appNames.isEmpty else { return ProcessScan(targets: []) }
         guard let pids = Self.allPids() else { return nil }
         var out: [RunningProcess] = []
-        var sawMatchingButUnreadable = false
+        var unreadable = 0
         for pid in pids {
-            guard let snap = Self.snapshot(pid: pid) else { continue }
+            guard let snap = Self.snapshot(pid: pid) else {
+                unreadable += 1
+                continue
+            }
             // An app the OPERATOR already suspended is never adopted. Pausing
             // it would journal it as ours, and the undo would then `SIGCONT`
             // an app the operator had deliberately stopped — an effect they
@@ -122,7 +147,7 @@ public struct LibprocPauseBackend: ProcessPauseBackend {
             // the same defect seen from the other side). The decision is made
             // once, after the loop.
             guard let path = Self.path(ofPid: pid) else {
-                sawMatchingButUnreadable = true
+                unreadable += 1
                 continue
             }
             guard let name = appNames.first(where: { Self.matches(path: path, appName: $0) })
@@ -138,13 +163,7 @@ public struct LibprocPauseBackend: ProcessPauseBackend {
         // readable one let the service stop a SUBSET and report `.applied`
         // while the other app kept running (gate finding, `Partial enumeration
         // failures are reported as complete success`).
-        // ONLY an empty result is ambiguous: no target matched, and some
-        // process was unreadable, so the unreadable one may have been the
-        // target. With at least one real match the run is useful — pausing it
-        // beats pausing nothing because some unrelated system process cannot be
-        // read. Order-independent by construction.
-        if out.isEmpty, sawMatchingButUnreadable { return nil }
-        return out
+        return ProcessScan(targets: out, unreadable: unreadable)
     }
 
     public func identity(ofPid pid: Int32) -> LidCloseActionJournal.ProcessIdentity? {

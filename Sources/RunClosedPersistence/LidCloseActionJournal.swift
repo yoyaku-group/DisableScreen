@@ -65,13 +65,18 @@ public struct LidCloseActionJournal: Sendable {
         /// strand the obligation, and concluding removal on the first failure
         /// would leave a muted Mac with nothing to retry from.
         public var unreadablePasses: Int
+        /// The entry did not record a prior mute state. Not persisted; set by
+        /// the decoder so the record can report the damage.
+        public var missingPriorState: Bool = false
 
         public init(deviceUID: String, wasMuted: Bool, volume: Float?,
-                    unreadablePasses: Int = 0) {
+                    unreadablePasses: Int = 0,
+                    missingPriorState: Bool = false) {
             self.deviceUID = deviceUID
             self.wasMuted = wasMuted
             self.volume = volume
             self.unreadablePasses = unreadablePasses
+            self.missingPriorState = missingPriorState
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -81,7 +86,19 @@ public struct LidCloseActionJournal: Sendable {
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             deviceUID = try c.decode(String.self, forKey: .deviceUID)
-            wasMuted = try c.decodeIfPresent(Bool.self, forKey: .wasMuted) ?? false
+            // ABSENT is not FALSE: an entry written without `wasMuted` does not
+            // say the device was audible — treating it as such un-muted sound
+            // the operator had deliberately muted. A missing prior state is an
+            // unreadable obligation, so it is counted as damage and the entry is
+            // dropped from the actionable list rather than acted on
+            // (gate finding, `Un état de sourdine manquant devient une
+            // autorisation de réactiver le son`).
+            if let known = try c.decodeIfPresent(Bool.self, forKey: .wasMuted) {
+                wasMuted = known
+            } else {
+                wasMuted = true   // conservative: assume it was already silent
+                missingPriorState = true
+            }
             volume = try c.decodeIfPresent(Float.self, forKey: .volume)
             unreadablePasses = try c.decodeIfPresent(Int.self, forKey: .unreadablePasses) ?? 0
         }
@@ -245,6 +262,8 @@ public struct LidCloseActionJournal: Sendable {
             if let loose = try? c.decode([LooseAudioState].self, forKey: .audio) {
                 audio = loose.compactMap { $0.state }
                 droppedAudioEntries = loose.filter { $0.state == nil }.count
+                // A recoverable entry that lost its prior state is damage too.
+                droppedAudioEntries += audio.filter { $0.missingPriorState }.count
             } else if let one = try? c.decode(AudioState.self, forKey: .audio) {
                 audio = [one]
             } else {

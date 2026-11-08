@@ -760,7 +760,7 @@ final class ThermalGuardServiceTests: XCTestCase {
     }
 
     private struct NoProcesses: ProcessPauseBackend {
-        func runningProcesses(matching appNames: [String]) -> [RunningProcess]? { [] }
+        func runningProcesses(matching appNames: [String]) -> ProcessScan? { ProcessScan(targets: []) }
         func identity(ofPid pid: Int32) -> LidCloseActionJournal.ProcessIdentity? { nil }
         func stop(pid: Int32) -> Bool { false }
         func resume(pid: Int32) -> Bool { false }

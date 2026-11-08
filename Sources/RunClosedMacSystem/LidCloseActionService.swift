@@ -586,9 +586,16 @@ public struct LidCloseActionService {
         // service reports the pause as applied while the apps keep running
         // (gate finding, `Process enumeration failure becomes successful
         // pause`).
-        guard let targets = processes.runningProcesses(matching: names) else {
+        guard let scan = processes.runningProcesses(matching: names) else {
             return .failure("could not enumerate processes to pause")
         }
+        // An INCONCLUSIVE scan (nothing found, something unreadable) may have
+        // missed a target: report it rather than claiming a clean result.
+        if scan.isInconclusive {
+            return .failure("could not read \(scan.unreadable) process(es); "
+                + "the pause could not be confirmed")
+        }
+        let targets = scan.targets
         // A SELECTED unverified entry whose stop has since LANDED is excluded
         // from enumeration (the backend skips stopped processes), so it was
         // never reported even though it is ours and frozen (gate finding,
@@ -1181,9 +1188,11 @@ public struct LidCloseActionService {
         record.stopped = remaining
         // "To verify" survives the episode: the operator has to be told about a
         // process we can no longer identify, and it must not be silently
-        // dropped by the next apply. De-duplicated by pid so a process moved
-        // here twice (recycled, then found again) is listed once.
-        for entry in unverified where !record.unverified.contains(where: { $0.pid == entry.pid }) {
+        // dropped by the next apply. De-duplicated by FULL IDENTITY, not pid:
+        // a recycled pid belongs to a different process and must be able to
+        // carry its own recovery entry.
+        for entry in unverified
+        where !record.unverified.contains(where: { $0.identity == entry.identity }) {
             record.unverified.append(entry)
         }
         if !journal.save(record) { outcome.journalSaveFailed = true }

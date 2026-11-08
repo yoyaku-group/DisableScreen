@@ -75,11 +75,11 @@ final class BackstopLidCloseTests: XCTestCase {
         var table: [Int32: P] = [:]
         var resumeCalls: [Int32] = []
 
-        func runningProcesses(matching appNames: [String]) -> [RunningProcess]? {
-            table.values.filter { appNames.contains($0.name) }
+        func runningProcesses(matching appNames: [String]) -> ProcessScan? {
+            ProcessScan(targets: table.values.filter { appNames.contains($0.name) }
                 .sorted { $0.pid < $1.pid }
                 .map { RunningProcess(pid: $0.pid, startSeconds: $0.start,
-                                      startMicroseconds: 0, path: $0.path, appName: $0.name) }
+                                      startMicroseconds: 0, path: $0.path, appName: $0.name) })
         }
         func identity(ofPid pid: Int32) -> LidCloseActionJournal.ProcessIdentity? {
             guard let p = table[pid] else { return nil }

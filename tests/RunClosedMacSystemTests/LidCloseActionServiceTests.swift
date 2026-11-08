@@ -122,7 +122,7 @@ final class LidCloseActionServiceTests: XCTestCase {
         /// The journal contents captured at the crash point.
         var journalAtCrash: [Int32]?
 
-        func runningProcesses(matching appNames: [String]) -> [RunningProcess]? {
+        func runningProcesses(matching appNames: [String]) -> ProcessScan? {
             let snapshot = table.values
                 .filter { appNames.contains($0.appName) }
                 .sorted { $0.pid < $1.pid }
@@ -144,7 +144,7 @@ final class LidCloseActionServiceTests: XCTestCase {
                     }
                 }
             }
-            return snapshot
+            return ProcessScan(targets: snapshot)
         }
 
         func identity(ofPid pid: Int32) -> LidCloseActionJournal.ProcessIdentity? {
@@ -733,7 +733,7 @@ final class LidCloseActionServiceTests: XCTestCase {
         // The BACKEND decides, so drive the real filter rather than the fake's
         // stored table: `runningProcesses` must skip a stopped process.
         let targets = rig.processes.runningProcesses(matching: ["Slack"])
-        XCTAssertEqual(targets?.count, 1,
+        XCTAssertEqual(targets?.targets.count, 1,
                        "the fake's table is the seam; the FILTER is the product")
         // What the product must do, expressed against the real filter:
         // `LibprocPauseBackend` skips `SSTOP`. Its pure predicate is asserted
