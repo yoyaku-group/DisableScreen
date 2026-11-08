@@ -1478,7 +1478,13 @@ public struct LidCloseActionService {
             if !record.audio.contains(where: { $0.deviceUID == stranded.deviceUID }) {
                 record.audio.append(stranded)
             }
-            journal.save(record)
+            // The obligation was REMOVED from `unverifiedAudio` in memory. If
+            // that does not land it stays on disk, and a later pass can re-adopt
+            // it and un-mute a device the operator deliberately muted — an
+            // effect that reverses their choice. Reported, never swallowed (gate
+            // finding, `Resolved stranded audio can report success after a
+            // failed journal write`).
+            if !journal.save(record) { outcome.journalSaveFailed = true }
         }
         guard !record.audio.isEmpty else {
             // Nothing left in `audio`, but a STRANDED device may still be

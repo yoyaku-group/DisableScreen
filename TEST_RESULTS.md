@@ -1776,3 +1776,19 @@ trois lots déjà fusionnés (ADR 022, 023, 025). Il demande son propre lot, ave
 ses propres tests sur le service de session — pas une vingt-deuxième passe ici.
 
 Suite : **720/720**, 0 échec, 0 warning, rc=0.
+
+### Tour 22 — le dernier jumeau de persistance
+
+Le reçu du head `b117d1d` a rendu **0 CRITICAL, 2 WARN**.
+
+Corrigé : `firstReturnedStrandedDevice` retire une obligation dans `unmuteRecordedDevice`
+puis appelle `journal.save` sans vérifier. L'obligation retirée ne revient pas en
+mémoire, mais reste sur disque si l'écriture échoue ; une passe ultérieure peut
+alors la ré-adopter et **réactiver un appareil que l'opérateur avait
+délibérément coupé** — un effet qui défait son choix. Reporté, comme les six
+autres sites d'écriture de ce fichier.
+
+Non corrigé : la marge d'une seconde du tick session-seule. Même cause racine que
+les trois autres WARN d'ordre d'expiration, même lot propre requis.
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.
