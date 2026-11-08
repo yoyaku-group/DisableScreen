@@ -1449,7 +1449,7 @@ public struct LidCloseActionService {
             // verification omits stranded audio obligations`).
             let after = journal.load()
             let clear = after.isEmpty && after.unverified.isEmpty
-                && after.unverifiedAudio.isEmpty && !after.hasDroppedAudioEntries
+                && after.unverifiedAudio.isEmpty && !after.hasDroppedEntries
             return clear ? .restored : .incomplete
         }
         // A save that does not land leaves the PREVIOUS record on disk, so the

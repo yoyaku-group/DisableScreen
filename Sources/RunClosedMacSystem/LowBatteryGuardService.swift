@@ -836,7 +836,27 @@ public struct LowBatteryGuardService {
         guard var service = lidCloseActions else { return nil }
         let undo = service.undoAll()
         lidCloseActions = service
-        if outcome.lidClose == nil { outcome.lidClose = undo }
+        // MERGE, not "keep the first": a second undo can RESUME a process the
+        // first left unconfirmed, so assigning only when nil lost the newly
+        // resumed pid and the `changed` signal (gate finding, `Second protective
+        // undo is not merged into the reported outcome`).
+        if let first = outcome.lidClose {
+            var merged = first
+            for pid in undo.resumedPids where !merged.resumedPids.contains(pid) {
+                merged.resumedPids.append(pid)
+            }
+            for pid in undo.unverifiedPids where !merged.unverifiedPids.contains(pid) {
+                merged.unverifiedPids.append(pid)
+            }
+            if undo.changed { merged.changed = true }
+            if undo.shouldNotify { merged.shouldNotify = true }
+            if undo.audioRestoreFailed { merged.audioRestoreFailed = true }
+            // The SECOND result is the later truth about `undo`.
+            merged.undo = undo.undo ?? merged.undo
+            outcome.lidClose = merged
+        } else {
+            outcome.lidClose = undo
+        }
         return undo
     }
 

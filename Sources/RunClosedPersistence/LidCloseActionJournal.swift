@@ -32,6 +32,14 @@ public struct LidCloseActionJournal: Sendable {
         self.url = url
     }
 
+    /// One PROCESS element decoded without failing the whole array.
+    private struct LooseStoppedProcess: Decodable {
+        let value: StoppedProcess?
+        init(from decoder: Decoder) throws {
+            value = try? StoppedProcess(from: decoder)
+        }
+    }
+
     /// One element decoded without failing the whole array.
     private struct LooseAudioState: Decodable {
         let state: AudioState?
@@ -200,6 +208,9 @@ public struct LidCloseActionJournal: Sendable {
         /// efface les obligations audio malformées et leur signalement`).
         /// Keeping the count on disk makes the damage survive the round trip.
         public var droppedAudioEntries: Int = 0
+        /// How many PROCESS entries were discarded because a field was
+        /// malformed. Counted like the audio damage so `isCorrupt` sees it.
+        public var droppedProcessEntries: Int = 0
 
         /// A record that decoded BUT lost entries to malformed fields.
         ///
@@ -209,6 +220,10 @@ public struct LidCloseActionJournal: Sendable {
         /// visible instead of claiming a healthy journal (gate finding,
         /// `Tolerant decoding silently loses audio restoration records`).
         public var hasDroppedAudioEntries: Bool { droppedAudioEntries > 0 }
+        /// Any obligation lost to a malformed entry, audio or process.
+        public var hasDroppedEntries: Bool {
+            droppedAudioEntries > 0 || droppedProcessEntries > 0
+        }
 
         public init(schemaVersion: Int = kLidCloseActionSchemaVersion,
                     sessionID: UUID? = nil,
@@ -259,7 +274,7 @@ public struct LidCloseActionJournal: Sendable {
         /// existing journal read as empty, which would lose the undo.
         private enum CodingKeys: String, CodingKey {
             case schemaVersion, sessionID, startedAt, audio, stopped, unverified,
-                 unverifiedAudio, droppedAudioEntries
+                 unverifiedAudio, droppedAudioEntries, droppedProcessEntries
         }
 
         public init(from decoder: Decoder) throws {
@@ -311,14 +326,30 @@ public struct LidCloseActionJournal: Sendable {
             // look healthy (see `droppedAudioEntries`).
             droppedAudioEntries += try c.decodeIfPresent(
                 Int.self, forKey: .droppedAudioEntries) ?? 0
+            droppedProcessEntries += try c.decodeIfPresent(
+                Int.self, forKey: .droppedProcessEntries) ?? 0
 
             // A damaged element is surfaced, never silently dropped.
             if audio.isEmpty, (try? c.contains(.audio)) == true {
                 // Leave `audio` empty; `isCorrupt` is decided by the record
                 // decoder, and the CLI reports the journal as unreadable.
             }
-            stopped = try c.decodeIfPresent([StoppedProcess].self, forKey: .stopped) ?? []
-            unverified = try c.decodeIfPresent([StoppedProcess].self, forKey: .unverified) ?? []
+            // ELEMENT-WISE, like audio: one malformed process entry must not
+            // fail the whole Record and discard every valid obligation with it
+            // (gate finding, `Malformed process entry blocks all valid recovery
+            // records`).
+            if let loose = try? c.decode([LooseStoppedProcess].self, forKey: .stopped) {
+                stopped = loose.compactMap { $0.value }
+                droppedProcessEntries += loose.filter { $0.value == nil }.count
+            } else {
+                stopped = []
+            }
+            if let loose = try? c.decode([LooseStoppedProcess].self, forKey: .unverified) {
+                unverified = loose.compactMap { $0.value }
+                droppedProcessEntries += loose.filter { $0.value == nil }.count
+            } else {
+                unverified = []
+            }
         }
     }
 
@@ -352,7 +383,7 @@ public struct LidCloseActionJournal: Sendable {
             readingFailed?()
             return Record()
         }
-        if rec.hasDroppedAudioEntries { readingFailed?() }
+        if rec.hasDroppedEntries { readingFailed?() }
         return rec
     }
 
@@ -365,7 +396,7 @@ public struct LidCloseActionJournal: Sendable {
         guard let rec = try? JSONDecoder().decode(Record.self, from: data) else { return true }
         // A record that decoded but LOST an audio entry is damaged too: the
         // obligation is gone from the file even though the JSON still parses.
-        return rec.hasDroppedAudioEntries
+        return rec.hasDroppedEntries
     }
 
     /// Atomic write. `.atomic` writes a sibling temp file then renames it into
