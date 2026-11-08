@@ -1931,3 +1931,14 @@ sur les vraies apps, le capot : rien n'est mesuré. C'est la PR5, avec Ben.
 
 **Résidu 3 — le tick « session seule » n'a aucun test.** C'est du câblage AppKit.
 Son extraction dans le service le rendrait testable ; c'est de la conception.
+
+### Tour 28 — la même priorité, dans la fusion
+
+Dernier défaut de la famille : `TickOutcome.merging` affectait la notice de la
+passe tardive sans condition, donc un avis audio pouvait masquer l'avis apps
+posé par la passe précédente. La règle de priorité — **une app figée prime sur
+un appareil muet** — est maintenant appliquée aussi là. C'est le septième site.
+
+Après ce correctif, je clos le lot. Les WARN restants sont l'ordre
+expiration/restauration, consigné comme résidu avec sa cause racine et le lot
+qu'il demande.

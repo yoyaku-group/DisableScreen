@@ -158,7 +158,14 @@ public struct LidCloseActionService {
             // flag without its payload produces a notification request with a
             // nil notice, so the operator is never told WHICH thing needs
             // attention.
-            if let notice = later.notice { merged.notice = notice }
+            // Same priority rule as everywhere else: a frozen app outranks a
+            // muted device, whatever order the two passes ran in. A bare
+            // assignment let a later PASS's audio notice hide the apps notice the
+            // earlier one had raised (gate finding, `The outcome merge can
+            // suppress the notification identifying apps that remain paused`).
+            if let notice = later.notice {
+                merged.notice = merged.notice == .appsLeftPaused ? .appsLeftPaused : notice
+            }
             if later.audioRestoreFailed { merged.audioRestoreFailed = true }
             if later.audioDeviceGone { merged.audioDeviceGone = true }
             // A persistence failure in EITHER pass must survive: dropping it
