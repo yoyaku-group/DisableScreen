@@ -586,8 +586,22 @@ public struct LidCloseActionService {
         // service reports the pause as applied while the apps keep running
         // (gate finding, `Process enumeration failure becomes successful
         // pause`).
+        // Read the outstanding obligation BEFORE touching the backend: it
+        // exists whether or not the enumeration works, and every early return
+        // below must still raise its notice (gate finding, `Échec d'énumération`
+        // — the same reasoning already applied to `scan.isInconclusive`).
+        let outstandingBeforeScan = record.unverified.filter { names.contains($0.appName) }
+        if !outstandingBeforeScan.isEmpty {
+            outcome.shouldNotify = true
+            outcome.notice = outcome.notice ?? .appsLeftPaused
+            outcome.unverifiedPids = record.unverified.map { $0.pid }
+        }
         guard let scan = processes.runningProcesses(matching: names) else {
-            return .failure("could not enumerate processes to pause")
+            // Report the failure, but never in place of the notice above, and
+            // never as "nothing happened" over a known obligation.
+            return outstandingBeforeScan.isEmpty
+                ? .failure("could not enumerate processes to pause")
+                : .success(.unconfirmed)
         }
         // An unreadable candidate may have BEEN a target, and we cannot tell.
         // The honest answer is to proceed with what we found and never claim the
@@ -763,10 +777,15 @@ public struct LidCloseActionService {
             // caller and the audit were both misled, and it is the opposite of
             // what the journal says (Lord round 1, point 3).
             guard !stopped.isEmpty else {
-                // Nothing CONFIRMED — but if any of those failures was merely
-                // UNREADABLE, the app may be suspended, so this is
-                // `.unconfirmed`, not `.failed`.
-                if !unconfirmedPids.isEmpty && unconfirmedPids.count == failed.count {
+                // Nothing CONFIRMED — but if AT LEAST ONE signal was delivered
+                // without proof (a timeout or an unreadable read), the app may
+                // be frozen, so this is `.unconfirmed`, never `.failed`. `.failed`
+                // promises an untouched machine and the undo's decision to run
+                // hangs off that promise, so a MIXED batch of rejected and
+                // unconfirmed stops must not collapse to it (gate finding,
+                // `Mixed rejected and unconfirmed stops are reported as no
+                // effect`).
+                if !unconfirmedPids.isEmpty {
                     return .success(.unconfirmed)
                 }
                 return .failure("could not stop \(failed.count) process(es): \(failed)")

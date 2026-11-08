@@ -103,6 +103,10 @@ final class LidCloseActionServiceTests: XCTestCase {
         var failStopForPid: Int32?
         /// Model a signal the kernel REFUSES (EPERM on another user's process).
         var rejectStop = false
+        /// The whole ENUMERATION fails (not just one process).
+        var scanFails = false
+        /// Reject the signal for ONE pid only (a mixed batch).
+        var rejectStopForPid: Int32?
         /// When true, a resume signal is delivered but the process stays stopped.
         var resumeHasNoEffect = false
         /// When true, `isStopped` returns nil — an unreadable observation, which
@@ -123,6 +127,7 @@ final class LidCloseActionServiceTests: XCTestCase {
         var journalAtCrash: [Int32]?
 
         func runningProcesses(matching appNames: [String]) -> ProcessScan? {
+            if scanFails { return nil }
             let snapshot = table.values
                 .filter { appNames.contains($0.appName) }
                 .sorted { $0.pid < $1.pid }
@@ -157,7 +162,7 @@ final class LidCloseActionServiceTests: XCTestCase {
         func stop(pid: Int32) -> Bool {
             stopCalls.append(pid)
             signalCount += 1
-            if rejectStop { return false }             // refused, never delivered
+            if rejectStop || rejectStopForPid == pid { return false }  // refused, never delivered
             if failStopForPid == pid { return true }   // delivered, never takes
             if let deadline = crashAfterSignals, signalCount == deadline,
                let j = journalProbe {
@@ -445,7 +450,11 @@ final class LidCloseActionServiceTests: XCTestCase {
         rig.processes.stopHasNoEffect = true
         let out = stepEnclosed(&rig, settings(mute: false, pause: true))
 
-        XCTAssertEqual(out.apply, .failed)
+        // NOT `.failed`: the signal was DELIVERED and may still land, so the
+        // machine is not provably untouched. The entry must go (it was not
+        // proved stopped), but the outcome is `.unconfirmed`.
+        XCTAssertEqual(out.apply, .partial,
+                       "a delivered-but-unproven stop read as an untouched machine")
         XCTAssertTrue(out.stoppedPids.isEmpty)
         XCTAssertTrue(rig.journal.load().stopped.isEmpty)
     }
@@ -805,7 +814,8 @@ final class LidCloseActionServiceTests: XCTestCase {
 
         let out = stepEnclosed(&rig, settings(mute: false, pause: true))
 
-        XCTAssertEqual(out.apply, .failed)
+        XCTAssertEqual(out.apply, .partial,
+                       "a delivered-but-unproven stop read as an untouched machine")
         XCTAssertTrue(rig.journal.load().stopped.isEmpty,
                       "ownership was granted to a process we never stopped")
     }
@@ -1461,6 +1471,43 @@ final class LidCloseActionServiceTests: XCTestCase {
 
         XCTAssertNotEqual(out.apply, .failed,
                           "a pending stop read as an untouched machine")
+        XCTAssertTrue(out.changed)
+    }
+
+
+    // MARK: — Lord round 6
+
+    /// (a) An enumeration FAILURE must not silence an existing obligation's
+    /// notice: the app is frozen whether or not the scan worked (Lord round 6,
+    /// point 1).
+    func testEnumerationFailureStillRaisesTheOutstandingNotice() {
+        var rig = makeRig()
+        rig.journal.save(.init(unverified: [
+            .init(pid: 4711, startSeconds: 1, startMicroseconds: 0,
+                  bootID: "A", path: "/x", appName: "Slack")]))
+        rig.processes.scanFails = true
+
+        let out = stepEnclosed(&rig, settings(mute: false, pause: true, apps: ["Slack"]))
+
+        XCTAssertTrue(out.shouldNotify,
+                      "an enumeration failure silenced an outstanding obligation")
+        XCTAssertEqual(out.notice, .appsLeftPaused)
+        XCTAssertNotEqual(out.apply, .failed,
+                          "a known obligation was reported as an untouched machine")
+    }
+
+    /// (b) A MIXED batch — one rejected signal, one delivered-but-unconfirmed —
+    /// must never collapse to `.failed` (Lord round 6, point 2).
+    func testMixedRejectedAndUnconfirmedIsNotFailed() {
+        var rig = makeRig(apps: [(1, "Slack", 100), (2, "Discord", 100)])
+        // pid 1: the kernel refuses the signal. pid 2: delivered, never confirms.
+        rig.processes.rejectStopForPid = 1
+        rig.processes.stopVisibleAfterReads = 9_999
+
+        let out = stepEnclosed(&rig, settings(mute: false, pause: true))
+
+        XCTAssertNotEqual(out.apply, .failed,
+                          "a delivered-but-unconfirmed stop read as an untouched machine")
         XCTAssertTrue(out.changed)
     }
 
