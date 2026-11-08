@@ -1663,3 +1663,19 @@ j'ai ajouté aux tours 14 et 15. C'est le signe que le balayage systématique du
 tour 14 a fini de purger la classe « règle appliquée d'un seul côté ».
 
 Suite : **720/720**, 0 échec, 0 warning, rc=0.
+
+### Tour 17 — deux WARN, dont un clignotement que j'ai introduit
+
+**0 CRITICAL, 2 WARN.**
+
+| Défaut | Correction |
+|---|---|
+| **Régression du tour 16.** L'annulation préventive tournait à CHAQUE tick session-seule, pas seulement quand la session allait expirer : les applis étaient reprises et le son rétabli, puis re-figés et re-coupés une ligne plus loin. Un clignotement audible et visible toutes les quelques secondes, pendant toute la durée de la session. | `expireIfDue()` est interrogé d'abord (lecture pure, aucun effet) : l'annulation préventive n'a lieu que si la session va réellement être relâchée. |
+| Le verdict d'apply ne comptait que les annulations AUDIO échouées. Un `SIGCONT` qui ne prend pas, avec un mute réussi, rapportait `.applied` sur une app encore figée. | Les deux familles comptent : `audioRestoreFailed` **ou** `unverifiedPids` non vide ⇒ `.partial`. |
+
+Deuxième régression consécutive introduite en corrigeant ce tick. La leçon, plus
+précise que la précédente : un correctif qui ajoute un EFFET à un chemin
+périodique doit prouver qu'il ne se déclenche que dans la condition visée, pas
+seulement qu'il produit le bon résultat quand elle est remplie.
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.

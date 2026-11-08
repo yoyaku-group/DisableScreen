@@ -1248,12 +1248,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // the session step, then the ordinary pass on the post-step
                 // session so a still-valid session keeps its actions.
                 var lidCloseService = LidCloseActionService.live(bootID: bootID)
-                let pre = lidCloseService.undoAll()
+                // Only a step that WILL release the flag needs the pre-emptive
+                // undo. Doing it on EVERY tick resumed the paused apps and
+                // restored the audio, then the ordinary pass paused and muted
+                // them again one line later — an audible, visible flicker every
+                // few seconds for the whole extra time the session lasted (gate
+                // finding, `Session-only ticks resume paused apps before pausing
+                // them again`).
+                //
+                // `expireIfDue()` is a pure READ here (it computes whether the
+                // deadline passed and mutates nothing), so asking it first costs
+                // one clock read and lets the undo happen exactly when the
+                // session is about to be released.
+                let dueNow = service.expireIfDue() != .notDue
+                let pre = dueNow ? lidCloseService.undoAll() : nil
                 let s = service.step()
                 var readings = LidCloseActionService.Readings.lidEnvironment()
                 readings.session = service.load()
                 let post = lidCloseService.step(readings: readings)
-                let merged = pre.merging(post)
+                let merged = pre.map { $0.merging(post) } ?? post
                 return (s, merged)
             }
             DispatchQueue.main.async {

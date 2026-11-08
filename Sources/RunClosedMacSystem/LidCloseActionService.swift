@@ -491,7 +491,13 @@ public struct LidCloseActionService {
         // `.partial` whenever a REVERSAL failed: something landed, something did
         // not. `.failed` would also be wrong — it promises an untouched machine,
         // and a device we could not un-mute is precisely a live effect of ours.
-        outcome.apply = outcome.audioRestoreFailed ? .partial : requested
+        // BOTH kinds of failed reversal count. Checking only the audio one let a
+        // successful mute report `.applied` over an app whose `SIGCONT` did not
+        // take — still frozen, reported as a clean apply — and
+        // `.nothingRequested` when nothing came back at all (gate finding,
+        // `Apply verdict omits failed process restoration`).
+        let restoreFailed = outcome.audioRestoreFailed || !outcome.unverifiedPids.isEmpty
+        outcome.apply = restoreFailed ? .partial : requested
         // OR, never assign: `undoEffectsThatAreNowOff` may already have reversed
         // something, and a partial stop DID freeze a process. Assigning here
         // erased both, so callers refeshing their caches kept stale state
