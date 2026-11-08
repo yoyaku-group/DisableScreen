@@ -750,4 +750,19 @@ final class ThermalGuardServiceTests: XCTestCase {
                        "the silent-inert failure this flag exists to expose")
         XCTAssertEqual(sleeper.count, 0)
     }
+
+    /// A release writes the latch TWICE (before the sleep for durability, then
+    /// again at the end of `step()`). The reported failure must describe the
+    /// LAST write, not any write: a sticky flag would keep telling the operator
+    /// the guard is broken for the rest of the episode after a transient error
+    /// whose retry succeeded.
+    func testASuccessfulReleaseDoesNotReportAFailedLatchWrite() {
+        var rig = makeRig(state: .critical, flag: true, ownedBoot: "A")
+        let out = rig.service.step()
+        XCTAssertEqual(out.mutation, .released)
+        XCTAssertFalse(out.latchSaveFailed,
+                       "the release persisted its latch: no failure to report")
+        XCTAssertTrue(rig.latchStore.load().latch.releasedForHeat,
+                      "and the state is really on disk")
+    }
 }
