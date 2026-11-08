@@ -1041,13 +1041,31 @@ final class LidCloseActionServiceTests: XCTestCase {
         _ = stepEnclosed(&rig, settings(mute: false, pause: true))
         XCTAssertEqual(rig.journal.load().unverified.map { $0.pid }, [4711])
 
-        // It takes effect now.
+        // It takes effect now: the retry can prove and reverse it.
         rig.processes.table[4711]?.stopped = true
         let undo = rig.service.undoAll()
 
         XCTAssertEqual(rig.processes.table[4711]?.stopped, false,
                        "the app stayed suspended after the lid opened")
         XCTAssertTrue(undo.resumedPids.contains(4711))
+    }
+
+    /// A pending stop that still reads "running" must NOT be dropped: that
+    /// reading is how the entry got here, and discarding it lets the signal land
+    /// with no recovery left (gate finding, `Undo discards recovery for a
+    /// still-pending SIGSTOP`).
+    func testPendingStopIsKeptWhenItStillReadsRunning() {
+        var rig = makeRig(apps: [(4711, "Slack", 1_700_000_000)])
+        rig.processes.stopVisibleAfterReads = 9_999
+        _ = stepEnclosed(&rig, settings(mute: false, pause: true))
+        XCTAssertEqual(rig.journal.load().unverified.map { $0.pid }, [4711])
+
+        // The undo runs while the state still reads "running".
+        let undo = rig.service.undoAll()
+
+        XCTAssertEqual(rig.journal.load().unverified.map { $0.pid }, [4711],
+                       "the pending stop lost its recovery entry")
+        XCTAssertTrue(undo.shouldNotify, "the operator was not asked to look")
     }
 
     /// A failed audio restore is REPORTED, not swallowed: keeping the entry for
@@ -1124,6 +1142,25 @@ final class LidCloseActionServiceTests: XCTestCase {
         var flagged = false
         _ = journal.load(readingFailed: { flagged = true })
         XCTAssertTrue(flagged, "the read failure was silent")
+    }
+
+
+    /// Resuming while both effect switches are off must PERSIST the removal:
+    /// leaving it in memory only kept ownership on disk, and a later undo could
+    /// `SIGCONT` a process the operator had paused themselves (gate finding,
+    /// `Disabling both effects can leave resumed processes owned on disk`).
+    func testResumeWithBothSwitchesOffIsPersisted() {
+        let rig0 = makeRig(apps: [(4711, "Slack", 1_700_000_000)])
+        var rig = rig0
+        _ = stepEnclosed(&rig, settings(mute: false, pause: true))
+        XCTAssertEqual(rig.processes.table[4711]?.stopped, true)
+
+        // Both switches off, session and conditions unchanged.
+        _ = stepEnclosed(&rig, settings(mute: false, pause: false))
+
+        XCTAssertEqual(rig.processes.table[4711]?.stopped, false)
+        XCTAssertTrue(rig.journal.load().stopped.isEmpty, "stale ownership on disk")
+        XCTAssertTrue(rig.journal.load().unverified.isEmpty, "stale obligation on disk")
     }
 
     // MARK: — Journal durability

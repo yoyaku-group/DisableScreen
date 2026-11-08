@@ -109,7 +109,14 @@ while true; do
   l="$(lid)"; p="$(panel)"; c="$(conditions)"
   line="$(date '+%F %T') clamshell=$l $p $c"
   echo "$line" | tee -a "$LOG"
-  if [[ "$l" == "1" || "$l" == "Yes" || "$l" == "yes" ]]; then
+  # A sample only qualifies if the machine is in the configuration the feature
+  # targets: an ACTIVE keep-awake session and NO external display. Without that
+  # gate a run with no session measures ordinary lid-close sleep, which proves
+  # nothing about the conditions the verdict talks about (gate finding,
+  # `Qualification ignores session and external-display conditions`).
+  if [[ "$l" == "1" || "$l" == "Yes" || "$l" == "yes" ]] \
+     && [[ "$c" == *"sessionActive=True"* ]] \
+     && [[ "$c" == *"external=False"* ]]; then
     saw_lid_closed=1
     # Match the EXACT tokens `panel()` emits. A substring test for "ACTIVE"
     # also matches "NOT_IN_ACTIVE_LIST", which reported an absent panel as
@@ -127,7 +134,7 @@ done
 # off, so a run whose every closed-lid sample was unreadable is INCONCLUSIVE
 # rather than a definitive "no action warranted" (caught by ai-review-gate).
 if (( ! saw_lid_closed )); then
-  verdict="INCONCLUSIVE — the run never saw the lid closed; nothing was measured"
+  verdict="INCONCLUSIVE — no usable sample: the run needs the lid Closed AND an active keep-awake session AND no external display. Without all three nothing about this feature was measured"
 elif (( saw_panel_active )); then
   verdict="MEASURED — the built-in panel stayed ACTIVE with the lid closed. Brightness and keyboard backlight remain CANDIDATES, and a readback criterion is still required before any code is written"
 elif (( saw_panel_inactive )); then

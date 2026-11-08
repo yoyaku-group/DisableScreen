@@ -605,8 +605,17 @@ public struct LidCloseActionService {
             }
             outcome.evaluation.journalBefore = record
         }
+        // PERSIST the outcome. A resume removes entries in memory; returning
+        // without saving left ownership of a resumed process on disk, and a
+        // later undo could then `SIGCONT` a process the operator had paused
+        // themselves (gate finding, `Disabling both effects can leave resumed
+        // processes owned on disk`).
+        if outcome.changed {
+            journal.save(record)
+            outcome.apply = outcome.apply ?? .applied
+        }
+
         // Any reversal is an effect, not "nothing requested".
-        if outcome.changed { outcome.apply = outcome.apply ?? .applied }
     }
 
     private enum AudioEffect: String, Sendable {
@@ -712,7 +721,14 @@ public struct LidCloseActionService {
             case .some(true):
                 break
             case .some(false):
-                continue   // proved alive: nothing of ours is holding it
+                // Reads as running. That does NOT mean nothing of ours is
+                // holding it: a delivered `SIGSTOP` can still be pending (that
+                // is exactly how the entry got here), and dropping it would let
+                // the signal land afterwards with no recovery left (gate
+                // finding, `Undo discards recovery for a still-pending
+                // SIGSTOP`). Keep it listed as to-verify rather than erasing it.
+                stillUnknown.append(entry)
+                continue
             case .none:
                 stillUnknown.append(entry)
                 continue
@@ -884,6 +900,14 @@ public struct LidCloseActionService {
         // Readback, not acceptance: only a device that reads audible is
         // restored (ADR 009).
         guard audio.readOutput(uid: prior.deviceUID)?.isMuted == false else {
+            // The entry stays for a retry, AND the operator is told: the
+            // backstop's attention reporting hangs off `shouldNotify`, so a
+            // silent failure meant a Mac left muted with nobody asked to look
+            // (gate finding, `Failed audio restoration does not request operator
+            // attention`).
+            outcome.shouldNotify = true
+            outcome.notice = .audioLeftMuted
+            outcome.audioRestoreFailed = true
             writeAudit(outcome: "partial", reason: "undo", evaluation: outcome.evaluation,
                        audio: "unmuteFailed",
                        audioError: "readback did not confirm the unmute",

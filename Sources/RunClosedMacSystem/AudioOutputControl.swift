@@ -22,8 +22,15 @@ public protocol AudioOutputBackend: Sendable {
     /// restore. `nil` = no device / unreadable — nothing may be muted.
     func readDefaultOutput() -> AudioOutputSnapshot?
 
-    /// Look a device up by UID. `nil` = the device is gone, which the undo
-    /// treats as "nothing to restore and not an error".
+    /// Look a device up by UID.
+    ///
+    /// `nil` means "could not be read", which is deliberately NOT the same as
+    /// "the device is gone": a transient enumeration failure and a genuinely
+    /// unplugged device both produce `nil` here. Callers must therefore treat
+    /// `nil` as an unconfirmed observation — retry it, count the failure, and
+    /// keep the obligation — rather than as proof of absence. `LidCloseActionService`
+    /// does exactly that (`readOutputTwice` + `unreadablePasses`), and does not
+    /// clear a journal entry merely because this returned `nil`.
     func readOutput(uid: String) -> AudioOutputSnapshot?
 
     /// Mute `uid`. Returns whether the write was ACCEPTED. Acceptance is not
