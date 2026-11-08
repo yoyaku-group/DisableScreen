@@ -1750,3 +1750,29 @@ construction : la fusion vit dans `TickOutcome.merging`, l'addition dans
 `saturatingAdd`, et chaque site d'appel a été balayé mécaniquement.
 
 Suite : **720/720**, 0 échec, 0 warning, rc=0.
+
+### Tour 21 — la priorité des notices, et le point où je m'arrête
+
+Le reçu du head `c472344` a rendu **0 CRITICAL, 3 WARN**.
+
+Corrigés :
+
+| Défaut | Correction |
+|---|---|
+| La priorité des notices dépendait de l'ORDRE d'exécution : `??` faisait gagner qui parlait en premier. Un échec audio survenu avant le pas processus laissait l'opérateur informé du son alors qu'une app restait figée. | Les apps gagnent **toujours**, quel que soit l'ordre : une app figée demande l'opérateur, un appareil muet est visible et trivial à corriger. Les sept sites audio cèdent à un avis apps existant ; les huit sites apps écrasent un avis audio. |
+| `journal.save` au seuil de retrait audio n'était pas vérifié : l'entrée avait déjà bougé en mémoire, donc le tick suivant répétait la transition contre un disque périmé, indéfiniment. | L'échec est reporté. |
+
+Non corrigé, et c'est un arrêt assumé : **l'ordre expiration/restauration**. Ce
+WARN revient pour la troisième fois, avec la bonne analyse à chaque fois — c'est
+`SessionService.step()` qui relâche la protection de veille, dans ses trois
+appelants (`lockedTick`, `lockedThermalTick`, le backstop), avant que le pas
+d'actions capot ne tourne. Le corriger depuis les appelants est ce que j'ai
+tenté cinq fois dans ce lot, et chaque tentative a produit une régression
+(l'effet inverse, puis un clignotement). La correction correcte est que la
+restauration vive DANS le chemin de relâchement de `SessionService`.
+
+Ce n'est pas un correctif, c'est un changement de conception qui touche les
+trois lots déjà fusionnés (ADR 022, 023, 025). Il demande son propre lot, avec
+ses propres tests sur le service de session — pas une vingt-deuxième passe ici.
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.

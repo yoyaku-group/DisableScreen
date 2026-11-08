@@ -418,7 +418,7 @@ public struct LidCloseActionService {
         // finding, `Active audio policy suppresses stranded-device alerts`).
         if !record.unverifiedAudio.isEmpty {
             outcome.shouldNotify = true
-            outcome.notice = outcome.notice ?? .audioLeftMuted
+            outcome.notice = outcome.notice == .appsLeftPaused ? .appsLeftPaused : .audioLeftMuted
             outcome.audioRestoreFailed = true
         }
 
@@ -698,7 +698,7 @@ public struct LidCloseActionService {
         }
         if droppedUnproved {
             outcome.shouldNotify = true
-            outcome.notice = outcome.notice ?? .appsLeftPaused
+            outcome.notice = .appsLeftPaused
         }
         if !resumedDropped.isEmpty {
             let dropped = Set(resumedDropped)
@@ -719,7 +719,7 @@ public struct LidCloseActionService {
         let outstandingBeforeScan = record.unverified.filter { names.contains($0.appName) }
         if !outstandingBeforeScan.isEmpty {
             outcome.shouldNotify = true
-            outcome.notice = outcome.notice ?? .appsLeftPaused
+            outcome.notice = .appsLeftPaused
             outcome.unverifiedPids = record.unverified.map { $0.pid }
         }
         guard let scan = processes.runningProcesses(matching: names) else {
@@ -753,7 +753,7 @@ public struct LidCloseActionService {
         let selectedUnverified = record.unverified.filter { names.contains($0.appName) }
         if !selectedUnverified.isEmpty {
             outcome.shouldNotify = true
-            outcome.notice = outcome.notice ?? .appsLeftPaused
+            outcome.notice = .appsLeftPaused
             outcome.unverifiedPids = record.unverified.map { $0.pid }
         }
         let known = Set(record.stopped.map { $0.pid })
@@ -880,7 +880,7 @@ public struct LidCloseActionService {
                 // obligations without operator notification`).
                 outcome.changed = true
                 outcome.shouldNotify = true
-                outcome.notice = outcome.notice ?? .appsLeftPaused
+                outcome.notice = .appsLeftPaused
                 outcome.unverifiedPids = record.unverified.map { $0.pid }
                 // Tell the operator NOW. Normal apply ticks do not revisit
                 // `unverified` entries, so without this the app could stop a
@@ -898,7 +898,7 @@ public struct LidCloseActionService {
                 unconfirmedPids.append(entry.pid)
                 outcome.changed = true
                 outcome.shouldNotify = true
-                outcome.notice = outcome.notice ?? .appsLeftPaused
+                outcome.notice = .appsLeftPaused
             }
         }
         outcome.stoppedPids = stopped.map { $0.pid }
@@ -1074,7 +1074,7 @@ public struct LidCloseActionService {
             // failure notice`).
             if scratch.audioRestoreFailed {
                 outcome.shouldNotify = true
-                outcome.notice = outcome.notice ?? .audioLeftMuted
+                outcome.notice = outcome.notice == .appsLeftPaused ? .appsLeftPaused : .audioLeftMuted
                 outcome.audioRestoreFailed = true
             }
             // A restore that did NOT land must be visible: the entry is kept
@@ -1084,7 +1084,7 @@ public struct LidCloseActionService {
             // silencieux`).
             if !record.audio.isEmpty && !scratch.changed {
                 outcome.shouldNotify = true
-                outcome.notice = outcome.notice ?? .audioLeftMuted
+                outcome.notice = outcome.notice == .appsLeftPaused ? .appsLeftPaused : .audioLeftMuted
                 outcome.audioRestoreFailed = true
             }
             // And the PERSISTENCE failure, on the same rule as the process
@@ -1104,7 +1104,7 @@ public struct LidCloseActionService {
         // finding, `Disabling audio suppresses stranded-device alerts`).
         if !decision.muteAudio, record.audio.isEmpty, !record.unverifiedAudio.isEmpty {
             outcome.shouldNotify = true
-            outcome.notice = outcome.notice ?? .audioLeftMuted
+            outcome.notice = outcome.notice == .appsLeftPaused ? .appsLeftPaused : .audioLeftMuted
             outcome.audioRestoreFailed = true
         }
 
@@ -1492,7 +1492,7 @@ public struct LidCloseActionService {
                 // frozen (gate finding, `Stranded audio overwrites the
                 // paused-app notice`).
                 outcome.shouldNotify = true
-                outcome.notice = outcome.notice ?? .audioLeftMuted
+                outcome.notice = outcome.notice == .appsLeftPaused ? .appsLeftPaused : .audioLeftMuted
                 outcome.audioRestoreFailed = true
             }
             return
@@ -1514,7 +1514,7 @@ public struct LidCloseActionService {
             // périphérique toujours muet`).
             if !record.unverifiedAudio.isEmpty {
                 outcome.shouldNotify = true
-                outcome.notice = outcome.notice ?? .audioLeftMuted
+                outcome.notice = outcome.notice == .appsLeftPaused ? .appsLeftPaused : .audioLeftMuted
                 outcome.audioRestoreFailed = true
             }
             return
@@ -1527,7 +1527,13 @@ public struct LidCloseActionService {
         // overwrites the paused-app notice`). One notice per pass by design;
         // the first, which is the app one, wins.
         outcome.shouldNotify = true
-        outcome.notice = outcome.notice ?? .audioLeftMuted
+        // APPS WIN, whatever order the two effects ran in. A frozen app needs
+        // the operator; a muted device is visible and trivially fixed. `??` alone
+        // made the winner depend on which branch ran first, so an audio failure
+        // raised BEFORE the process step left the operator told about the sound
+        // while an app stayed frozen (gate finding, `Two recovery paths can
+        // suppress important failure information`).
+        outcome.notice = outcome.notice == .appsLeftPaused ? .appsLeftPaused : .audioLeftMuted
         outcome.audioRestoreFailed = true
     }
 
@@ -1568,7 +1574,12 @@ public struct LidCloseActionService {
                 if !record.unverifiedAudio.contains(where: { $0.deviceUID == prior.deviceUID }) {
                     record.unverifiedAudio.append(prior)
                 }
-                journal.save(record)
+                // A THRESHOLD transition that does not land is not a no-op: the
+                // entry has already MOVED in memory, so the next tick repeats the
+                // transition against stale disk state, forever. Reported, like
+                // every other save failure on this path (gate finding, `Failed
+                // persistence at the audio removal threshold is swallowed`).
+                if !journal.save(record) { outcome.journalSaveFailed = true }
                 outcome.audioDeviceGone = true
                 writeAudit(outcome: "deviceGone", reason: "undo",
                            evaluation: outcome.evaluation, audio: "gone",
