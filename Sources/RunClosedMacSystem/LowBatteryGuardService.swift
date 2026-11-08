@@ -182,6 +182,9 @@ public struct LowBatteryGuardService {
         /// The lid-close actions' result (ADR 026), when one is wired. `nil`
         /// on a machine with no lid-close layer.
         public var lidClose: LidCloseActionService.TickOutcome?
+        /// The lid-close journal could not be read, so its obligations could not
+        /// be recovered this tick.
+        public var lidCloseJournalCorrupt = false
         /// Whether the BATTERY step ran in this tick.
         ///
         /// `false` for `thermalTick()` — the tick the app runs with the battery
@@ -630,6 +633,14 @@ public struct LowBatteryGuardService {
         // moments earlier (gate finding, `The final policy step can reapply
         // effects after protective sleep`). A sleep attempt means "undo only".
         if outcome.sleepAttempted {
+            // A TRUNCATED journal means `undoAll` read an empty record and could
+            // not see the obligations it was meant to recover. This branch
+            // returns without running `runLidCloseStep`, so the corruption check
+            // there never fires — report it here (gate finding, `La branche
+            // après veille omet le contrôle de corruption`).
+            if lidCloseActions?.journal.isCorrupt == true {
+                outcome.lidCloseJournalCorrupt = true
+            }
             // The protective undo ALREADY ran inside `attemptSleep` and left a
             // real result (resumed pids, `changed`). Running `undoAll` again
             // here reads the now-cleared journal and returns `nothingToDo`,
@@ -788,8 +799,16 @@ public struct LowBatteryGuardService {
         // sleep before any other tick can raise it, so discarding it loses the
         // one moment the operator could have been told (gate finding, `Sleep
         // path discards the undo's attention report`).
-        if let undo = undoLidCloseBeforeSleep(&outcome), undo.shouldNotify {
-            outcome.shouldNotify = true
+        if let undo = undoLidCloseBeforeSleep(&outcome) {
+            // MERGE, never discard: the pre-release undo may have left an
+            // incomplete result while THIS one resumed a process, and keeping
+            // only the first lost the newly resumed pid and the `changed`
+            // signal (gate finding, `Second protective undo loses newly resumed
+            // processes`).
+            if undo.shouldNotify { outcome.shouldNotify = true }
+            // Keep the SECOND result when the first is nil, so a pid resumed
+            // only by this pass is not lost.
+            if outcome.lidClose == nil { outcome.lidClose = undo }
         }
         let r = sleeper.sleepNow()
         outcome.sleepAttempted = true
