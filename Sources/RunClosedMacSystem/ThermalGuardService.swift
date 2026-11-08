@@ -285,10 +285,26 @@ public struct ThermalGuardService {
             // sound muted, before any further recovery attempt (gate finding,
             // `Le relâchement thermique ignore une annulation incomplète`). The
             // release is skipped and the operator is told instead.
-            undoIncomplete = undo.undo == .incomplete
-                || undo.undo == .unverifiedProcesses
-                || undo.audioRestoreFailed
-                || !undo.unverifiedPids.isEmpty
+            // Only a LIVE effect that we could not reverse may veto the
+            // release. A HISTORICAL obligation (`unverifiedProcesses`, a
+            // device stranded in `unverifiedAudio`) is not a live effect: no
+            // process entry and no audio entry remains, so there is nothing
+            // the sleep would trap. Vetoing on those disabled the protective
+            // thermal action indefinitely — an unplugged headset was enough
+            // (gate finding, `Historical recovery obligations indefinitely veto
+            // thermal protection`).
+            // A CORRUPT journal is a veto too: `load()` returns empty for a
+            // truncated file, so "nothing left" is not trustworthy and the
+            // effects may still be applied (gate finding, `Unreadable journal
+            // bypasses the thermal undo guard`).
+            let journalUnreadable = actions.journal.isCorrupt
+            let live = actions.journal.load()
+            let liveAudioLeft = !live.audio.isEmpty
+            let liveStopLeft = !live.stopped.isEmpty
+            undoIncomplete = journalUnreadable
+                || undo.undo == .incomplete
+                || (undo.audioRestoreFailed && liveAudioLeft)
+                || (!undo.unverifiedPids.isEmpty && liveStopLeft)
         }
         if undoIncomplete {
             outcome.mutation = .releaseRefused

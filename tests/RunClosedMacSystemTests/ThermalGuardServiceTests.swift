@@ -750,4 +750,51 @@ final class ThermalGuardServiceTests: XCTestCase {
                        "the silent-inert failure this flag exists to expose")
         XCTAssertEqual(sleeper.count, 0)
     }
+
+    // MARK: — Round 6: a historical obligation must not disable heat protection
+
+    private struct NoDeviceAudio: AudioOutputBackend {
+        func readDefaultOutput() -> AudioOutputSnapshot? { nil }
+        func readOutput(uid: String) -> AudioOutputSnapshot? { nil }
+        func setMuted(_ muted: Bool, uid: String) -> Bool { false }
+    }
+
+    private struct NoProcesses: ProcessPauseBackend {
+        func runningProcesses(matching appNames: [String]) -> [RunningProcess]? { [] }
+        func identity(ofPid pid: Int32) -> LidCloseActionJournal.ProcessIdentity? { nil }
+        func stop(pid: Int32) -> Bool { false }
+        func resume(pid: Int32) -> Bool { false }
+        func isStopped(pid: Int32) -> Bool? { nil }
+    }
+
+    /// A HISTORICAL obligation must not veto thermal protection: an unplugged
+    /// headset stranded in `unverifiedAudio` used to block every
+    /// critical-temperature release forever (gate finding, `Historical recovery
+    /// obligations indefinitely veto thermal protection`).
+    func testHistoricalAudioObligationDoesNotVetoThermalRelease() {
+        var rig = makeRig(state: .critical, flag: true, ownedBoot: "A")
+
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("veto-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        let journal = LidCloseActionJournal(url: dir.appendingPathComponent("j.json"))
+        // An obligation with NO live effect: nothing muted, nothing stopped.
+        journal.save(.init(unverifiedAudio: [.init(
+            deviceUID: "GoneHeadset", wasMuted: false, volume: 0.5)]))
+
+        var actions = LidCloseActionService(
+            journal: journal,
+            auditLog: LidCloseActionAuditLog(url: dir.appendingPathComponent("a.jsonl")),
+            audio: NoDeviceAudio(), processes: NoProcesses(), bootID: "A")
+        actions.stopConfirmDelay = {}
+        rig.service.lidCloseActions = actions
+
+        let out = rig.service.step()
+
+        XCTAssertEqual(out.mutation, .released,
+                       "a historical obligation disabled the thermal protection")
+    }
+
+
 }

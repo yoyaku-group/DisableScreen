@@ -638,6 +638,7 @@ public struct LidCloseActionService {
                 // moment later and stay frozen with the promised notice never
                 // raised (gate finding, `Stop timeouts leave recovery
                 // obligations without operator notification`).
+                outcome.changed = true
                 outcome.shouldNotify = true
                 outcome.notice = outcome.notice ?? .appsLeftPaused
                 outcome.unverifiedPids = record.unverified.map { $0.pid }
