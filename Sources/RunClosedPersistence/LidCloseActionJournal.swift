@@ -216,8 +216,10 @@ public struct LidCloseActionJournal: Sendable {
                     audio: [AudioState] = [],
                     stopped: [StoppedProcess] = [],
                     unverified: [StoppedProcess] = [],
-                    unverifiedAudio: [AudioState] = []) {
+                    unverifiedAudio: [AudioState] = [],
+                    droppedAudioEntries: Int = 0) {
             self.schemaVersion = schemaVersion
+            self.droppedAudioEntries = droppedAudioEntries
             self.sessionID = sessionID
             self.startedAt = startedAt
             self.audio = audio
@@ -244,7 +246,13 @@ public struct LidCloseActionJournal: Sendable {
                    // dealt with yet would otherwise be forgotten the moment a
                    // new session starts (gate finding, `reopened efface
                    // unverifiedAudio`).
-                   unverifiedAudio: unverifiedAudio)
+                   unverifiedAudio: unverifiedAudio,
+                   // The DAMAGE count is an obligation too: dropping it made a
+                   // save write a healthy-looking record over a journal that had
+                   // lost an entry, so `isCorrupt` went false while the
+                   // abandoned device stayed muted (gate finding, `Reopening
+                   // clears the persisted audio damage count`).
+                   droppedAudioEntries: droppedAudioEntries)
         }
 
         /// Tolerant decoding: a key added by a later version must not make an

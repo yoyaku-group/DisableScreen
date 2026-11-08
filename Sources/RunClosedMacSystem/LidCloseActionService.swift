@@ -1442,8 +1442,15 @@ public struct LidCloseActionService {
             // present after the clear is an incomplete restore, not a
             // successful one.
             journal.clear()
-            return journal.load().isEmpty && journal.load().unverified.isEmpty
-                ? .restored : .incomplete
+            // The readback must cover EVERY obligation: a record carrying only
+            // `unverifiedAudio` (or a damaged one that lost an entry) is still
+            // recovery work on disk, and reporting `.restored` over it left the
+            // stale entry to be processed by later ticks (gate finding, `Clear
+            // verification omits stranded audio obligations`).
+            let after = journal.load()
+            let clear = after.isEmpty && after.unverified.isEmpty
+                && after.unverifiedAudio.isEmpty && !after.hasDroppedAudioEntries
+            return clear ? .restored : .incomplete
         }
         // A save that does not land leaves the PREVIOUS record on disk, so the
         // undo did not reach a state anyone can rely on.
