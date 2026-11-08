@@ -154,6 +154,9 @@ public struct ThermalGuardService {
         public var lidCloseUndo: LidCloseActionService.TickOutcome?
         /// The lid-close veto budget ran out and the release proceeded anyway.
         public var lidCloseVetoExhausted = false
+        /// The lid-close journal could not be read, so its obligations could not
+        /// be recovered before this release.
+        public var lidCloseJournalCorrupt = false
         /// The latch could not be persisted this tick.
         ///
         /// Reported rather than swallowed because of what it costs: the
@@ -300,6 +303,12 @@ public struct ThermalGuardService {
         // finding, `Thermal undo runs after releasing lid protection`).
         var undoIncomplete = false
         if var actions = lidCloseActions {
+            // A truncated journal loads as EMPTY, so the undo below sees no
+            // obligations. This is the thermal path's own corruption report —
+            // neither the backstop trim nor the guard tick covers it (gate
+            // finding, `Thermal sleep can report successful recovery over a
+            // corrupt journal`).
+            if actions.journal.isCorrupt { outcome.lidCloseJournalCorrupt = true }
             let undo = actions.undoAll()
             outcome.lidCloseUndo = undo
             lidCloseActions = actions

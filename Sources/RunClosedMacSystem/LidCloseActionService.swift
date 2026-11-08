@@ -271,6 +271,7 @@ public struct LidCloseActionService {
     public mutating func step(sessionActive: Bool, lidClosed: Bool?,
                               externalDisplayConnected: Bool?,
                               settings: LidCloseActionSettings) -> TickOutcome {
+        confirmBudgetSpent = 0
         let evaluation = evaluate(sessionActive: sessionActive, lidClosed: lidClosed,
                                   externalDisplayConnected: externalDisplayConnected,
                                   settings: settings)
@@ -810,7 +811,13 @@ public struct LidCloseActionService {
             }
             return .success(.partial)
         }
-        if hasOutstanding || scanIncomplete { return .success(.unconfirmed) }
+        if hasOutstanding || scanIncomplete || droppedUnproved {
+            // A de-selected app we could not resume is an unresolved
+            // obligation: reporting `.stopped` made `combine` say `.applied`
+            // while it may still be frozen (gate finding, `Failed resume of a
+            // deselected app can still report fully applied`).
+            return .success(.unconfirmed)
+        }
         return .success(.stopped)
     }
 
@@ -857,19 +864,41 @@ public struct LidCloseActionService {
     /// exactly how a stopped app lost its journal entry and could never be
     /// resumed (gate finding). The interval is injectable so the tests stay
     /// deterministic and no test sleeps.
-    private func confirmStopped(pid: Int32) -> Bool? {
+    private mutating func confirmStopped(pid: Int32) -> Bool? {
         var last: Bool?
         for attempt in 0..<Self.stopConfirmAttempts {
             last = processes.isStopped(pid: pid)
             if last == true { return true }
             guard attempt + 1 < Self.stopConfirmAttempts else { break }
+            // The SHARED budget, not just the per-process one: the caller holds
+            // `LidWriteLock` and the protective guards need it.
+            if confirmBudgetSpent >= Self.stopConfirmBudgetSeconds {
+                return last
+            }
+            confirmBudgetSpent += confirmDelaySeconds
             stopConfirmDelay()
         }
         return last
     }
 
+    /// Injected so the budget accounts for the real delay in production and for
+    /// nothing in tests.
+    public var confirmDelaySeconds: Double = 0.02
+
     /// How many times the stopped state is read before it is believed.
     static let stopConfirmAttempts = 5
+
+    /// Total wall-clock budget for confirming ALL stops in one step.
+    ///
+    /// Per-process retries are bounded, but the step runs inside the caller's
+    /// `LidWriteLock` — the same lock the battery and thermal guards take. With
+    /// many targets the per-process sleeps multiplied out: 100 processes × 4 ×
+    /// 20 ms held the shared guard for 8 s, delaying a protective release (gate
+    /// finding, `Sequential stop confirmation delays the shared protective
+    /// guard`). Once this budget is spent, the remaining processes are reported
+    /// UNCONFIRMED rather than waited on — the journal already records them, and
+    /// a later pass can prove them without blocking the safety paths.
+    public static let stopConfirmBudgetSeconds: Double = 0.5
 
     /// How many SEPARATE undo passes a device must stay unreadable before it is
     /// concluded removed. Three hours of 30 s ticks is far past any transient.
@@ -878,6 +907,8 @@ public struct LidCloseActionService {
     /// The wait between those reads. Production sleeps 20 ms (5 × 20 ms = the
     /// sub-100 ms window a `SIGSTOP` needs); tests replace it with a no-op.
     public var stopConfirmDelay: @Sendable () -> Void = { usleep(20_000) }
+    /// Seconds of confirmation time already spent in THIS step.
+    private var confirmBudgetSpent: Double = 0
 
     /// Undo the effects whose OWN switch is now off.
     ///
