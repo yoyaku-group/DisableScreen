@@ -1511,6 +1511,23 @@ final class LidCloseActionServiceTests: XCTestCase {
         XCTAssertTrue(out.changed)
     }
 
+
+    /// An unresolved STRANDED device must be reported even while another output
+    /// is muted successfully — the obligation does not stop existing because
+    /// this tick did something else (gate finding, `Active audio policy
+    /// suppresses stranded-device alerts`).
+    func testStrandedDeviceAlertsEvenWhenAnotherOutputIsMuted() {
+        var rig = makeRig(muted: false)
+        rig.journal.save(.init(unverifiedAudio: [.init(
+            deviceUID: "GoneHeadset", wasMuted: false, volume: 0.5)]))
+
+        let out = stepEnclosed(&rig, settings(mute: true))
+
+        XCTAssertTrue(out.shouldNotify,
+                      "a stranded device went silent while another output was muted")
+        XCTAssertEqual(out.notice, .audioLeftMuted)
+    }
+
     // MARK: — Journal durability
 
     /// The journal is written BEFORE the effect: the file on disk carries the

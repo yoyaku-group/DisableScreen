@@ -326,6 +326,17 @@ public struct LidCloseActionService {
         // mute state: re-adopt the obligation instead of forgetting it, so the
         // undo can restore it (gate finding, `Temporary device absence
         // permanently discards restoration`).
+        // An UNRESOLVED stranded device is an obligation whatever this tick
+        // manages to do — the same rule the process path applies. Reporting it
+        // only on the paths that happen to touch `unverifiedAudio` hid it for
+        // the whole session while another output was muted successfully (gate
+        // finding, `Active audio policy suppresses stranded-device alerts`).
+        if !record.unverifiedAudio.isEmpty {
+            outcome.shouldNotify = true
+            outcome.notice = outcome.notice ?? .audioLeftMuted
+            outcome.audioRestoreFailed = true
+        }
+
         if decision.muteAudio, let stranded = firstReturnedStrandedDevice(&record) {
             if !record.audio.contains(where: { $0.deviceUID == stranded.deviceUID }) {
                 record.audio.append(stranded)
