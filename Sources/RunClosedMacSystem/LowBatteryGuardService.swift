@@ -851,6 +851,13 @@ public struct LowBatteryGuardService {
             if undo.changed { merged.changed = true }
             if undo.shouldNotify { merged.shouldNotify = true }
             if undo.audioRestoreFailed { merged.audioRestoreFailed = true }
+            // A persistence failure in EITHER pass must survive the merge:
+            // dropping it told the caller the journal was fine while stale
+            // process ownership remained on disk, so a later undo could resume
+            // a process the operator had paused (gate finding, `Second
+            // protective undo loses persistence failure`).
+            if undo.journalSaveFailed { merged.journalSaveFailed = true }
+            if undo.audioDeviceGone { merged.audioDeviceGone = true }
             // The SECOND result is the later truth about `undo`.
             merged.undo = undo.undo ?? merged.undo
             outcome.lidClose = merged

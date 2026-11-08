@@ -342,13 +342,17 @@ public struct LidCloseActionJournal: Sendable {
                 stopped = loose.compactMap { $0.value }
                 droppedProcessEntries += loose.filter { $0.value == nil }.count
             } else {
+                // Present but malformed as a WHOLE: that is a lost obligation,
+                // not an empty list (the same rule the audio field follows).
                 stopped = []
+                if (try? c.contains(.stopped)) == true { droppedProcessEntries += 1 }
             }
             if let loose = try? c.decode([LooseStoppedProcess].self, forKey: .unverified) {
                 unverified = loose.compactMap { $0.value }
                 droppedProcessEntries += loose.filter { $0.value == nil }.count
             } else {
                 unverified = []
+                if (try? c.contains(.unverified)) == true { droppedProcessEntries += 1 }
             }
         }
     }
