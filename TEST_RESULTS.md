@@ -1251,19 +1251,19 @@ exécutées.
 $ arch -arm64 swift build && arch -arm64 swift test
 RunClosedCoreTests           194 passed
 RunClosedPersistenceTests     88 passed
-RunClosedMacSystemTests      385 passed
+RunClosedMacSystemTests      386 passed
 RunClosedHelperSupportTests   40 passed
 RunClosedAppTests             11 passed
                              ---
-                             718 passed, 0 failures, 0 warnings, rc=0
+                             719 passed, 0 failures, 0 warnings, rc=0
 ```
 
 The earlier runs in this section reported 657, then 663, then 671 — each one
-true of the commit it ran on. The final figure is **718**, measured on the head
-that closes the lot (rounds 7 to 10 included), and it is the only number that
+true of the commit it ran on. The final figure is **719**, measured on the head
+that closes the lot (rounds 7 to 11 included), and it is the only number that
 describes the code being merged.
 
-141 tests nouveaux pour ce lot, mesurés de 577 (L3) à 718 : politique pure
+142 tests nouveaux pour ce lot, mesurés de 577 (L3) à 719 : politique pure
 (`LidCloseActionPolicyTests`), service sur fakes (`LidCloseActionServiceTests`,
 dont les deux contre-épreuves de la ronde 7), persistance
 (`LidCloseActionJournalTests` + `LidCloseActionSettingsKillSwitchTests`),
@@ -1557,6 +1557,24 @@ dans `TickOutcome.merging` et n'est plus recopiée à la main ; c'est la seule
 raison pour laquelle ce tour n'a pas trouvé une cinquième copie.
 
 Suite : **718/718**, 0 échec, 0 warning, rc=0.
+
+### Tour 11 — un WARN : la même notice, l'autre occurrence
+
+Le tour 11 a rendu **1 WARN, 0 CRITICAL**. Le tour 10 avait corrigé la notice
+audio qui écrasait celle des apps — mais seulement dans la branche « échec de
+restauration ». La branche « audio vide + appareil échoué » portait la même
+affectation nue, et produisait le même résultat : l'opérateur apprenait un
+problème de son alors qu'une application restait figée. Corrigé avec `??` comme
+sa jumelle.
+
+C'est la troisième fois dans ce lot qu'un correctif est appliqué à un site et
+pas à son jumeau. Le test le verrouille désormais :
+`testTheAppNoticeSurvivesAStrandedAudioDevice`, dont la première version était
+elle aussi vacante — elle exerçait un APPLY (`undo == nil`) et non le chemin
+d'annulation visé. Réécrite jusqu'à ce que le retrait du correctif la fasse
+échouer.
+
+Suite : **719/719**, 0 échec, 0 warning, rc=0.
 
 ### Le coupe-circuit, éprouvé et non affirmé
 

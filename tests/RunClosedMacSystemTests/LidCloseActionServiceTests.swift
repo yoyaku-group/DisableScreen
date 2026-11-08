@@ -1277,6 +1277,36 @@ final class LidCloseActionServiceTests: XCTestCase {
         XCTAssertTrue(out.changed)
     }
 
+    /// When an app cannot be resumed AND a stranded device is still recorded,
+    /// the operator must be told about the APP. The two notices travel in one
+    /// field, so the audio one used to overwrite the app one and the frozen app
+    /// went unmentioned — the worse of the two states, silently dropped (gate
+    /// findings, `Audio recovery failure overwrites the paused-app notice` and
+    /// `Stranded audio overwrites the paused-app notice`).
+    ///
+    /// Counter-proof: with a bare `outcome.notice = .audioLeftMuted` this reads
+    /// `.audioLeftMuted`.
+    func testTheAppNoticeSurvivesAStrandedAudioDevice() {
+        var rig = makeRig(apps: [(4711, "Slack", 1_700_000_000)])
+        // The state a crashed session leaves, shaped for THIS defect: a process
+        // we froze, NO live audio entry, and one stranded device. The undo
+        // therefore resumes (fails to) first and then reaches the EMPTY-audio
+        // branch, which is the one that used to overwrite the app notice.
+        rig.journal.save(.init(
+            stopped: [.init(pid: 4711, startSeconds: 1_700_000_000, startMicroseconds: 0,
+                            bootID: "A", path: "/Applications/Slack.app/Contents/MacOS/Slack",
+                            appName: "Slack")],
+            unverifiedAudio: [.init(deviceUID: "GoneHeadset", wasMuted: false, volume: 0.5)]))
+        rig.processes.table[4711]?.stopped = true
+        rig.processes.resumeHasNoEffect = true
+
+        let out = rig.service.undoAll()
+
+        XCTAssertTrue(out.shouldNotify)
+        XCTAssertEqual(out.notice, .appsLeftPaused,
+                       "the frozen app was announced as nothing but an audio problem")
+    }
+
     // MARK: — Lord review round 4, second follow-up
 
     /// A deselect whose identity cannot be proved must RAISE attention: the app

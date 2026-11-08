@@ -1429,8 +1429,13 @@ public struct LidCloseActionService {
             // never told (gate finding, `Les périphériques audio devenus
             // injoignables cessent de déclencher une alerte`).
             if !record.unverifiedAudio.isEmpty {
+                // `??`, for the same reason as the branch below: the app notice
+                // is set first and is the more serious of the two, so replacing
+                // it here told the operator about the sound while an app stayed
+                // frozen (gate finding, `Stranded audio overwrites the
+                // paused-app notice`).
                 outcome.shouldNotify = true
-                outcome.notice = .audioLeftMuted
+                outcome.notice = outcome.notice ?? .audioLeftMuted
                 outcome.audioRestoreFailed = true
             }
             return
