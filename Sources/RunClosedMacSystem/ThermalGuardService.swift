@@ -149,6 +149,8 @@ public struct ThermalGuardService {
         /// What the lid-close undo did before this release's sleep (ADR 026).
         /// `nil` when no lid-close layer is wired or nothing was applied.
         public var lidCloseUndo: LidCloseActionService.TickOutcome?
+        /// The lid-close veto budget ran out and the release proceeded anyway.
+        public var lidCloseVetoExhausted = false
         /// The latch could not be persisted this tick.
         ///
         /// Reported rather than swallowed because of what it costs: the
@@ -306,13 +308,30 @@ public struct ThermalGuardService {
                 || (undo.audioRestoreFailed && liveAudioLeft)
                 || (!undo.unverifiedPids.isEmpty && liveStopLeft)
         }
+        // The veto is BOUNDED. Refusing forever trades a comfort nuisance (a
+        // muted output, a paused app — both survive sleep via hibernation and
+        // both are trivially fixed by the operator) for a machine that cannot
+        // cool itself, which is the safety case this whole rule exists for. A
+        // permanently truncated journal must not keep an overheating Mac awake
+        // indefinitely (gate finding, `Failed lid-close recovery indefinitely
+        // vetoes thermal sleep`).
         if undoIncomplete {
-            outcome.mutation = .releaseRefused
-            outcome.mutationError = "the lid-close undo is incomplete; not releasing "
-                + "the flag so the Mac cannot sleep with effects still applied"
-            outcome.shouldNotify = true
-            outcome.notice = .releaseFailed
-            return
+            record.lidCloseVetoes += 1
+            if record.lidCloseVetoes <= Self.maximumLidCloseVetoes {
+                outcome.mutation = .releaseRefused
+                outcome.mutationError = "the lid-close undo is incomplete; not releasing "
+                    + "the flag so the Mac cannot sleep with effects still applied "
+                    + "(\(record.lidCloseVetoes)/\(Self.maximumLidCloseVetoes))"
+                outcome.shouldNotify = true
+                outcome.notice = .releaseFailed
+                return
+            }
+            // Budget exhausted: PROTECTION WINS. Say so loudly.
+            outcome.lidCloseVetoExhausted = true
+            FileHandle.standardError.write(Data(
+                ("[RunClosed] thermal: lid-close undo still incomplete after "
+                 + "\(Self.maximumLidCloseVetoes) attempts; releasing anyway because heat "
+                 + "is the safety case — effects may remain applied across the sleep\n").utf8))
         }
         // `.automatic` only: heat has no cross-boot widening. A stale record is
         // NOT active ownership, and the policy already refused that case — if
@@ -457,6 +476,11 @@ public struct ThermalGuardService {
             error: outcome.mutationError,
             sleepRC: outcome.sleepRC))
     }
+
+    /// How many thermal attempts may be refused because the lid-close undo is
+    /// incomplete before heat wins. Small: a transient failure resolves in one
+    /// or two ticks, a permanent one must not gate a safety action.
+    public static let maximumLidCloseVetoes = 3
 
     private static func triState(_ value: Bool?, closed: String, open: String) -> String {
         guard let value else { return "unknown" }

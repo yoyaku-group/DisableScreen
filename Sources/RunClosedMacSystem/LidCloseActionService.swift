@@ -879,10 +879,16 @@ public struct LidCloseActionService {
             // Still audible: retry the write once, then believe only a readback.
             guard snapshot.canMute else { return .failed }
             audio.setMuted(true, uid: entry.deviceUID)
-            if let after = audio.readOutput(uid: entry.deviceUID)?.isMuted, after {
-                return .muted
+            // Three-way, exactly like the initial mute: an ACCEPTED write whose
+            // readback is unavailable may well have muted the device, so
+            // reporting `.failed` ("nothing landed") contradicted the machine
+            // (gate finding, `Mute retry loses an accepted but unconfirmed
+            // change`).
+            switch audio.readOutput(uid: entry.deviceUID)?.isMuted {
+            case .some(true): return .muted
+            case .some(false): return .failed
+            case .none: return .unconfirmed
             }
-            return .failed
         }
         return .alreadyMuted
     }

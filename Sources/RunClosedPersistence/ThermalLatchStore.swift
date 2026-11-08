@@ -47,18 +47,39 @@ public struct ThermalLatchStore: Sendable {
         public var schemaVersion: Int = kThermalLatchSchemaVersion
         public var latch: ThermalPolicy.Latch
         public var updatedAt: String?
+        /// How many thermal releases were refused because the ADR 026 lid-close
+        /// undo was incomplete. Bounded so a permanently damaged journal cannot
+        /// keep an overheating Mac awake forever.
+        public var lidCloseVetoes: Int = 0
 
         public init(latch: ThermalPolicy.Latch, updatedAt: String? = nil) {
             self.latch = latch
             self.updatedAt = updatedAt
         }
+
+        private enum CodingKeys: String, CodingKey {
+            case schemaVersion, latch, updatedAt, lidCloseVetoes
+        }
+
+        /// Tolerant: a file written by a later version (extra keys) and one
+        /// written before `lidCloseVetoes` existed must both still decode.
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion)
+                ?? kThermalLatchSchemaVersion
+            latch = try c.decode(ThermalPolicy.Latch.self, forKey: .latch)
+            updatedAt = try c.decodeIfPresent(String.self, forKey: .updatedAt)
+            lidCloseVetoes = try c.decodeIfPresent(Int.self, forKey: .lidCloseVetoes) ?? 0
+        }
     }
 
     public func load() -> Record {
         guard let data = try? Data(contentsOf: url),
-              let rec = try? JSONDecoder().decode(Record.self, from: data) else {
+              var rec = try? JSONDecoder().decode(Record.self, from: data) else {
             return Record(latch: ThermalPolicy.Latch())
         }
+        // Tolerant: an older file has no counter, so it reads as zero.
+        if rec.lidCloseVetoes < 0 { rec.lidCloseVetoes = 0 }
         return rec
     }
 

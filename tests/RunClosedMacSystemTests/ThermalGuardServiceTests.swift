@@ -797,4 +797,36 @@ final class ThermalGuardServiceTests: XCTestCase {
     }
 
 
+
+    /// A PERSISTENTLY incomplete lid-close undo must not keep an overheating Mac
+    /// awake forever: the veto is bounded so heat — the safety case — wins
+    /// (gate finding, `Failed lid-close recovery indefinitely vetoes thermal
+    /// sleep`).
+    func testThermalVetoIsBoundedSoHeatEventuallyWins() {
+        var rig = makeRig(state: .critical, flag: true, ownedBoot: "A")
+
+        // A journal that can never be resolved: corrupt on disk.
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("veto2-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("j.json")
+        try? Data("{ truncated".utf8).write(to: url)
+        var actions = LidCloseActionService(
+            journal: LidCloseActionJournal(url: url),
+            auditLog: LidCloseActionAuditLog(url: dir.appendingPathComponent("a.jsonl")),
+            audio: NoDeviceAudio(), processes: NoProcesses(), bootID: "A")
+        actions.stopConfirmDelay = {}
+        rig.service.lidCloseActions = actions
+
+        // First attempts are refused (correct, bounded).
+        for _ in 0..<ThermalGuardService.maximumLidCloseVetoes {
+            XCTAssertEqual(rig.service.step().mutation, .releaseRefused)
+        }
+        // Then heat WINS: the Mac must be released.
+        XCTAssertEqual(rig.service.step().mutation, .released,
+                       "a permanently damaged journal kept the hot Mac awake")
+    }
+
+
 }
