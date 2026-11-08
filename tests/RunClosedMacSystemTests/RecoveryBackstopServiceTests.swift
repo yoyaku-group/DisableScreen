@@ -840,7 +840,8 @@ final class RecoveryBackstopServiceTests: XCTestCase {
             plan: RecoveryPolicy.plan(RecoveryPolicy.Facts(
                 recordBootID: "A", recordOwnedEnabled: true, currentBootID: "A",
                 session: nil,
-                now: SessionPolicy.Now(wall: epoch, continuousNanoseconds: 0, bootID: "A"))))
+                now: SessionPolicy.Now(wall: epoch, continuousNanoseconds: 0, bootID: "A"),
+                thermalGuardEnabled: true)))
         report.batteryMutation = .releaseRefused
         report.batteryReason = .criticalOwned
         report.batteryError = "notOwned"
@@ -1461,5 +1462,48 @@ final class RecoveryBackstopServiceTests: XCTestCase {
         XCTAssertTrue(report.thermalLatchSaveFailed)
         XCTAssertEqual(outcome.exitCode, .backendFailure)
         XCTAssertEqual(outcome.exitCode.rawValue, 5)
+    }
+
+    /// A COOL machine whose record still claims the flag must never release.
+    ///
+    /// `RecoveryPolicy.plan` selects the thermal step from FILE FACTS ONLY (the
+    /// ownership record plus the kill switch) and deliberately does not read
+    /// the thermal state there: a reading taken before the lock would be stale
+    /// by the time the section runs. The safety of that shortcut rests entirely
+    /// on the live re-check inside `ThermalGuardService.step()`, which re-reads
+    /// the state under the lock and answers `.nominal`. This test pins that
+    /// pairing, so a future "optimisation" that trusts the plan cannot start
+    /// releasing the flag on a cold Mac.
+    func testACoolMachineWithAClaimedFlagIsNeverReleased() {
+        for state in [ThermalState.nominal, .fair] {
+            var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 80),
+                              thermalState: state)
+            saveSession(rig, duration: nil)
+            let outcome = rig.service.run()
+            XCTAssertTrue(rig.lid.calls.isEmpty,
+                          "\(state) must never release the flag")
+            XCTAssertEqual(rig.sleeper.count, 0)
+            guard case .completed(let report) = outcome else {
+                return XCTFail("expected a completed run, got \(outcome)")
+            }
+            // The step RAN (the plan said it might have work) and decided not
+            // to act: exactly the live re-check doing its job.
+            XCTAssertTrue(report.thermalStepRan)
+            XCTAssertNil(report.thermalMutation)
+            XCTAssertEqual(outcome.exitCode, .ok)
+            XCTAssertNotNil(rig.sessionStore.load(), "the session is untouched")
+        }
+    }
+
+    /// The other half of the same contract: the plan is a cheap PREDICATE, so a
+    /// machine that does not claim the flag skips the thermal step entirely
+    /// rather than paying for a readback it cannot act on.
+    func testAMachineThatDoesNotClaimTheFlagSkipsTheThermalStep() {
+        var rig = makeRig(flag: false, ownedBoot: nil, battery: Self.reading(false, 80),
+                          thermalState: .critical)
+        let outcome = rig.service.run()
+        XCTAssertEqual(outcome, .nothingToDo, "nothing is ours: the fast path stays free")
+        XCTAssertTrue(rig.lid.calls.isEmpty)
+        XCTAssertEqual(rig.sleeper.count, 0)
     }
 }

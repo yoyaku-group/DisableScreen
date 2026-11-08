@@ -598,6 +598,12 @@ public struct RecoveryBackstopService {
             if report.thermalStepRan {
                 obj["thermalStepRan"] = true
             }
+            // Distinguishes "the operator switched it off" from "there was
+            // nothing of ours to protect" — otherwise both read as a bare
+            // `thermal: false` in a post-mortem.
+            if let skip = report.plan.thermalSkipReason {
+                obj["thermalSkipReason"] = skip.rawValue
+            }
             if let reason = report.thermalReason {
                 obj["thermalReason"] = reason.rawValue
                 obj["thermalMutation"] = report.thermalMutation?.rawValue as Any? ?? NSNull()
