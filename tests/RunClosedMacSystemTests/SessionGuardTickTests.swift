@@ -657,6 +657,45 @@ final class SessionGuardTickTests: XCTestCase {
         XCTAssertEqual(rig.sleeper.count, 1)
     }
 
+    /// Review round 2 (WARNING): a hot, enclosed machine could get its flag
+    /// back. `serious` inside the ten-minute grace answers `.warn` with no
+    /// mutation, so the tick fell through to the battery step, whose `.rearm`
+    /// branch turned `disablesleep` back ON — recreating the exact condition
+    /// the thermal policy exists to escape, through a branch that never
+    /// consulted heat.
+    ///
+    /// The veto is scoped to the RE-ARM, not the whole battery step: the test
+    /// just above proves a thermal warning must NOT suppress the critical
+    /// release, so starving the step wholesale would drain the machine.
+    func testAHotEnclosedMacNeverGetsItsFlagBack() {
+        // A pending re-arm debt: the guard released earlier and the charge is
+        // back above the threshold, so the battery step wants to re-enable.
+        let rig = makeRig(flag: false, ownedBoot: "A", battery: Self.reading(false, 60),
+                          thermal: .serious, lidClosed: true, externalDisplay: false)
+        rig.latchStore.save(.init(latch: LowBatteryPolicy.Latch(releasedByGuard: true),
+                                  releasedBootID: "A"))
+        var service = rig.guardService
+        let outcome = service.tick()
+        XCTAssertNotEqual(outcome.mutation, .rearmed,
+                          "a hot enclosed Mac must never be re-enabled")
+        guard case .some(false) = rig.flag.value else {
+            return XCTFail("the flag must stay OFF, got \(String(describing: rig.flag.value))")
+        }
+    }
+
+    /// The veto is thermal-only: a hot machine with the lid OPEN may re-arm,
+    /// because air circulates and the battery rule owns that case.
+    func testAHotMacWithTheLidOpenMayStillRearm() {
+        let rig = makeRig(flag: false, ownedBoot: "A", battery: Self.reading(false, 60),
+                          thermal: .serious, lidClosed: false, externalDisplay: false)
+        rig.latchStore.save(.init(latch: LowBatteryPolicy.Latch(releasedByGuard: true),
+                                  releasedBootID: "A"))
+        var service = rig.guardService
+        let outcome = service.tick()
+        XCTAssertEqual(outcome.mutation, .rearmed,
+                       "an open lid means the machine can cool; the battery rule wins")
+    }
+
     /// The thermal kill switch is the app's too: no thermal service, no thermal
     /// behaviour — the pre-ADR-025 tick, untouched.
     func testNoThermalServiceMeansNoThermalBehaviour() {

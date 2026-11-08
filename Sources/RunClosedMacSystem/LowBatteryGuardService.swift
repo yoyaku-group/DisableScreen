@@ -296,14 +296,34 @@ public struct LowBatteryGuardService {
     /// (there is no record left to expire).
     ///
     /// A thermal WARNING does NOT govern the tick: telling the operator the Mac
-    /// is hot must not suppress the independent battery protection. And an
-    /// inert thermal minute — `nominal`, or hot with the lid open — leaves the
-    /// rest of the tick untouched, so ADR 022/023 behaviour is unchanged
-    /// whenever heat has nothing to say.
+    /// is hot must not suppress the independent battery protection — a machine
+    /// at 4 % must still release, hot or not. And an inert thermal minute —
+    /// `nominal`, or hot with the lid open — leaves the rest of the tick
+    /// untouched, so ADR 022/023 behaviour is unchanged whenever heat has
+    /// nothing to say.
+    ///
+    /// The one thing heat must block is the RE-ARM, and that is enforced where
+    /// the re-arm is decided (`lockedTick`), not by starving the whole battery
+    /// step: blocking the step wholesale would also block the critical release,
+    /// which is the opposite of protective (review round 2).
     public static func thermalGovernsTheTick(
         _ outcome: ThermalGuardService.TickOutcome
     ) -> Bool {
         outcome.mutation != nil || outcome.sessionEndedByHeat
+    }
+
+    /// Is the machine hot in the one configuration where the thermal rule is
+    /// allowed to act — lid closed, no display, and the flag provably ours?
+    ///
+    /// Used to VETO a battery re-arm: re-enabling `disablesleep` on a hot,
+    /// enclosed Mac recreates the exact condition the thermal policy exists to
+    /// escape, and it would do so through a branch that never consults heat.
+    /// A machine that is hot but NOT enclosed is left alone — air circulates,
+    /// the battery rule wins.
+    public static func thermalVetoesRearm(_ outcome: ThermalGuardService.TickOutcome) -> Bool {
+        outcome.evaluation.decision.state.isHot
+            && outcome.evaluation.input.isEnclosed
+            && outcome.evaluation.input.ownership == .ownedThisBoot
     }
 
     /// What a protective-only caller did. There is no `rearmed` case: the
@@ -477,6 +497,20 @@ public struct LowBatteryGuardService {
                            recordBootIDBefore: recordBootIDBefore)
 
         case .rearm:
+            // ADR 025 — a hot, ENCLOSED machine must never get its flag back.
+            // Re-enabling `disablesleep` here would recreate the exact
+            // condition the thermal policy exists to escape, through a branch
+            // that never consults heat: the ten-minute grace period would
+            // become ten minutes during which the battery rule can undo the
+            // thermal one. Checked BEFORE the session rules because heat
+            // outranks a pending re-arm debt — the debt survives, it is simply
+            // not paid while the machine cannot cool (review round 2).
+            if let thermal, Self.thermalVetoesRearm(thermal) {
+                outcome.mutation = nil
+                outcome.mutationError = "re-arm withheld: the Mac is hot with the lid closed "
+                    + "and no display attached"
+                break
+            }
             // ADR 023 §4: re-arm only while the session is still valid (not
             // due) AND on the boot that owns it. With no session the answer is
             // `true` and this is exactly the ADR 022 path.
