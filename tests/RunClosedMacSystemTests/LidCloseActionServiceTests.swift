@@ -29,9 +29,16 @@ final class LidCloseActionServiceTests: XCTestCase {
         /// happen. Distinct from `deviceGone` because the service treats them
         /// differently.
         var readbackUnreadable = false
+        /// Number of upcoming `readOutput` calls that return nil without the
+        /// device being gone — a transient failure, not a removal.
+        var failNextReads = 0
 
         func readDefaultOutput() -> AudioOutputSnapshot? { device }
         func readOutput(uid: String) -> AudioOutputSnapshot? {
+            if failNextReads > 0 {
+                failNextReads -= 1
+                return nil
+            }
             guard !readbackUnreadable, !deviceGone, let d = device, d.uid == uid else {
                 return nil
             }
@@ -68,6 +75,16 @@ final class LidCloseActionServiceTests: XCTestCase {
         /// When true, `isStopped` returns nil — an unreadable observation, which
         /// is not proof the signal did nothing.
         var stopReadbackUnreadable = false
+        /// Model the ASYNC part of SIGSTOP: the process only reads as stopped
+        /// from the Nth read onwards. `nil` = immediate.
+        var stopVisibleAfterReads: Int?
+        /// Model a CRASH part-way through the stop loop: reading the journal
+        /// exactly at this point throws, so the collector captures what was on
+        /// disk BEFORE the remaining signals were sent.
+        var crashAfterSignals: Int?
+        var signalCount = 0
+        /// The journal contents captured at the crash point.
+        var journalAtCrash: [Int32]?
 
         func runningProcesses(matching appNames: [String]) -> [RunningProcess] {
             table.values
@@ -89,9 +106,20 @@ final class LidCloseActionServiceTests: XCTestCase {
 
         func stop(pid: Int32) -> Bool {
             stopCalls.append(pid)
+            signalCount += 1
+            if let deadline = crashAfterSignals, signalCount == deadline,
+               let j = journalProbe {
+                journalAtCrash = j()
+            }
             guard !stopHasNoEffect, var p = table[pid] else { return true }
-            p.stopped = true
-            table[pid] = p
+            // Model the ASYNC transition: with `stopVisibleAfterReads` set the
+            // signal has landed but the process does not READ as stopped until
+            // enough reads have happened (the real SIGSTOP window).
+            readCount[pid] = 0
+            if stopVisibleAfterReads == nil {
+                p.stopped = true
+                table[pid] = p
+            }
             return true
         }
 
@@ -103,8 +131,20 @@ final class LidCloseActionServiceTests: XCTestCase {
             return true
         }
 
+        var readCount: [Int32: Int] = [:]
+        /// Set by the rig so the fake can read the journal at the crash point.
+        var journalProbe: (() -> [Int32])?
+
         func isStopped(pid: Int32) -> Bool? {
             guard !stopReadbackUnreadable else { return nil }
+            readCount[pid, default: 0] += 1
+            if let threshold = stopVisibleAfterReads,
+               var p = table[pid], !p.stopped {
+                if readCount[pid, default: 0] >= threshold {
+                    p.stopped = true
+                    table[pid] = p
+                }
+            }
             return table[pid]?.stopped
         }
 
@@ -147,9 +187,13 @@ final class LidCloseActionServiceTests: XCTestCase {
         }
         let journal = LidCloseActionJournal(url: dir.appendingPathComponent("lid_close_actions.json"))
         let audit = LidCloseActionAuditLog(url: dir.appendingPathComponent("lid_close_audit.jsonl"))
-        let service = LidCloseActionService(
+        processes.journalProbe = { journal.load().stopped.map { $0.pid } }
+        var service = LidCloseActionService(
             journal: journal, auditLog: audit, audio: audio, processes: processes,
             bootID: "A", wallClock: { Date(timeIntervalSince1970: 1_700_000_000) })
+        // No sleeping in tests: the confirmation retries are driven by the
+        // fakes' own read counters instead of wall-clock waits.
+        service.stopConfirmDelay = {}
         return Rig(service: service, audio: audio, processes: processes,
                    journal: journal, audit: audit)
     }
@@ -667,6 +711,91 @@ final class LidCloseActionServiceTests: XCTestCase {
         let out = stepEnclosed(&rig, settings(enabled: false))
         XCTAssertEqual(out.evaluation.decision.action, .undo)
         XCTAssertTrue(out.shouldNotify)
+    }
+
+
+    /// SIGSTOP is ASYNCHRONOUS: the process needs to be scheduled to reach
+    /// `SSTOP`, so one immediate read can legitimately still see it running.
+    /// Believing that single read dropped the journal entry for a process that
+    /// then stopped — and the undo could never resume it (gate finding,
+    /// `Immediate running readback can discard a pending stop`).
+    func testDelayedStopTransitionIsStillJournaled() {
+        let rig0 = makeRig(apps: [(4711, "Slack", 1_700_000_000)])
+        var rig = rig0
+        // Stopped state becomes visible only on the 3rd read.
+        rig.processes.stopVisibleAfterReads = 3
+
+        let out = stepEnclosed(&rig, settings(mute: false, pause: true))
+
+        XCTAssertEqual(out.apply, .applied, "a delayed transition read as a failure")
+        XCTAssertEqual(rig.journal.load().stopped.map { $0.pid }, [4711],
+                       "the entry was dropped for a process that DID stop")
+        XCTAssertEqual(rig.processes.table[4711]?.stopped, true)
+    }
+
+    /// And a stop that genuinely never takes is still dropped — the retry must
+    /// not turn "never stopped" into ownership.
+    func testStopThatNeverTakesIsStillDroppedAfterTheRetries() {
+        var rig = makeRig(apps: [(4711, "Slack", 1_700_000_000)])
+        rig.processes.stopHasNoEffect = true
+
+        let out = stepEnclosed(&rig, settings(mute: false, pause: true))
+
+        XCTAssertEqual(out.apply, .failed)
+        XCTAssertTrue(rig.journal.load().stopped.isEmpty,
+                      "ownership was granted to a process we never stopped")
+    }
+
+    /// One journal write per process, immediately before its own signal — so a
+    /// crash part-way through the loop cannot grant ownership over the ones
+    /// that were never signalled (gate finding, `Batch journal grants resume
+    /// ownership before signals are sent`).
+    func testOnlySignalledProcessesGainOwnership() {
+        let rig0 = makeRig(apps: [(1, "Slack", 100), (2, "Discord", 100)])
+        var rig = rig0
+        // Look at the journal EXACTLY after the first signal, i.e. in the crash
+        // window the gate described: a crash here must leave ownership of the
+        // one process we signalled, and NOT of the one we never reached.
+        rig.processes.crashAfterSignals = 1
+
+        _ = stepEnclosed(&rig, settings(mute: false, pause: true))
+
+        XCTAssertEqual(rig.processes.journalAtCrash, [1],
+                       "the journal at the crash point must own only the signalled process")
+        XCTAssertFalse(rig.processes.journalAtCrash?.contains(2) ?? true,
+                       "an unsignalled process was granted resume ownership")
+    }
+
+    /// An UNREADABLE device is not a REMOVED device. The undo used to collapse
+    /// both and drop the entry, leaving a muted device with nothing to retry
+    /// from (gate finding, `Unreadable audio state is treated as device
+    /// removal`). The retry distinguishes them.
+    func testTransientUnreadableDoesNotLookLikeRemoval() {
+        let rig0 = makeRig(muted: false)
+        var rig = rig0
+        _ = stepEnclosed(&rig, settings())
+        XCTAssertEqual(rig.audio.device?.isMuted, true)
+
+        // The device is still there, but the first read of the undo flakes.
+        rig.audio.failNextReads = 1
+
+        let undo = rig.service.undoAll()
+        XCTAssertFalse(undo.audioDeviceGone, "a flaky read was reported as a removed device")
+        XCTAssertEqual(rig.audio.device?.isMuted, false, "the sound was not restored")
+    }
+
+    /// A genuinely absent device is still reported as gone, and that is not an
+    /// error (ADR 026) — the two must stay distinguishable.
+    func testGenuinelyAbsentDeviceIsStillReportedGone() {
+        let rig0 = makeRig(muted: false)
+        var rig = rig0
+        _ = stepEnclosed(&rig, settings())
+        rig.audio.deviceGone = true
+        rig.audio.failNextReads = 0
+
+        let undo = rig.service.undoAll()
+        XCTAssertTrue(undo.audioDeviceGone)
+        XCTAssertEqual(undo.undo, .restored, "a vanished device is not an error")
     }
 
     // MARK: — Journal durability

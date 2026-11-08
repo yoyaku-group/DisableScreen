@@ -403,40 +403,48 @@ public struct LidCloseActionService {
         into outcome: inout TickOutcome
     ) -> EffectResult<AppsEffect> {
         let targets = processes.runningProcesses(matching: names)
-        // Journal the WHOLE target set before signalling any of them: a crash
-        // mid-loop must still leave the identities of the ones already stopped.
         let known = Set(record.stopped.map { $0.pid })
         let pending = targets
             .map { $0.journalEntry(bootID: bootID) }
             .filter { !known.contains($0.pid) }
         guard !pending.isEmpty else { return .success(.stopped) }
-        record.stopped.append(contentsOf: pending)
-        guard journal.save(record) else {
-            record.stopped.removeAll { entry in pending.contains { $0.pid == entry.pid } }
-            return .journalFailed
-        }
 
         var stopped: [LidCloseActionJournal.StoppedProcess] = []
         var failed: [Int32] = []
         for entry in pending {
-            processes.stop(pid: entry.pid)
-            // `kill(2)` returning 0 means "delivered", not "stopped".
+            // JOURNAL THIS ONE, THEN SIGNAL IT — one at a time.
             //
-            // Three cases, not two: an UNREADABLE state (`nil`) is not proof
-            // that nothing happened, so the entry STAYS and the effect is
-            // reported unconfirmed. Dropping it would let the process stop a
-            // moment later with no entry authorising its recovery (caught by
-            // ai-review-gate). Only a positive "still running" proves the
-            // signal did nothing.
-            switch processes.isStopped(pid: entry.pid) {
+            // Batching the whole target set ahead of the loop looked safer
+            // ("a crash mid-loop still leaves the identities") but it granted
+            // resume ownership over processes this run never signalled: a crash
+            // on process 2 of 5 left 3, 4 and 5 recorded as ours, and if the
+            // operator later paused one of them the undo would `SIGCONT` an app
+            // RunClosed never touched (gate finding). Journaling per process
+            // keeps the crash-safety property for exactly the entries that were
+            // signalled.
+            record.stopped.append(entry)
+            guard journal.save(record) else {
+                record.stopped.removeAll { $0.pid == entry.pid }
+                return .journalFailed
+            }
+            processes.stop(pid: entry.pid)
+            // `kill(2)` returning 0 means "delivered", not "stopped", and the
+            // transition is not instantaneous: a single immediate read can
+            // legitimately still see it running. Deleting the entry on that
+            // reading is what orphaned a genuinely-stopped process (gate
+            // finding), so the confirmation is RETRIED before it is believed.
+            switch confirmStopped(pid: entry.pid) {
             case .some(true):
                 stopped.append(entry)
             case .some(false):
-                // Proved not stopped: the journal must not claim it, or the
-                // undo would `SIGCONT` a process we never paused.
+                // Proved still running after the retries: the signal did not
+                // take, so the journal must not claim it (an entry would let
+                // the undo `SIGCONT` a process we never paused).
                 failed.append(entry.pid)
                 record.stopped.removeAll { $0.pid == entry.pid }
             case .none:
+                // UNREADABLE is not proof of absence: keep the entry so the
+                // undo can re-prove and reverse it.
                 failed.append(entry.pid)
             }
         }
@@ -446,6 +454,44 @@ public struct LidCloseActionService {
         }
         return .success(.stopped)
     }
+
+    /// Read an output device, retrying once before believing it is gone.
+    ///
+    /// "Gone" is a destructive conclusion: it clears the journal entry and
+    /// nothing will retry. A single flaky read must not reach it, so an
+    /// unreadable first read is retried after the same short delay the stop
+    /// confirmation uses.
+    private func readOutputTwice(uid: String) -> AudioOutputSnapshot? {
+        if let snap = audio.readOutput(uid: uid) { return snap }
+        stopConfirmDelay()
+        return audio.readOutput(uid: uid)
+    }
+
+    /// Read the stopped state, retrying briefly.
+    ///
+    /// `SIGSTOP` is asynchronous: the process has to be scheduled to reach
+    /// `SSTOP`. A single immediate read races that transition and can report
+    /// "still running" for a signal that is about to take effect — which is
+    /// exactly how a stopped app lost its journal entry and could never be
+    /// resumed (gate finding). The interval is injectable so the tests stay
+    /// deterministic and no test sleeps.
+    private func confirmStopped(pid: Int32) -> Bool? {
+        var last: Bool?
+        for attempt in 0..<Self.stopConfirmAttempts {
+            last = processes.isStopped(pid: pid)
+            if last == true { return true }
+            guard attempt + 1 < Self.stopConfirmAttempts else { break }
+            stopConfirmDelay()
+        }
+        return last
+    }
+
+    /// How many times the stopped state is read before it is believed.
+    static let stopConfirmAttempts = 5
+
+    /// The wait between those reads. Production sleeps 20 ms (5 × 20 ms = the
+    /// sub-100 ms window a `SIGSTOP` needs); tests replace it with a no-op.
+    public var stopConfirmDelay: @Sendable () -> Void = { usleep(20_000) }
 
     private enum AudioEffect: String, Sendable {
         case muted
@@ -602,7 +648,12 @@ public struct LidCloseActionService {
         into outcome: inout TickOutcome
     ) {
         guard let prior = record.audio else { return }
-        guard let current = audio.readOutput(uid: prior.deviceUID) else {
+        // An unreadable device is NOT a removed device. The apply path already
+        // makes that distinction; the undo path used to collapse both into
+        // `nil`, drop the entry and report `deviceGone`, which left a muted
+        // device with nothing to retry from (gate finding). Two reads tell a
+        // transient failure from a real removal.
+        guard let current = readOutputTwice(uid: prior.deviceUID) else {
             record.audio = nil
             journal.save(record)
             outcome.audioDeviceGone = true
