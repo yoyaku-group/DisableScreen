@@ -65,11 +65,23 @@ public struct ThermalLatchStore: Sendable {
         /// written before `lidCloseVetoes` existed must both still decode.
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
-            schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion)
+            // EVERY field but `latch` is METADATA, and a metadata field that
+            // cannot be read must never discard the latch next to it: losing
+            // `seriousSince` / `releasedForHeat` restarts the sustained-heat
+            // grace period and forgets that this episode already released —
+            // silently, since `load()` then returns a default record. `try?` on
+            // all four, and `latch` degrades to default only on its own failure
+            // (gate finding, `Un compteur diagnostique invalide fait perdre le
+            // latch thermique`).
+            schemaVersion = (try? c.decodeIfPresent(Int.self, forKey: .schemaVersion))
                 ?? kThermalLatchSchemaVersion
-            latch = try c.decode(ThermalPolicy.Latch.self, forKey: .latch)
-            updatedAt = try c.decodeIfPresent(String.self, forKey: .updatedAt)
-            lidCloseVetoes = try c.decodeIfPresent(Int.self, forKey: .lidCloseVetoes) ?? 0
+            latch = (try? c.decode(ThermalPolicy.Latch.self, forKey: .latch))
+                ?? ThermalPolicy.Latch()
+            updatedAt = try? c.decodeIfPresent(String.self, forKey: .updatedAt)
+            let vetoes = (try? c.decodeIfPresent(Int.self, forKey: .lidCloseVetoes)) ?? nil
+            // Clamped: a negative or absurd persisted budget would otherwise
+            // disable the "protection wins" escape for a hot machine.
+            lidCloseVetoes = max(0, vetoes ?? 0)
         }
     }
 

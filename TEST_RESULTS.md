@@ -1841,3 +1841,30 @@ déplacée). Le prochain lot doit s'appeler « restauration dans le chemin de
 relâchement de `SessionService` », avec ses tests sur le service.
 
 Suite : **720/720**, 0 échec, 0 warning, rc=0.
+
+### Tour 25 — le balayage des stores, pas seulement du journal
+
+Le reçu du head `ce0b5b3` a rendu **0 CRITICAL, 2 WARN**. Le premier est l'ordre
+d'expiration, inchangé. Le second est **le même défaut que j'avais corrigé deux
+fois dans le journal, mais dans `ThermalLatchStore`** : un champ de métadonnée
+mal typé (`"lidCloseVetoes": "1"`) faisait échouer le décodage du record entier,
+et `load()` rendait un latch PAR DÉFAUT — perdant `seriousSince` et
+`releasedForHeat`, donc la période de grâce thermique et la mémoire du
+relâchement.
+
+Corrigé là, et balayé partout : **tous** les stores de `RunClosedPersistence`.
+
+| Store | Traitement |
+|---|---|
+| `ThermalLatchStore` | `try?` sur les quatre champs ; `latch` retombe sur le défaut SEUL, et `lidCloseVetoes` est borné à zéro |
+| `BackstopHeartbeatStore` | `at` et `bootID` restent REQUIS (un heartbeat qui ne dit ni quand ni sur quel boot n'est pas un heartbeat) ; le reste dégrade |
+| `LidCloseActionJournal` | déjà traité aux tours 9 à 13 |
+| `LowBatteryLatchStore`, `OwnedLidAssertion`, `LeaseStore`, `OwnedDisabledDisplays`, `LidCloseActionSettingsStore` | déjà `try?` au niveau du fichier entier, ou décodage non critique |
+
+Une note de méthode, parce qu'elle m'a coûté trois compilations : `try?` autour
+de `decodeIfPresent` rend un **double** optionnel, et chaîner `??` dessus produit
+du code qui compile et ne veut rien dire. J'ai écrit `?? false ?? false ?? false`
+avant de m'arrêter et de lire. Aplatir explicitement dans un `let` intermédiaire
+est la seule forme lisible.
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.

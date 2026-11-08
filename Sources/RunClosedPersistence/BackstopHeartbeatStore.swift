@@ -99,17 +99,28 @@ public struct BackstopHeartbeatStore {
         /// read as corrupt and lose the proof it carries.
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
-            schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion)
+            // `at` and `bootID` stay REQUIRED — they are the heartbeat's own
+            // identity, and a heartbeat that cannot say when or on which boot is
+            // not a heartbeat. Everything else is metadata and degrades with
+            // `try?`, so a single malformed counter cannot make the whole
+            // heartbeat unreadable, which would make a live agent look dead and
+            // let the backstop act on a machine the app is watching (the same
+            // rule the thermal latch and the action journal now follow).
+            schemaVersion = (try? c.decodeIfPresent(Int.self, forKey: .schemaVersion))
                 ?? kBackstopHeartbeatSchemaVersion
             at = try c.decode(Date.self, forKey: .at)
             bootID = try c.decode(String.self, forKey: .bootID)
-            exitCode = try c.decodeIfPresent(Int32.self, forKey: .exitCode) ?? 0
-            rearmWithheldReported = try c.decodeIfPresent(
-                Bool.self, forKey: .rearmWithheldReported) ?? false
-            lastAuditedFailureKey = try c.decodeIfPresent(
-                String.self, forKey: .lastAuditedFailureKey)
-            lastAuditedSessionFailureKey = try c.decodeIfPresent(
-                String.self, forKey: .lastAuditedSessionFailureKey)
+            // Flattened explicitly: `try?` around `decodeIfPresent` yields a
+            // DOUBLE optional, and chaining `??` on that is how three of my
+            // earlier attempts produced nonsense that still compiled.
+            let rawExit = try? c.decodeIfPresent(Int32.self, forKey: .exitCode)
+            exitCode = (rawExit ?? nil) ?? 0
+            let rawRearm = try? c.decodeIfPresent(Bool.self, forKey: .rearmWithheldReported)
+            rearmWithheldReported = (rawRearm ?? nil) ?? false
+            lastAuditedFailureKey = (try? c.decodeIfPresent(
+                String.self, forKey: .lastAuditedFailureKey)) ?? nil
+            lastAuditedSessionFailureKey = (try? c.decodeIfPresent(
+                String.self, forKey: .lastAuditedSessionFailureKey)) ?? nil
         }
     }
 
