@@ -82,21 +82,45 @@ public final class ClamshellObserver: @unchecked Sendable {
     public static let debounceSeconds: TimeInterval = 2
 
     private let queue = DispatchQueue(label: "com.benjaminbelaga.RunClosed.thermal.clamshell")
+    /// Queue identity, so `stop()` can tell "called from my own queue" (where a
+    /// `sync` would deadlock) from "called from outside" (where it must).
+    private static let queueKey = DispatchSpecificKey<Void>()
     private var notifier: io_object_t = IO_OBJECT_NULL
     /// The port backing `notifier`. Kept only so `stop()` can destroy it; the
     /// notifier object itself is released first.
     private var retainedPort: IONotificationPortRef?
+    /// The observer, RETAINED for as long as IOKit holds our callback.
+    ///
+    /// IOKit keeps the C function pointer and its context across the whole
+    /// notification lifetime. A `passUnretained` here would leave a dangling
+    /// context the moment the last Swift reference went away — the callback
+    /// would run `fromOpaque` on freed memory, which is a use-after-free that
+    /// only shows up at an unpredictable later close of the lid. The retain is
+    /// released in `stop()`, strictly AFTER the notifier that owns the callback
+    /// is gone.
+    private var retainedSelf: Unmanaged<ClamshellObserver>?
     private var pending: DispatchWorkItem?
     private var handler: (@Sendable () -> Void)?
 
-    public init() {}
+    public init() {
+        queue.setSpecific(key: Self.queueKey, value: ())
+    }
+
+    /// Run `body` on the observer queue, synchronously when called from
+    /// outside and inline when already on it. `queue.sync` from the queue
+    /// itself is a guaranteed deadlock, and `stop()` can legitimately be
+    /// reached that way (a callback-triggered teardown).
+    private func onQueue<T>(_ body: () -> T) -> T {
+        if DispatchQueue.getSpecific(key: Self.queueKey) != nil { return body() }
+        return queue.sync(execute: body)
+    }
 
     /// Install the IOKit interest notification. Idempotent.
     ///
     /// `onChange` fires on the observer's own serial queue after the debounce;
     /// callers hop to their own queue from there.
     public func start(_ onChange: @escaping @Sendable () -> Void) {
-        queue.sync {
+        onQueue {
             guard notifier == IO_OBJECT_NULL else { return }
             let service = IOServiceGetMatchingService(
                 kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
@@ -104,6 +128,9 @@ public final class ClamshellObserver: @unchecked Sendable {
             defer { IOObjectRelease(service) }
             guard let port = IONotificationPortCreate(kIOMainPortDefault) else { return }
             IONotificationPortSetDispatchQueue(port, queue)
+            // Retain BEFORE handing the pointer to IOKit, and only give it back
+            // in `stop()` after the notifier is released (see `retainedSelf`).
+            let me = Unmanaged.passRetained(self)
             var token: io_object_t = IO_OBJECT_NULL
             let result = IOServiceAddInterestNotification(
                 port, service, kIOGeneralInterest,
@@ -113,8 +140,11 @@ public final class ClamshellObserver: @unchecked Sendable {
                         .takeUnretainedValue()
                         .scheduleTick()
                 },
-                Unmanaged.passUnretained(self).toOpaque(), &token)
+                me.toOpaque(), &token)
             guard result == KERN_SUCCESS else {
+                // IOKit never took the context: give the retain straight back,
+                // or the observer leaks for the life of the process.
+                me.release()
                 IONotificationPortDestroy(port)
                 return
             }
@@ -125,13 +155,14 @@ public final class ClamshellObserver: @unchecked Sendable {
             handler = onChange
             notifier = token
             retainedPort = port
+            retainedSelf = me
         }
     }
 
     /// Remove the notification. Safe to call more than once, and safe on an
     /// observer that was never started.
     public func stop() {
-        queue.sync {
+        onQueue {
             pending?.cancel()
             pending = nil
             handler = nil
@@ -142,6 +173,14 @@ public final class ClamshellObserver: @unchecked Sendable {
             if let port = retainedPort {
                 IONotificationPortDestroy(port)
                 retainedPort = nil
+            }
+            // ORDER MATTERS: the notifier above is what owns the callback, so
+            // the retain it needed can only be released once that notifier is
+            // gone. Releasing first would free the object while IOKit could
+            // still deliver one last message into it.
+            if let me = retainedSelf {
+                retainedSelf = nil
+                me.release()
             }
         }
     }
@@ -165,5 +204,14 @@ public final class ClamshellObserver: @unchecked Sendable {
         queue.asyncAfter(deadline: .now() + Self.debounceSeconds, execute: work)
     }
 
+    /// The queue the debounced tick runs on. Exposed for the lifetime tests, so
+    /// they can exercise "teardown from inside the observer queue" — the case a
+    /// `queue.sync` used to deadlock on — without moving a real lid.
+    var queueForTesting: DispatchQueue { queue }
+
+    /// Defensive: with a started observer this never runs (the retain held for
+    /// IOKit keeps the object alive until `stop()`), and with a never-started
+    /// one there is nothing to tear down. It goes through `onQueue`, so even if
+    /// it did fire ON the observer queue it cannot deadlock on its own `sync`.
     deinit { stop() }
 }

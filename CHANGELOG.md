@@ -48,8 +48,8 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   gets one line per ACTION, never one per minute without effect. The CLI gains
   read-only `thermal status [--json]` and pure `thermal simulate <state>` with
   `--lid`, `--external-display`, `--lid-flag`, `--ownership` and `--since`; the
-  popup says "Session ended — heat" and the menu bar `ended: heat`. 104 new tests (policy grid, grace hold,
-  service on fakes, backstop, shared tick, persistence, simulate), 561/561 total.
+  popup says "Session ended — heat" and the menu bar `ended: heat`. 108 new tests (policy grid, grace hold,
+  service on fakes, backstop, shared tick, persistence, simulate), 565/565 total.
 
 - Recovery backstop (ADR 024). Until now only the running app enforced a
   session deadline and the low-battery guard, so a crash or a quit left
