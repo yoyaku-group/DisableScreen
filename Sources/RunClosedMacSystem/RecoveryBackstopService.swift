@@ -178,6 +178,9 @@ public struct RecoveryBackstopService {
         /// battery and session steps use, so a minute that never reached the
         /// step cannot be read as "nothing to undo".
         public var lidCloseStepRan = false
+        /// The lid-close journal could not be read, so its obligations could not
+        /// be recovered this minute.
+        public var lidCloseJournalCorrupt = false
 
         public init(plan: RecoveryPolicy.Plan) {
             self.plan = plan
@@ -208,6 +211,7 @@ public struct RecoveryBackstopService {
             // CLI trusts when it lifts the ADR 023 session refusal (gate
             // finding, `Une récupération incomplète retourne un code de
             // succès`).
+            if lidCloseStepRan, lidCloseJournalCorrupt { return .backendFailure }
             if lidCloseStepRan, let lidClose, lidClose.journalSaveFailed {
                 return .backendFailure
             }
@@ -699,6 +703,17 @@ public struct RecoveryBackstopService {
         report.lidCloseStepRan = true
         // A no-op minute writes nothing: the audit is once per ACTION, not once
         // per 60 s.
+        // A CORRUPT journal is a failure of this minute: `load()` returned an
+        // empty record, so the step could not see the obligations it was meant
+        // to recover. Without this the backstop reported success over apps that
+        // may still be suspended (gate finding, `La corruption du journal ne
+        // fait pas échouer la récupération`).
+        if guardService.lidCloseActions?.journal.isCorrupt == true {
+            report.lidCloseJournalCorrupt = true
+            FileHandle.standardError.write(Data(
+                "[RunClosed] recover --backstop: the lid-close journal is unreadable; "
+                    .utf8 + Data("its obligations could not be recovered\n".utf8)))
+        }
         guard outcome.changed || outcome.undo != nil || outcome.apply != nil else { return }
         audit(.init(
             ts: timestamp(),

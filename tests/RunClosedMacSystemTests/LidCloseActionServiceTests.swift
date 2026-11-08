@@ -1448,6 +1448,22 @@ final class LidCloseActionServiceTests: XCTestCase {
         XCTAssertTrue(out.changed)
     }
 
+
+    /// A delivered SIGSTOP whose confirmation times out is UNCONFIRMED, not
+    /// "nothing landed": the pending signal can still freeze the app (gate
+    /// finding, `Accepted stop timeouts are classified as no effect`).
+    func testStopTimeoutIsUnconfirmedNotFailed() {
+        var rig = makeRig(apps: [(4711, "Slack", 1_700_000_000)])
+        // Delivered, but every read says "running".
+        rig.processes.stopVisibleAfterReads = 9_999
+
+        let out = stepEnclosed(&rig, settings(mute: false, pause: true))
+
+        XCTAssertNotEqual(out.apply, .failed,
+                          "a pending stop read as an untouched machine")
+        XCTAssertTrue(out.changed)
+    }
+
     // MARK: — Journal durability
 
     /// The journal is written BEFORE the effect: the file on disk carries the

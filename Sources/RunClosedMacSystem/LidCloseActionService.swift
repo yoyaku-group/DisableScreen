@@ -594,7 +594,12 @@ public struct LidCloseActionService {
         // scan was complete — refusing instead would let one unreadable system
         // process disable app suspension entirely (the finding that made me flip
         // this boolean three times). `scanIncomplete` travels to the result.
-        if scan.isInconclusive {
+        // An outstanding obligation is reported FIRST: it exists regardless of
+        // what this scan managed to read, and returning the failure before the
+        // notice silenced it for as long as the unreadability persisted (gate
+        // finding, `Inconclusive scans suppress outstanding recovery notices`).
+        let hasOutstandingNow = !record.unverified.filter { names.contains($0.appName) }.isEmpty
+        if !hasOutstandingNow, scan.isInconclusive {
             return .failure("could not read \(scan.unreadable) process(es); "
                 + "the pause could not be confirmed")
         }
@@ -701,7 +706,9 @@ public struct LidCloseActionService {
                 // delivered one can land later, which would leave the app
                 // suspended with no entry to recover it (gate finding, `A stop
                 // confirmation timeout discards a pending signal's recovery
-                // entry`).
+                // entry`). It is therefore UNCONFIRMED, not a clean failure:
+                // recording it in `unconfirmedPids` keeps `combine` from
+                // reporting `.failed` ("nothing landed") over a pending signal.
                 //
                 // So the entry moves to `unverified` rather than disappearing:
                 // the undo still refuses to `SIGCONT` a process it cannot prove
@@ -709,6 +716,9 @@ public struct LidCloseActionService {
                 // harmless no-op, but the identity rule is what protects us),
                 // and the operator is told something needs checking.
                 failed.append(entry.pid)
+                // A TIMEOUT is unconfirmed too: the signal was delivered and may
+                // land, so this must not read as "nothing landed".
+                unconfirmedPids.append(entry.pid)
                 record.stopped.removeAll { $0.pid == entry.pid }
                 // Replace by FULL IDENTITY, not by pid: a recycled pid may
                 // already have an entry here for the OLD process, and refusing
