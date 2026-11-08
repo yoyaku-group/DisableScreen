@@ -142,3 +142,74 @@ final class LidCloseActionJournalTests: XCTestCase {
         XCTAssertEqual(rec.unverified.count, 1)
     }
 }
+
+/// The kill switch an operator reaches for in a hurry (ADR 026).
+///
+/// `defaults write com.benjaminbelaga.RunClosed lidCloseActions -bool false`
+/// replaces the stored JSON blob with a Boolean. The store must read that as
+/// "off" — not as corrupt-and-ignore, and not by crashing — so the operator can
+/// always disable the feature without a rebuild, and the policy's answer for a
+/// non-empty journal becomes `.undo`, which restores the sound on the next tick.
+final class LidCloseActionSettingsKillSwitchTests: XCTestCase {
+
+    private func makeDefaults() -> (UserDefaults, String) {
+        let suite = "com.benjaminbelaga.RunClosed.test.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        UserDefaults.standard.set(suite, forKey: "runclosed.test.suite.\(ObjectIdentifier(self))")
+        addTeardownBlock {
+            UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite)
+        }
+        return (defaults, suite)
+    }
+
+    func testAbsentKeyIsOffByDefault() {
+        let (defaults, _) = makeDefaults()
+        let settings = LidCloseActionSettingsStore.load(from: defaults)
+        XCTAssertFalse(settings.enabled, "the feature must be OFF when nothing was written")
+    }
+
+    func testRoundTripThroughTheStore() {
+        let (defaults, _) = makeDefaults()
+        let written = LidCloseActionSettings(enabled: true, muteAudio: false, pauseApps: true,
+                                             pausedApps: ["Slack"])
+        XCTAssertTrue(LidCloseActionSettingsStore.save(written, to: defaults))
+        XCTAssertEqual(LidCloseActionSettingsStore.load(from: defaults), written)
+    }
+
+    /// The kill switch: a Boolean where the store expects its blob reads as OFF.
+    func testBooleanKillSwitchReadsAsOff() {
+        let (defaults, _) = makeDefaults()
+        LidCloseActionSettingsStore.save(.init(enabled: true, pauseApps: true), to: defaults)
+        XCTAssertTrue(LidCloseActionSettingsStore.load(from: defaults).enabled)
+
+        // `defaults write com.benjaminbelaga.RunClosed lidCloseActions -bool false`
+        defaults.set(false, forKey: LidCloseActionSettingsStore.key)
+
+        let after = LidCloseActionSettingsStore.load(from: defaults)
+        XCTAssertFalse(after.enabled, "the kill switch did not disable the feature")
+        XCTAssertFalse(after.pauseApps)
+    }
+
+    /// And it is a real kill switch in the policy sense: with the journal
+    /// non-empty and the switch off, the answer is `.undo`, so the next tick
+    /// restores the sound instead of leaving the Mac muted.
+    func testBooleanKillSwitchMakesTheNextDecisionUndo() {
+        let (defaults, _) = makeDefaults()
+        LidCloseActionSettingsStore.save(.init(enabled: true), to: defaults)
+        defaults.set(false, forKey: LidCloseActionSettingsStore.key)
+
+        let settings = LidCloseActionSettingsStore.load(from: defaults)
+        let decision = LidCloseActionPolicy.decide(
+            .init(sessionActive: true, lidClosed: true, externalDisplayConnected: false,
+                  settings: settings),
+            currentlyApplied: true)
+        XCTAssertEqual(decision.action, .undo)
+        XCTAssertEqual(decision.reason, .switchedOff)
+    }
+
+    /// A store with no domain (an unbundled dev run) is not a crash: it reads
+    /// the compiled-in defaults.
+    func testNilDomainReadsDefaults() {
+        XCTAssertFalse(LidCloseActionSettingsStore.load(from: nil).enabled)
+    }
+}
