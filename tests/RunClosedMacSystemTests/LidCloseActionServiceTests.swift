@@ -1256,6 +1256,27 @@ final class LidCloseActionServiceTests: XCTestCase {
                        "the fake must still show B audible: the point is the report")
     }
 
+    /// Turning the app-pause switch OFF resumes the frozen apps, and the
+    /// returned outcome must NAME them. It used to report `changed == true`
+    /// with an empty `resumedPids`, which says "the machine moved" while
+    /// naming nothing that moved: a caller can neither log which app came back
+    /// nor tell a resume apart from an audio-only restore (gate finding, `Les
+    /// PID repris sont perdus lors de la désactivation des pauses`).
+    ///
+    /// Counter-proof: without the `resumedPids` carry this reads `[]`.
+    func testDisablingPausesReportsTheResumedPids() {
+        var rig = makeRig(apps: [(4711, "Slack", 1_700_000_000)])
+        _ = stepEnclosed(&rig, settings(mute: false, pause: true, apps: ["Slack"]))
+        XCTAssertEqual(rig.processes.table[4711]?.stopped, true)
+
+        let out = stepEnclosed(&rig, settings(mute: false, pause: false))
+
+        XCTAssertEqual(rig.processes.table[4711]?.stopped, false, "the app stayed frozen")
+        XCTAssertEqual(out.resumedPids, [4711],
+                       "a resume happened but the outcome named no process")
+        XCTAssertTrue(out.changed)
+    }
+
     // MARK: — Lord review round 4, second follow-up
 
     /// A deselect whose identity cannot be proved must RAISE attention: the app

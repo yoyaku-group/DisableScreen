@@ -532,6 +532,16 @@ public struct RecoveryBackstopService {
                 report.sleepAttempted = thermal.sleepAttempted
                 report.sleepRC = thermal.sleepRC
                 report.sessionEndedByHeat = thermal.sessionEndedByHeat
+                // The thermal service ALREADY undid the lid-close effects
+                // before releasing and sleeping. That result is the record of
+                // what this minute really did — which apps came back, what
+                // could not be restored — and it used to be dropped: the second
+                // undo below then found a cleared journal, reported
+                // `nothingToDo`, and the JSON omitted the processes actually
+                // resumed (gate finding, `Thermal recovery result is replaced by
+                // a second undo`). Carry it here, and let the second pass MERGE
+                // into it rather than replace it.
+                if let undo = thermal.lidCloseUndo { report.lidClose = undo }
                 // The thermal service audits its OWN file (`thermal_audit.jsonl`,
                 // one line per action, deduped by the latch). The recovery log
                 // gets the line that belongs to the BACKSTOP: what this agent
@@ -556,11 +566,39 @@ public struct RecoveryBackstopService {
                 // ended: the tick's policy would otherwise see "no session" and
                 // leave the journal waiting another 60 s.
                 if report.sleepAttempted {
-                    // Same rule as the battery branch: keep what the protective
-                    // undo actually did.
-                    let second = guardService.runLidCloseUndo()
-                    if report.lidClose == nil { report.lidClose = second }
+                    // Same rule as the battery branch: MERGE what the second
+                    // undo did into what the thermal one already reported. A
+                    // second pass can resume a process the first left
+                    // unconfirmed, so neither "keep the first" nor "keep the
+                    // last" is right — and the merge lives on `TickOutcome` so
+                    // this path cannot drift from the other two.
+                    if let second = guardService.runLidCloseUndo() {
+                        report.lidClose = report.lidClose.map { $0.merging(second) } ?? second
+                    }
                     report.lidCloseStepRan = true
+                } else if thermal.mutation == .releaseRefused,
+                          thermal.lidCloseUndo != nil
+                            || thermal.lidCloseJournalCorrupt {
+                    // A thermal REFUSAL is still a PROTECTIVE outcome: the heat
+                    // release was blocked precisely because the undo was
+                    // incomplete, and the thermal step already restored what it
+                    // could. Running the ordinary policy here would see the
+                    // still-active session with the lid still closed and MUTE
+                    // the audio and PAUSE the apps all over again — reversing
+                    // the recovery that just happened, every 60 s, for as long
+                    // as the veto holds (gate finding, `Thermal veto re-applies
+                    // effects just restored`).
+                    //
+                    // Undo-only, and no sleep was attempted, so this is the
+                    // branch that carries the outcome. The other two callers
+                    // (`LowBatteryGuardService.lockedTick` and `thermalTick`)
+                    // already apply this exact rule; the backstop was the one
+                    // path missing it.
+                    report.lidClose = guardService.runLidCloseUndo()
+                    report.lidCloseStepRan = true
+                    if guardService.lidCloseActions?.journal.isCorrupt == true {
+                        report.lidCloseJournalCorrupt = true
+                    }
                 } else {
                     runLidCloseStep(&report, recordBootID: recordBootID)
                 }

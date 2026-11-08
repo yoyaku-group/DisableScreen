@@ -74,6 +74,9 @@ final class BackstopLidCloseTests: XCTestCase {
         }
         var table: [Int32: P] = [:]
         var resumeCalls: [Int32] = []
+        /// When true, `SIGCONT` is delivered but the process stays stopped —
+        /// the wedged app that makes an undo `.incomplete`.
+        var resumeHasNoEffect = false
 
         func runningProcesses(matching appNames: [String]) -> ProcessScan? {
             ProcessScan(targets: table.values.filter { appNames.contains($0.name) }
@@ -94,6 +97,10 @@ final class BackstopLidCloseTests: XCTestCase {
         func resume(pid: Int32) -> Bool {
             resumeCalls.append(pid)
             guard var p = table[pid] else { return true }
+            // A WEDGED app: the signal is delivered, the state does not move.
+            // That is what makes an undo `.incomplete` and, in turn, what makes
+            // the thermal step refuse its release.
+            guard !resumeHasNoEffect else { return true }
             p.stopped = false
             table[pid] = p
             return true
@@ -116,6 +123,9 @@ final class BackstopLidCloseTests: XCTestCase {
         let journal: LidCloseActionJournal
         let settings: SettingsBox
         let recoveryAudit: RecoveryAuditLog
+        /// The lid assertion backend, so a test-built thermal service can be
+        /// wired to the SAME flag this rig reads.
+        let lid: FakeLid
     }
 
     private let epoch = Date(timeIntervalSince1970: 1_800_000_000)
@@ -126,7 +136,8 @@ final class BackstopLidCloseTests: XCTestCase {
                             LidCloseActionSettings(enabled: true, muteAudio: true,
                                                    pauseApps: true),
                          apps: [(pid: Int32, name: String, start: UInt64)] = [],
-                         audioMuted: Bool = false) -> Rig {
+                         audioMuted: Bool = false,
+                         thermalGuardEnabled: Bool = false) -> Rig {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("runclosed-backstop-lid-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -207,14 +218,129 @@ final class BackstopLidCloseTests: XCTestCase {
                 url: dir.appendingPathComponent("backstop_heartbeat.json")),
             appIsAlive: { false },
             batteryGuardEnabled: { true },
-            thermalGuardEnabled: { false },
+            thermalGuardEnabled: { thermalGuardEnabled },
             // The SAME journal the lid-close service writes.
             lidCloseJournal: journal,
             wallClock: { clock.wall })
 
         return Rig(service: service, flag: flagBox, sessionStore: sessionStore,
                    lidStore: lidStore, audio: audio, processes: processes,
-                   journal: journal, settings: settingsBox, recoveryAudit: recoveryAudit)
+                   journal: journal, settings: settingsBox, recoveryAudit: recoveryAudit,
+                   lid: lid)
+    }
+
+    /// A THERMAL refusal is a protective outcome, and the backstop must not
+    /// re-apply what the thermal undo just restored.
+    ///
+    /// The scenario the gate found: a closed-lid session where the thermal undo
+    /// restores the audio but cannot resume one stopped process. The thermal
+    /// step refuses to release (an effect is still live), then the ordinary
+    /// lid-close policy ran — and, seeing the session still active with the lid
+    /// still closed, muted the audio again and re-paused the recovered apps.
+    /// Every 60 s, for as long as the veto holds.
+    ///
+    /// Counter-proof: without the `else if` in `RecoveryBackstopService`, the
+    /// final `isMuted` assertion reads `true` and this test fails.
+    func testAThermalVetoDoesNotReApplyWhatTheUndoRestored() {
+        var rig = makeRig(apps: [(4711, "Slack", 1_700_000_000)],
+                          audioMuted: true,
+                          thermalGuardEnabled: true)
+        // The state after a crashed applied session: we muted the output and
+        // froze Slack.
+        rig.journal.save(.init(
+            audio: [.init(deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)],
+            stopped: [.init(pid: 4711, startSeconds: 1_700_000_000, startMicroseconds: 0,
+                            bootID: "A", path: "/Applications/Slack.app/Contents/MacOS/Slack",
+                            appName: "Slack")]))
+        rig.processes.table[4711]?.stopped = true
+        // The resume will be delivered but will NEVER take: the undo restores
+        // the sound, cannot free the app, and is therefore incomplete — which is
+        // exactly what makes the thermal step refuse the release.
+        rig.processes.resumeHasNoEffect = true
+        // A session still ACTIVE, and a critical machine: the ordinary policy
+        // would apply again if it were allowed to run.
+        rig.sessionStore.save(KeepAwakeSession(
+            startedAt: Date(timeIntervalSince1970: 1_700_000_000 - 600),
+            endsAtWall: nil, bootID: "A"))
+        rig.service.guardService.thermalService = makeCriticalThermal(rig: rig)
+
+        _ = rig.service.run()
+
+        XCTAssertEqual(rig.audio.device?.isMuted, false,
+                       "the thermal veto re-muted the output it had just restored")
+    }
+
+    /// A thermal service that always reads `critical`, enclosed and ours, so
+    /// every run reaches the veto logic.
+    private func makeCriticalThermal(rig: Rig) -> ThermalGuardService {
+        // The thermal step owns ITS OWN lid-close service over the SAME journal.
+        // Without it the step has nothing to undo, finds no live effect, and
+        // releases — which is not the scenario under test at all (my first
+        // version of this test made exactly that mistake and passed even with
+        // the fix removed).
+        var actions = LidCloseActionService(
+            journal: rig.journal,
+            auditLog: LidCloseActionAuditLog(url: URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("ta-\(UUID().uuidString).jsonl")),
+            audio: rig.audio, processes: rig.processes, bootID: "A")
+        actions.stopConfirmDelay = {}
+
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("thermal-veto-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        // The closures capture the Sendable boxes, never `rig` itself.
+        let lid = rig.lid
+        let flag = rig.flag
+        return ThermalGuardService(
+            lidService: LidMutationService(
+                bootID: "A", mutator: lid, store: rig.lidStore,
+                priorProvider: { flag.value }),
+            latchStore: ThermalLatchStore(url: dir.appendingPathComponent("thermal_guard.json")),
+            thermalProvider: { .critical },
+            lidClosedProvider: { true },
+            externalDisplayProvider: { false },
+            monotonic: { 1_000 },
+            sleeper: FakeSleeper(),
+            auditLog: ThermalAuditLog(url: dir.appendingPathComponent("thermal_audit.jsonl")),
+            sessionService: nil,
+            lidCloseActions: actions)
+    }
+
+    /// The thermal step's OWN lid-close result must reach the report.
+    ///
+    /// It undoes the effects before releasing and sleeping, so its result is
+    /// the record of what that minute really did. It used to be dropped: the
+    /// second undo then found a cleared journal, reported `nothingToDo`, and the
+    /// JSON omitted the processes actually resumed (gate finding, `Thermal
+    /// recovery result is replaced by a second undo`).
+    ///
+    /// Counter-proof: without `report.lidClose = undo` the resumed pid below is
+    /// missing and this fails.
+    func testTheThermalUndoResultReachesTheReport() {
+        var rig = makeRig(apps: [(4711, "Slack", 1_700_000_000)],
+                          audioMuted: true,
+                          thermalGuardEnabled: true)
+        // A crashed session's leftovers: we muted the output and froze Slack.
+        // Nothing is wedged this time, so the undo COMPLETES and the thermal
+        // step releases — and that completed undo is what must be reported.
+        rig.journal.save(.init(
+            audio: [.init(deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)],
+            stopped: [.init(pid: 4711, startSeconds: 1_700_000_000, startMicroseconds: 0,
+                            bootID: "A", path: "/Applications/Slack.app/Contents/MacOS/Slack",
+                            appName: "Slack")]))
+        rig.processes.table[4711]?.stopped = true
+        rig.service.guardService.thermalService = makeCriticalThermal(rig: rig)
+
+        let outcome = rig.service.run()
+        guard case .completed(let report) = outcome else {
+            return XCTFail("expected a completed run, got \(outcome)")
+        }
+
+        XCTAssertEqual(report.thermalMutation, .released)
+        XCTAssertEqual(report.lidClose?.resumedPids, [4711],
+                       "the thermal undo resumed an app but the report named none")
+        XCTAssertEqual(report.lidClose?.undo, .restored)
     }
 
     /// The recovery audit's lid-close lines, for the once-per-action assertions.

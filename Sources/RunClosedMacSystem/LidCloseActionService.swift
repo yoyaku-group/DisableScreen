@@ -166,9 +166,17 @@ public struct LidCloseActionService {
             // remained on disk, so a later undo could resume a process the
             // operator had paused themselves.
             if later.journalSaveFailed { merged.journalSaveFailed = true }
-            // The LATER pass is the later truth about what the undo itself
-            // concluded — it saw the journal the earlier pass left behind.
-            merged.undo = later.undo ?? merged.undo
+            // The LATER pass speaks for the `undo` verdict ONLY when it actually
+            // did something. `nothingToDo` is not a later truth here: by the
+            // time a second undo runs, the first has usually cleared the
+            // journal, so `nothingToDo` describes an emptiness the second pass
+            // inherited rather than a state it found. Letting it win turned a
+            // real `restored` into "nothing happened" — the same trap as
+            // assigning the second result outright, one level down.
+            if let verdict = later.undo, verdict != .nothingToDo {
+                merged.undo = verdict
+            }
+            merged.undo = merged.undo ?? later.undo
             merged.apply = merged.apply ?? later.apply
             return merged
         }
@@ -1053,6 +1061,15 @@ public struct LidCloseActionService {
             var scratch = TickOutcome(evaluation: evaluation)
             resumeStoppedProcesses(journal: &record, into: &scratch)
             if scratch.changed { outcome.changed = true }
+            // Carry the RESUMED pids, not just the "something changed" bit.
+            // Reporting `changed == true` with an empty `resumedPids` says "the
+            // machine moved" while naming nothing that moved, so a caller can
+            // neither log which app came back nor tell a resume apart from an
+            // audio-only restore (gate finding, `Les PID repris sont perdus lors
+            // de la désactivation des pauses`).
+            for pid in scratch.resumedPids where !outcome.resumedPids.contains(pid) {
+                outcome.resumedPids.append(pid)
+            }
             if scratch.shouldNotify {
                 outcome.shouldNotify = true
                 outcome.notice = scratch.notice

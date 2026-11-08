@@ -1251,19 +1251,19 @@ exécutées.
 $ arch -arm64 swift build && arch -arm64 swift test
 RunClosedCoreTests           194 passed
 RunClosedPersistenceTests     86 passed
-RunClosedMacSystemTests      380 passed
+RunClosedMacSystemTests      383 passed
 RunClosedHelperSupportTests   40 passed
 RunClosedAppTests             11 passed
                              ---
-                             711 passed, 0 failures, 0 warnings, rc=0
+                             714 passed, 0 failures, 0 warnings, rc=0
 ```
 
 The earlier runs in this section reported 657, then 663, then 671 — each one
-true of the commit it ran on. The final figure is **711**, measured on the head
-that closes the lot (`cfdbb35` plus the two round-7 fixes), and it is the only
-number that describes the code being merged.
+true of the commit it ran on. The final figure is **714**, measured on the head
+that closes the lot (rounds 7 and 8 included), and it is the only number that
+describes the code being merged.
 
-134 tests nouveaux pour ce lot, mesurés de 577 (L3) à 711 : politique pure
+137 tests nouveaux pour ce lot, mesurés de 577 (L3) à 714 : politique pure
 (`LidCloseActionPolicyTests`), service sur fakes (`LidCloseActionServiceTests`,
 dont les deux contre-épreuves de la ronde 7), persistance
 (`LidCloseActionJournalTests` + `LidCloseActionSettingsKillSwitchTests`),
@@ -1486,6 +1486,27 @@ sont corrigés ici. Leçon : un compte de warnings doit être lu dans la sortie 
 compilateur, pas recopié depuis un message de commit.
 
 Suite au head fusionné : **711/711**, 0 échec, 0 warning, rc=0.
+
+### Tour 8 — trois WARN, tous dans la même famille
+
+Le tour 8 a revu le commit de correctifs lui-même. **0 CRITICAL, 3 WARN**, les
+trois réels et les trois du même genre : *un résultat de récupération perdu ou
+écrasé en chemin*.
+
+| Défaut | Correction | Contre-épreuve |
+|---|---|---|
+| Désactiver la pause d'apps reprenait bien les processus, mais `resumedPids` n'était jamais recopié dans le résultat : `changed == true` avec une liste vide, donc « la machine a bougé » sans nommer ce qui a bougé. | Les pid repris sont fusionnés dans l'outcome. | `testDisablingPausesReportsTheResumedPids` — sans le report, la liste lit `[]`. |
+| Le backstop ne recopiait jamais `thermal.lidCloseUndo` dans son rapport. La seconde annulation trouvait alors un journal vidé et répondait `nothingToDo`, donc le JSON omettait les processus réellement repris par l'étape thermique. | Le résultat thermique est porté dans `report.lidClose`, et la seconde passe FUSIONNE dedans. | `testTheThermalUndoResultReachesTheReport` — sans le report, `resumedPids` est vide. |
+| Le backstop n'avait pas la règle que les deux autres appelants ont déjà : après un VETO thermique (relâchement refusé parce qu'une annulation est incomplète), il exécutait la politique ordinaire, qui voyait la session encore active, capot fermé, et **re-mutait le son et re-figeait les apps** que l'annulation venait de restaurer. Toutes les 60 s, tant que le veto tenait. | Branche « undo only » sur refus thermique, comme `lockedTick` et `thermalTick`. | `testAThermalVetoDoesNotReApplyWhatTheUndoRestored` — sans la branche, l'audio relit `isMuted == true`. |
+
+Et un défaut dans **mon propre correctif**, trouvé en écrivant le troisième test :
+la fusion laissait la seconde passe écraser `restored` par `nothingToDo`. C'est
+la même erreur un niveau plus bas — traiter une passe tardive comme
+autoritaire alors qu'elle ne décrit qu'un vide qu'elle a hérité. `nothingToDo`
+ne gagne donc plus : seul un verdict qui a réellement fait quelque chose
+remplace le précédent.
+
+Suite : **714/714**, 0 échec, 0 warning, rc=0.
 
 ### Le coupe-circuit, éprouvé et non affirmé
 
