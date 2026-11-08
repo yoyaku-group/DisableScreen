@@ -750,7 +750,13 @@ public struct LowBatteryGuardService {
     /// audio muted (caught by ai-review-gate). Putting it here means no caller
     /// can reach `sleepNow` without the undo, whichever branch led there.
     private mutating func attemptSleep(_ outcome: inout TickOutcome) {
-        undoLidCloseBeforeSleep()
+        // Carry the undo's attention report into THIS outcome: the Mac may
+        // sleep before any other tick can raise it, so discarding it loses the
+        // one moment the operator could have been told (gate finding, `Sleep
+        // path discards the undo's attention report`).
+        if let undo = undoLidCloseBeforeSleep(&outcome), undo.shouldNotify {
+            outcome.shouldNotify = true
+        }
         let r = sleeper.sleepNow()
         outcome.sleepAttempted = true
         outcome.sleepRC = r.rc

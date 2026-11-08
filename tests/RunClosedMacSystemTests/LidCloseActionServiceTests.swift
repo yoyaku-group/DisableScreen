@@ -1163,6 +1163,23 @@ final class LidCloseActionServiceTests: XCTestCase {
         XCTAssertTrue(rig.journal.load().unverified.isEmpty, "stale obligation on disk")
     }
 
+
+    /// Turning the mute switch OFF must also restore a device that was stranded
+    /// and has come back (gate finding, `Disabling audio restoration skips
+    /// stranded devices`).
+    func testTurningMuteOffRestoresAStrandedDeviceThatReturned() {
+        var rig = makeRig(muted: false)
+        rig.journal.save(.init(unverifiedAudio: .init(
+            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)))
+        rig.audio.device?.isMuted = true
+
+        _ = stepEnclosed(&rig, settings(mute: false))
+
+        XCTAssertEqual(rig.audio.device?.isMuted, false,
+                       "a returned stranded device stayed muted")
+        XCTAssertNil(rig.journal.load().unverifiedAudio)
+    }
+
     // MARK: — Journal durability
 
     /// The journal is written BEFORE the effect: the file on disk carries the

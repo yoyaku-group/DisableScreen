@@ -577,6 +577,16 @@ public struct LidCloseActionService {
         let decision = evaluation.decision
         var record = outcome.evaluation.journalBefore
 
+        // A stranded device that has COME BACK is re-adopted here too: with the
+        // switch being turned off is exactly when the operator expects the
+        // sound back, and the apply path only re-adopts while the switch is on
+        // (gate finding, `Disabling audio restoration skips stranded devices`).
+        if !decision.muteAudio, record.audio == nil, let stranded = record.unverifiedAudio,
+           let back = readOutputTwice(uid: stranded.deviceUID), back.isMuted != false {
+            record.audio = stranded
+            record.unverifiedAudio = nil
+        }
+
         if !decision.muteAudio, record.audio != nil {
             var scratch = TickOutcome(evaluation: evaluation)
             unmuteRecordedDevice(journal: &record, into: &scratch)
@@ -611,7 +621,11 @@ public struct LidCloseActionService {
         // themselves (gate finding, `Disabling both effects can leave resumed
         // processes owned on disk`).
         if outcome.changed {
-            journal.save(record)
+            // A save that does not land leaves stale ownership on disk, which a
+            // later undo could act on — reversing something the operator did
+            // (gate finding, `Failed persistence after resume leaves stale
+            // signal authority`). Reported, never swallowed.
+            if !journal.save(record) { outcome.journalSaveFailed = true }
             outcome.apply = outcome.apply ?? .applied
         }
 

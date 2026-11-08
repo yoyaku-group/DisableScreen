@@ -43,7 +43,13 @@ REPORT="$OUTDIR/lid-close-measure-${MODEL}-${OSVER}-${STAMP}.md"
 LOG="$(mktemp -t runclosed-lidmeasure)"
 
 [[ -x "$CLI" ]] || { echo "missing CLI: $CLI" >&2; exit 1; }
-"$CLI" lid-close status >/dev/null || { echo "CLI has no lid-close command (old build?)" >&2; exit 1; }
+# Exit 3 means "the command ran and something is owed" — the command EXISTS.
+# Only anything else means an old build without `lid-close`.
+rc=0; "$CLI" lid-close status >/dev/null 2>&1 || rc=$?
+if [[ "$rc" != "0" && "$rc" != "3" ]]; then
+  echo "CLI has no usable lid-close command (exit $rc; old build?)" >&2
+  exit 1
+fi
 
 # The clamshell bit, straight from IOKit (the same property the product reads).
 lid() { ioreg -r -k AppleClamshellState -d 4 2>/dev/null | awk '/AppleClamshellState/{print $NF; exit}'; }
@@ -51,7 +57,14 @@ lid() { ioreg -r -k AppleClamshellState -d 4 2>/dev/null | awk '/AppleClamshellS
 # The three conditions as the PRODUCT reports them, so the witness cannot
 # disagree with the thing it is qualifying.
 conditions() {
-  "$CLI" lid-close status --json 2>/dev/null | python3 -c '
+  # `lid-close status` exits 3 when a recovery obligation is outstanding — a
+  # VALID outcome with valid JSON, not a failure of this probe. Under
+  # `set -o pipefail` that 3 would propagate out of this function and `set -e`
+  # would abort the whole measurement before the report is written (gate
+  # finding, `Le code de statut 3 interrompt la mesure sans rapport`). The
+  # status is deliberately discarded here: this witness reads the readings, and
+  # the exit code carries a different question.
+  { "$CLI" lid-close status --json 2>/dev/null || true; } | python3 -c '
 import json,sys
 try: d=json.load(sys.stdin)
 except Exception:
