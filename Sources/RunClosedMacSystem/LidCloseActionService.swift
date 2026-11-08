@@ -855,8 +855,14 @@ public struct LidCloseActionService {
     /// nothing will retry. A single flaky read must not reach it, so an
     /// unreadable first read is retried after the same short delay the stop
     /// confirmation uses.
-    private func readOutputTwice(uid: String) -> AudioOutputSnapshot? {
+    private mutating func readOutputTwice(uid: String) -> AudioOutputSnapshot? {
         if let snap = audio.readOutput(uid: uid) { return snap }
+        // The SAME shared budget as the stop confirmations: with many stranded
+        // devices this loop slept 20 ms per device while holding the caller's
+        // `LidWriteLock`, delaying the battery and thermal guards (gate finding,
+        // `Audio recovery bypasses the shared confirmation budget`).
+        if confirmBudgetSpent >= Self.stopConfirmBudgetSeconds { return nil }
+        confirmBudgetSpent += confirmDelaySeconds
         stopConfirmDelay()
         return audio.readOutput(uid: uid)
     }

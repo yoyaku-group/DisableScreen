@@ -524,6 +524,11 @@ public struct RecoveryBackstopService {
                 report.thermalMutation = thermal.mutation
                 report.thermalError = thermal.mutationError
                 report.thermalLidCloseCorrupt = thermal.lidCloseJournalCorrupt
+                // The thermal branch RETURNS below, so it never reaches the
+                // undo-only carry. Promote the flag here, on the path that
+                // actually exits (gate finding, `La sortie thermique perd le
+                // signalement du journal corrompu`).
+                if thermal.lidCloseJournalCorrupt { report.lidCloseJournalCorrupt = true }
                 report.sleepAttempted = thermal.sleepAttempted
                 report.sleepRC = thermal.sleepRC
                 report.sessionEndedByHeat = thermal.sessionEndedByHeat
