@@ -1459,7 +1459,10 @@ public struct LidCloseActionService {
             return .retry
         }
         removeAudio(prior.deviceUID, in: &record)
-        journal.save(record)
+        // A failed save leaves stale ownership on disk that a later undo could
+        // act on — reversing the operator's own mute. Surfaced, never swallowed
+        // (gate finding, `Audio undo can lose persistence-failure reporting`).
+        if !journal.save(record) { outcome.journalSaveFailed = true }
         outcome.changed = true
         writeAudit(outcome: "undone", reason: "undo", evaluation: outcome.evaluation,
                    audio: "unmuted", audioError: nil, audioDeviceUID: prior.deviceUID,

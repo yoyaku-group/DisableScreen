@@ -632,7 +632,14 @@ public struct LowBatteryGuardService {
         // again would UNDO the protective restore that `attemptSleep` performed
         // moments earlier (gate finding, `The final policy step can reapply
         // effects after protective sleep`). A sleep attempt means "undo only".
-        if outcome.sleepAttempted {
+        // A thermal REFUSAL is still a protective outcome: the release was
+        // blocked because the undo was incomplete, so running the ordinary step
+        // afterwards re-applies exactly what it just restored (gate finding,
+        // `Réapplication des effets après un veto thermique`). Undo only.
+        let thermalVetoed = outcome.thermal.map { thermal in
+            thermal.mutation == .releaseRefused && thermal.lidCloseUndo != nil
+        } ?? false
+        if outcome.sleepAttempted || thermalVetoed {
             // A TRUNCATED journal means `undoAll` read an empty record and could
             // not see the obligations it was meant to recover. This branch
             // returns without running `runLidCloseStep`, so the corruption check
