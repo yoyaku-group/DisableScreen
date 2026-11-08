@@ -192,7 +192,13 @@ public struct LidCloseActionJournal: Sendable {
         /// restoration`).
         public var unverifiedAudio: [AudioState]
         /// How many audio entries were discarded because a field was malformed.
-        /// Not persisted; set by the decoder so a damaged journal is visible.
+        ///
+        /// PERSISTED, not just set by the decoder: a save writes only the
+        /// entries it kept, so the next load would find a healthy-looking file
+        /// and `isCorrupt` would go false while the abandoned device is still
+        /// muted with no restoration obligation (gate finding, `La sauvegarde
+        /// efface les obligations audio malformées et leur signalement`).
+        /// Keeping the count on disk makes the damage survive the round trip.
         public var droppedAudioEntries: Int = 0
 
         /// A record that decoded BUT lost entries to malformed fields.
@@ -245,7 +251,7 @@ public struct LidCloseActionJournal: Sendable {
         /// existing journal read as empty, which would lose the undo.
         private enum CodingKeys: String, CodingKey {
             case schemaVersion, sessionID, startedAt, audio, stopped, unverified,
-                 unverifiedAudio
+                 unverifiedAudio, droppedAudioEntries
         }
 
         public init(from decoder: Decoder) throws {
@@ -292,6 +298,12 @@ public struct LidCloseActionJournal: Sendable {
                 unverifiedAudio = []
                 if (try? c.contains(.unverifiedAudio)) == true { droppedAudioEntries += 1 }
             }
+            // Damage already recorded on a PREVIOUS load survives: a save
+            // writes only the kept entries, so without this the next read would
+            // look healthy (see `droppedAudioEntries`).
+            droppedAudioEntries += try c.decodeIfPresent(
+                Int.self, forKey: .droppedAudioEntries) ?? 0
+
             // A damaged element is surfaced, never silently dropped.
             if audio.isEmpty, (try? c.contains(.audio)) == true {
                 // Leave `audio` empty; `isCorrupt` is decided by the record

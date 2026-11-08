@@ -665,6 +665,16 @@ public struct LowBatteryGuardService {
                                          protective: Bool = false) {
         let initiator: LidMutationService.Initiator =
             evaluation.decision.reason == .emergencyStaleOwnership ? .lowBatteryEmergency : .automatic
+        // ADR 026: undo the lid-close effects BEFORE the release mutation.
+        // `setEnabled(false)` re-enables normal sleep and the Mac can suspend
+        // before `attemptSleep` is ever reached, leaving the sound muted and
+        // apps suspended across the sleep (gate finding, `Undo occurs after the
+        // sleep-enabling release`). `attemptSleep` still undoes as a backstop.
+        if var actions = lidCloseActions {
+            let undo = actions.undoAll()
+            if outcome.lidClose == nil { outcome.lidClose = undo }
+            lidCloseActions = actions
+        }
         let result = lidService.setEnabled(false, initiator: initiator)
         switch result {
         case .success(let op) where op.state == .verified:
