@@ -1165,7 +1165,7 @@ $ arch -arm64 swift build --build-tests
 
 ```
 $ arch -arm64 swift test
-cas de test passés : 570
+cas de test passés : 575
 suites en échec    : 0
 ```
 

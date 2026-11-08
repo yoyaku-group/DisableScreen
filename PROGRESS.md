@@ -252,6 +252,6 @@ Jusqu'ici seule l'app appliquait une échéance et la garde batterie : si elle p
 - DONE — Coupe-circuit `thermalGuardEnabled` séparé de `lowBatteryGuardEnabled`, honoré par l'app et par le backstop, indépendants dans les deux sens.
 - DONE — CLI : `thermal status [--json]` (lecture seule) et `thermal simulate <state>` (décision pure, ne mute jamais), avec `--lid`, `--external-display`, `--lid-flag`, `--ownership`, `--since`.
 - DONE — UI : « Session terminée — chaleur » dans le popup et `ended: heat` dans la barre, pilotés par le latch (donc ils survivent à un relancement et s'effacent au refroidissement) ; textes `L10n.t` + `en.lproj` + `fr.lproj`.
-- DONE — `swift test` : **570/570**, 0 warning. Bundle assemblé, plists lints, `codesign --verify --strict` OK.
+- DONE — `swift test` : **575/575**, 0 warning. Bundle assemblé, plists lints, `codesign --verify --strict` OK.
 - NOT_TESTED (matériel) — notification clamshell réelle à la fermeture du capot et sa rafale d'anti-rebond, `ProcessInfo.thermalState` observé en `serious`/`critical`, relâchement + `sleepnow` réels pour cause de chaleur, rendu popup/barre sur la build installée. Qualification PR5, Ben présent.
 - NOT_DONE (hors lot) — actions à la fermeture du capot (son, pause d'apps, écran/clavier) = RC4 ; mode économie d'énergie (élargirait la règle sudo et la propriété du réglage).
