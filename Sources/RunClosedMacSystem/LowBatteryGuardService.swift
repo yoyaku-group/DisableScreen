@@ -293,7 +293,17 @@ public struct LowBatteryGuardService {
         // through the thermal notice, not a second "session ended" one.
         outcome.sessionEndedNaturally = false
         outcome.batteryStepRan = false
-        outcome.lidClose = runLidCloseStep()
+        // The SAME rule as the battery tick: a thermal REFUSAL already undid the
+        // effects, so running the ordinary step here re-applies them. This entry
+        // point (`thermalTick`, used when the battery guard is switched off) was
+        // missed by the previous fix (gate finding, `Thermal-only tick bypasses
+        // protective undo suppression`).
+        if thermal.mutation == .releaseRefused, thermal.lidCloseUndo != nil
+            || thermal.lidCloseJournalCorrupt {
+            outcome.lidClose = runLidCloseUndo()
+        } else {
+            outcome.lidClose = runLidCloseStep()
+        }
         return outcome
     }
 
