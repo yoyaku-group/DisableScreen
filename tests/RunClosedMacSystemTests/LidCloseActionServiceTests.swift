@@ -1658,6 +1658,37 @@ final class LidCloseActionServiceTests: XCTestCase {
         XCTAssertEqual(out.notice, .appsLeftPaused)
     }
 
+
+    /// Re-stopping a process that was resumed behind our back must REPLACE its
+    /// journal entry, not append a second one — duplicates would grow the
+    /// journal without bound and send duplicate SIGCONTs (gate finding,
+    /// `Re-stopping a recorded process appends duplicate ownership entries`).
+    func testRestoppingDoesNotDuplicateTheEntry() {
+        var rig = makeRig(apps: [(4711, "Slack", 1_700_000_000)])
+        let cfg = settings(mute: false, pause: true)
+        _ = stepEnclosed(&rig, cfg)
+        XCTAssertEqual(rig.journal.load().stopped.count, 1)
+
+        // Something resumes it; the next tick re-stops it.
+        rig.processes.table[4711]?.stopped = false
+        _ = stepEnclosed(&rig, cfg)
+
+        XCTAssertEqual(rig.journal.load().stopped.count, 1,
+                       "a duplicate ownership entry was appended")
+    }
+
+    /// An ACCEPTED write whose readback is unavailable is not "no change": the
+    /// machine may well be muted now (gate finding, `An actual mute can be
+    /// reported as no machine change`).
+    func testUnconfirmedMuteCountsAsAChange() {
+        var rig = makeRig(muted: false)
+        rig.audio.readbackUnreadable = true
+
+        let out = stepEnclosed(&rig, settings())
+
+        XCTAssertTrue(out.changed, "an accepted mute was reported as no change")
+    }
+
     // MARK: — Journal durability
 
     /// The journal is written BEFORE the effect: the file on disk carries the

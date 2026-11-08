@@ -346,7 +346,10 @@ public struct LidCloseActionService {
                 audioEffect = effect
             case .failure(let error):
                 audioError = error
-                audioEffect = .failed
+                // An UNCONFIRMED write is not "no change": the acceptance
+                // happened, so the machine may be muted now.
+                audioEffect = error.hasPrefix("UNCONFIRMED") ? .unconfirmed : .failed
+                if audioEffect == .unconfirmed { outcome.changed = true }
             case .journalFailed(let stoppedSoFar):
                 outcome.journalSaveFailed = true
                 outcome.stoppedPids = stoppedSoFar
@@ -402,6 +405,7 @@ public struct LidCloseActionService {
         // reversals`).
         outcome.changed = outcome.changed
             || audioEffect == .muted
+            || audioEffect == .unconfirmed
             || appsEffect == .stopped
             || appsEffect == .partial
         writeAudit(outcome: outcome.apply?.rawValue ?? "none",
@@ -475,8 +479,11 @@ public struct LidCloseActionService {
             journal.save(record)
             return .failure("readback did not confirm the mute")
         case .none:
-            // Unreadable is not proof of absence: keep the entry.
-            return .failure("the mute could not be verified (readback unreadable)")
+            // Unreadable is not proof of absence: keep the entry. The write
+            // itself was ACCEPTED, so the machine may well have changed — report
+            // the uncertainty rather than a clean "nothing happened" (gate
+            // finding, `An actual mute can be reported as no machine change`).
+            return .failure("UNCONFIRMED: the mute could not be verified (readback unreadable)")
         }
     }
 
@@ -564,6 +571,12 @@ public struct LidCloseActionService {
             // RunClosed never touched (gate finding). Journaling per process
             // keeps the crash-safety property for exactly the entries that were
             // signalled.
+            // REPLACE any existing entry for this pid: re-stopping a process
+            // that was resumed behind our back must not append a second
+            // ownership record, which would grow the journal without bound and
+            // send duplicate SIGCONTs on undo (gate finding, `Re-stopping a
+            // recorded process appends duplicate ownership entries`).
+            record.stopped.removeAll { $0.pid == entry.pid }
             record.stopped.append(entry)
             guard journal.save(record) else {
                 record.stopped.removeAll { $0.pid == entry.pid }
@@ -870,6 +883,11 @@ public struct LidCloseActionService {
         case muted
         case alreadyMuted
         case alreadyRecorded
+        /// The write was ACCEPTED but the readback was unavailable. The machine
+        /// may well have changed, so this counts as a change while still being
+        /// reported as unverified (gate finding, `An actual mute can be reported
+        /// as no machine change`).
+        case unconfirmed
         case failed
         case skipped
     }

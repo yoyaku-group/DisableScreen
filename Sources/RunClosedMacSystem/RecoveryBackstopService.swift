@@ -370,6 +370,12 @@ public struct RecoveryBackstopService {
             // (gate finding, `Recovery fast path ignores unverified
             // obligations`).
             lidCloseJournalPending: {
+                // A CORRUPT journal is pending work, not an empty one: `load()`
+                // returns an empty record for a truncated file, so this
+                // predicate said "nothing to do" and the backstop took the free
+                // path while processes stayed stopped and audio muted (gate
+                // finding, `Corrupt journal is treated as no pending recovery`).
+                if lidCloseJournal.isCorrupt { return true }
                 let rec = lidCloseJournal.load()
                 return !rec.isEmpty || !rec.unverified.isEmpty
                     || !rec.unverifiedAudio.isEmpty

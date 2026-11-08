@@ -143,6 +143,43 @@ final class LidCloseActionJournalTests: XCTestCase {
     }
 }
 
+/// Corrupt-entry survival (Lord round 5, point 3).
+final class LidCloseActionCorruptEntryTests: XCTestCase {
+
+    /// (c) One MALFORMED audio entry must not erase the healthy ones: the file
+    /// still parses, so a whole-array `try?` would silently drop every
+    /// restoration obligation while reporting a valid journal (Lord round 5,
+    /// point 3). The healthy entries survive AND the loss is reported.
+    func testOneCorruptAudioEntryLeavesTheHealthyOnes() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("runclosed-badentry-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("lid_close_actions.json")
+
+        // A good entry, then one whose `volume` is a String — decodable as JSON,
+        // not as AudioState.
+        let json = """
+        {"schemaVersion":1,
+         "audio":[{"deviceUID":"Headphones","wasMuted":false,"volume":0.7},
+                  {"deviceUID":"Broken","wasMuted":false,"volume":"loud"}],
+         "stopped":[],"unverified":[],"unverifiedAudio":[]}
+        """
+        try Data(json.utf8).write(to: url)
+
+        let journal = LidCloseActionJournal(url: url)
+        let rec = journal.load()
+
+        XCTAssertEqual(rec.audio.map { $0.deviceUID }, ["Headphones"],
+                       "a malformed entry erased the healthy obligation")
+        XCTAssertTrue(rec.hasDroppedAudioEntries,
+                      "the lost entry was not reported")
+        XCTAssertTrue(journal.isCorrupt,
+                      "a journal that lost an entry reported as healthy")
+    }
+
+}
+
 /// Legacy-shape decoding.
 final class LidCloseActionLegacyDecodeTests: XCTestCase {
 
