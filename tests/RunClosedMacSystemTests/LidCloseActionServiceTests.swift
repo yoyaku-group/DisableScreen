@@ -57,7 +57,7 @@ final class LidCloseActionServiceTests: XCTestCase {
             // itself is perfectly reachable: the snapshot exists but its state
             // is unknown (CoreAudio returning noErr for the device and an error
             // for the property).
-            if muteFlagUnreadable { d.isMuted = nil }
+            if muteFlagUnreadable || muteFlagUnreadableFor.contains(uid) { d.isMuted = nil }
             return d
         }
         func setMuted(_ muted: Bool, uid: String) -> Bool {
@@ -75,6 +75,10 @@ final class LidCloseActionServiceTests: XCTestCase {
         /// When true, the device's mute flag becomes UNREADABLE (the mutation
         /// succeeds or fails, but the state cannot be observed afterwards).
         var muteFlagUnreadable = false
+        /// Per-device version, so a test can make ONE device unreadable and
+        /// leave another healthy — the only shape that produces a genuine
+        /// PARTIAL restore.
+        var muteFlagUnreadableFor: Set<String> = []
     }
 
     /// A fake process table. `identity(ofPid:)` is what makes a pid an identity:
@@ -1577,6 +1581,35 @@ final class LidCloseActionServiceTests: XCTestCase {
 
         XCTAssertTrue(out.shouldNotify, "a stranded device went silent")
         XCTAssertEqual(out.notice, .audioLeftMuted)
+    }
+
+
+    /// A PARTIAL audio restore (one device back, one not) must still raise the
+    /// failure notice: copying only `changed` out of the scratch outcome
+    /// suppressed it, leaving the operator with no warning over a device still
+    /// muted (gate finding, `Partial audio restoration suppresses the failure
+    /// notice`).
+    func testPartialAudioRestoreStillRaisesTheNotice() {
+        var rig = makeRig(muted: false)
+        let cfg = settings(mute: true)
+        _ = stepEnclosed(&rig, cfg)
+
+        // A second device joins and is muted too.
+        rig.audio.others["BuiltInSpeakerDevice"] = rig.audio.device
+        rig.audio.device = AudioOutputSnapshot(uid: "Headphones", isMuted: false,
+                                               volume: 0.7, canMute: true)
+        _ = stepEnclosed(&rig, cfg)
+        XCTAssertEqual(rig.journal.load().audio.count, 2)
+
+        // Turning the switch off restores ONE; the OTHER's readback cannot be
+        // proved, so the failure must still be reported.
+        rig.audio.muteFlagUnreadableFor = ["Headphones"]
+        let out = stepEnclosed(&rig, settings(mute: false))
+
+        XCTAssertTrue(out.shouldNotify,
+                      "a partial restore reported no failure")
+        XCTAssertEqual(out.notice, .audioLeftMuted)
+        XCTAssertTrue(out.audioRestoreFailed)
     }
 
     // MARK: — Journal durability

@@ -730,6 +730,31 @@ public struct LidCloseActionService {
             unmuteRecordedDevice(journal: &record, into: &scratch)
             if scratch.audioDeviceGone { outcome.audioDeviceGone = true }
             if scratch.changed { outcome.changed = true }
+            // CARRY the failure report, not just `changed`. A PARTIAL restore
+            // (one device back, one not) set both on `scratch`, and dropping
+            // them here — while the fallback below only fires when nothing
+            // changed — left the operator with no notice over a device still
+            // muted (gate finding, `Partial audio restoration suppresses the
+            // failure notice`).
+            if scratch.audioRestoreFailed {
+                outcome.shouldNotify = true
+                outcome.notice = outcome.notice ?? .audioLeftMuted
+                outcome.audioRestoreFailed = true
+            }
+            // CARRY the failure report, not just `changed`. A PARTIAL restore
+            // (one device back, one not) set both on `scratch`, and dropping
+            // them here — while the fallback below only fires when nothing
+            // changed — left the operator with no notice over a device still
+            // muted (gate finding, `Partial audio restoration suppresses the
+            // failure notice`).
+
+            // CARRY the failure report, not just `changed`. A PARTIAL restore
+            // (one device back, one not) set both on `scratch`, and dropping
+            // them here — while the fallback below only fires when nothing
+            // changed — left the operator with no notice over a device still
+            // muted (gate finding, `Partial audio restoration suppresses the
+            // failure notice`).
+
             // A restore that did NOT land must be visible: the entry is kept
             // for a retry (correct), but reporting `.nothingRequested` or a
             // plain success would tell the operator the sound is back when it
