@@ -239,10 +239,21 @@ public struct ThermalGuardService {
     /// broken — the one failure mode that makes an untouched machine look
     /// protected while it is not. `TickOutcome.latchSaveFailed` carries the same
     /// fact to the callers that can do something with it.
+    ///
+    /// The flag is ASSIGNED, never OR-ed: it must describe the LAST write of the
+    /// tick, because a release writes twice (before the sleep for durability,
+    /// then again at the end of `step()`). With a sticky flag, a transient
+    /// failure whose retry succeeded would keep reporting the guard as broken
+    /// for the rest of the episode.
+    ///
+    /// `announce` throttles the stderr line to at most one per tick: the retry
+    /// after the sleep does not repeat a warning the first write already made.
     private func persistLatch(_ record: ThermalLatchStore.Record,
-                              into outcome: inout TickOutcome) {
-        guard !latchStore.save(record) else { return }
-        outcome.latchSaveFailed = true
+                              into outcome: inout TickOutcome,
+                              announce: Bool = true) {
+        let ok = latchStore.save(record)
+        outcome.latchSaveFailed = !ok
+        guard !ok, announce else { return }
         FileHandle.standardError.write(Data(
             ("[RunClosed] thermal: latch could NOT be written to \(latchStore.url.path) "
              + "— the sustained-heat clock will restart every tick, so the "
@@ -279,6 +290,9 @@ public struct ThermalGuardService {
             // Persist the latch BEFORE asking for sleep: the Mac may go down
             // right after `sleepnow`, and a latch written afterwards would be
             // lost with it (journal before change, ADR 009/022).
+            // First write: BEFORE the sleep, so the state survives it. The
+            // second one at the end of `step()` supersedes this outcome either
+            // way (see `persistLatch`), and does not repeat the warning.
             persistLatch(record, into: &outcome)
             // Best effort, and NOT retried: the protective action already
             // happened, so the Mac follows its normal power management and
