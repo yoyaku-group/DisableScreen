@@ -49,6 +49,11 @@ final class SessionGuardTickTests: XCTestCase {
             self.bootID = bootID
         }
         var nowContinuousNanoseconds: UInt64 { continuous }
+        /// Seconds on the same controllable counter, for the thermal grace
+        /// period (ADR 025).
+        var nowContinuousNanoseconds_double: Double {
+            Double(continuous) / 1_000_000_000.0
+        }
         func advance(_ seconds: TimeInterval) {
             wall = wall.addingTimeInterval(seconds)
             continuous += ContinuousClockTimebase.nanoseconds(fromSeconds: seconds)
@@ -88,7 +93,10 @@ final class SessionGuardTickTests: XCTestCase {
                      isCharging: onBattery == false, batteryPresent: true)
     }
 
-    private func makeRig(flag: Bool?, ownedBoot: String?, battery: BatteryState) -> Rig {
+    private func makeRig(flag: Bool?, ownedBoot: String?, battery: BatteryState,
+                         thermal: ThermalState = .nominal,
+                         lidClosed: Bool? = true,
+                         externalDisplay: Bool? = false) -> Rig {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("runclosed-tick-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -130,7 +138,22 @@ final class SessionGuardTickTests: XCTestCase {
             sleeper: sleeper,
             lock: LidWriteLock(url: lockURL),
             auditLog: LowBatteryAuditLog(url: dir.appendingPathComponent("audit.jsonl")),
-            sessionService: sessionService)
+            sessionService: sessionService,
+            // ADR 025: the same shared tick also runs the thermal step first,
+            // in this one section.
+            thermalService: ThermalGuardService(
+                lidService: LidMutationService(bootID: "A", mutator: lid, store: lidStore,
+                                               priorProvider: { flagBox.value }),
+                latchStore: ThermalLatchStore(
+                    url: dir.appendingPathComponent("thermal_guard.json")),
+                thermalProvider: { thermal },
+                lidClosedProvider: { lidClosed },
+                externalDisplayProvider: { externalDisplay },
+                monotonic: { clock.nowContinuousNanoseconds_double },
+                sleeper: sleeper,
+                auditLog: ThermalAuditLog(
+                    url: dir.appendingPathComponent("thermal_audit.jsonl")),
+                sessionService: sessionService))
 
         return Rig(guardService: guardService, session: sessionService, lid: lid,
                    sleeper: sleeper, flag: flagBox, clock: clock,
@@ -567,5 +590,122 @@ final class SessionGuardTickTests: XCTestCase {
                        "a previous boot's continuous deadline proves nothing on this one")
         XCTAssertEqual(rig.flag.value, false)
         XCTAssertNil(rig.sessionStore.load())
+    }
+
+    // MARK: — The shared tick's thermal step (ADR 025)
+
+    /// A critical-heat release governs the tick: the flag goes off, the Mac is
+    /// asked to sleep, and the rest of the tick (session expiry, battery) is
+    /// skipped — the battery step must never re-arm a flag we just released for
+    /// heat.
+    func testACriticalHeatReleaseGovernsTheSharedTick() {
+        let rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 90),
+                          thermal: .critical)
+        saveSession(rig, duration: 2 * 3600)   // NOT due
+        var service = rig.guardService
+        let outcome = service.tick()
+
+        XCTAssertEqual(rig.lid.calls, [false])
+        XCTAssertEqual(rig.sleeper.count, 1, "the thermal step asks for the sleep")
+        XCTAssertNotNil(outcome.thermal)
+        XCTAssertEqual(outcome.thermal?.mutation, .released)
+        XCTAssertEqual(outcome.mutation, .released)
+        XCTAssertNil(rig.sessionStore.load(), "heat ends the session")
+    }
+
+    /// Heat ends the session rather than pausing it, and the tick reports that
+    /// through the thermal outcome — not as a second "session ended" notice.
+    func testHeatEndsTheSessionOnTheSameTick() {
+        let rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 90),
+                          thermal: .critical)
+        saveSession(rig, duration: 2 * 3600)
+        var service = rig.guardService
+        let outcome = service.tick()
+        XCTAssertEqual(outcome.thermal?.sessionEndedByHeat, true)
+        XCTAssertFalse(outcome.sessionEndedNaturally,
+                       "the operator hears the heat notice, not a generic expiry")
+    }
+
+    /// An INERT thermal minute changes nothing: the battery and session steps
+    /// run exactly as before (ADR 022/023 byte for byte).
+    func testANominalThermalMinuteLeavesTheRestOfTheTickUntouched() {
+        let rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 60),
+                          thermal: .nominal)
+        saveSession(rig, duration: 60)
+        rig.clock.advance(111)
+        var service = rig.guardService
+        let outcome = service.tick()
+        XCTAssertNotNil(outcome.thermal, "the step ran…")
+        XCTAssertNil(outcome.thermal?.mutation, "…and did nothing")
+        XCTAssertEqual(outcome.session, .ended(.released),
+                       "the session deadline still ends the tick's session step")
+    }
+
+    /// A thermal WARNING does not suppress the independent battery protection:
+    /// the same tick can say "the Mac is hot" AND release at critical battery.
+    ///
+    /// `serious` enclosed and ours warns (the heads-up before the 10 min grace
+    /// expires) without mutating, so it does NOT govern the tick — the battery
+    /// step still runs and still releases.
+    func testAThermalWarningDoesNotSuppressTheBatteryStep() {
+        let rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 4),
+                          thermal: .serious, lidClosed: true, externalDisplay: false)
+        var service = rig.guardService
+        let outcome = service.tick()
+        XCTAssertNotNil(outcome.thermal?.notice, "the heat heads-up is carried")
+        XCTAssertEqual(outcome.mutation, .released, "and the battery release still happens")
+        XCTAssertEqual(rig.sleeper.count, 1)
+    }
+
+    /// Review round 2 (WARNING): a hot, enclosed machine could get its flag
+    /// back. `serious` inside the ten-minute grace answers `.warn` with no
+    /// mutation, so the tick fell through to the battery step, whose `.rearm`
+    /// branch turned `disablesleep` back ON — recreating the exact condition
+    /// the thermal policy exists to escape, through a branch that never
+    /// consulted heat.
+    ///
+    /// The veto is scoped to the RE-ARM, not the whole battery step: the test
+    /// just above proves a thermal warning must NOT suppress the critical
+    /// release, so starving the step wholesale would drain the machine.
+    func testAHotEnclosedMacNeverGetsItsFlagBack() {
+        // A pending re-arm debt: the guard released earlier and the charge is
+        // back above the threshold, so the battery step wants to re-enable.
+        let rig = makeRig(flag: false, ownedBoot: "A", battery: Self.reading(false, 60),
+                          thermal: .serious, lidClosed: true, externalDisplay: false)
+        rig.latchStore.save(.init(latch: LowBatteryPolicy.Latch(releasedByGuard: true),
+                                  releasedBootID: "A"))
+        var service = rig.guardService
+        let outcome = service.tick()
+        XCTAssertNotEqual(outcome.mutation, .rearmed,
+                          "a hot enclosed Mac must never be re-enabled")
+        guard case .some(false) = rig.flag.value else {
+            return XCTFail("the flag must stay OFF, got \(String(describing: rig.flag.value))")
+        }
+    }
+
+    /// The veto is thermal-only: a hot machine with the lid OPEN may re-arm,
+    /// because air circulates and the battery rule owns that case.
+    func testAHotMacWithTheLidOpenMayStillRearm() {
+        let rig = makeRig(flag: false, ownedBoot: "A", battery: Self.reading(false, 60),
+                          thermal: .serious, lidClosed: false, externalDisplay: false)
+        rig.latchStore.save(.init(latch: LowBatteryPolicy.Latch(releasedByGuard: true),
+                                  releasedBootID: "A"))
+        var service = rig.guardService
+        let outcome = service.tick()
+        XCTAssertEqual(outcome.mutation, .rearmed,
+                       "an open lid means the machine can cool; the battery rule wins")
+    }
+
+    /// The thermal kill switch is the app's too: no thermal service, no thermal
+    /// behaviour — the pre-ADR-025 tick, untouched.
+    func testNoThermalServiceMeansNoThermalBehaviour() {
+        let rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 60))
+        saveSession(rig, duration: 60)
+        rig.clock.advance(111)
+        var service = rig.guardService
+        service.thermalService = nil
+        let outcome = service.tick()
+        XCTAssertNil(outcome.thermal)
+        XCTAssertEqual(outcome.session, .ended(.released))
     }
 }

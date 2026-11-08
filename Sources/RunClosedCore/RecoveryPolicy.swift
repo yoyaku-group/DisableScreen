@@ -45,6 +45,12 @@ public enum RecoveryPolicy {
         /// step when it is off and still runs the session step; the backstop is
         /// the same guard and must obey the same switch.
         public var batteryGuardEnabled: Bool
+        /// The thermal guard's operator kill switch (`ThermalGuardSettings`,
+        /// ADR 025). Same contract as `batteryGuardEnabled`: the backstop IS
+        /// the guard, so it obeys the switch the operator set — otherwise an
+        /// operator who turned the thermal guard off would still get a
+        /// `disablesleep 0` plus `pmset sleepnow` from launchd a minute later.
+        public var thermalGuardEnabled: Bool
 
         public init(
             recordBootID: String,
@@ -54,7 +60,14 @@ public enum RecoveryPolicy {
             now: SessionPolicy.Now,
             battery: LowBatteryPolicy.Input? = nil,
             latch: LowBatteryPolicy.Latch = LowBatteryPolicy.Latch(),
-            batteryGuardEnabled: Bool = true
+            batteryGuardEnabled: Bool = true,
+            // NO DEFAULT, deliberately. A default of `true` would silently arm
+            // the thermal guard at every construction site that predates ADR
+            // 025: the code compiles unchanged, the operator's kill switch is
+            // never consulted, and launchd releases the flag one minute after
+            // they said no. The compiler now forces each site to state which
+            // switch it honours.
+            thermalGuardEnabled: Bool
         ) {
             self.recordBootID = recordBootID
             self.recordOwnedEnabled = recordOwnedEnabled
@@ -64,6 +77,7 @@ public enum RecoveryPolicy {
             self.battery = battery
             self.latch = latch
             self.batteryGuardEnabled = batteryGuardEnabled
+            self.thermalGuardEnabled = thermalGuardEnabled
         }
     }
 
@@ -109,9 +123,44 @@ public enum RecoveryPolicy {
         public var battery: Bool
         public var ownership: LowBatteryPolicy.LidOwnership
         public var batteryVerdict: BatteryVerdict
+        /// The thermal step runs (ADR 025): our ownership record still claims
+        /// the flag, any boot, AND the operator kill switch is on.
+        ///
+        /// Gated on the record and not on the thermal state, deliberately: the
+        /// fast path reads FILE FACTS ONLY, and a thermal read it did here
+        /// would be stale by the time the lock is taken. The decision is
+        /// re-computed from live values inside the section, exactly like the
+        /// battery verdict.
+        public var thermal: Bool
+        /// The operator's thermal kill switch, carried on the plan so
+        /// `thermalSkipReason` can name WHY the step was skipped instead of
+        /// reporting a bare `false`.
+        public var thermalGuardEnabled: Bool
 
         /// `false` = exit 0 without a `pmset` call and without the lock.
-        public var needsWork: Bool { session || battery }
+        public var needsWork: Bool { session || battery || thermal }
+
+        /// Why the thermal step is not running, when it is not.
+        ///
+        /// `thermal == false` used to be readable only as a bare boolean, so a
+        /// log or a JSON report could not tell an OPERATOR who switched the
+        /// guard off from a machine that simply has no flag of ours to protect.
+        /// Those are very different facts to find in a post-mortem, and naming
+        /// them costs one switch. `nil` when the step does run.
+        public var thermalSkipReason: ThermalSkipReason? {
+            guard !thermal else { return nil }
+            // The kill switch is checked first: an operator who turned it off
+            // must see that, not "nothing was ours".
+            return thermalGuardEnabled ? .nothingToProtect : .switchedOff
+        }
+    }
+
+    /// Why the thermal step did not run.
+    public enum ThermalSkipReason: String, Equatable, Sendable {
+        /// The operator switched the thermal guard off.
+        case switchedOff
+        /// No ownership record claims the flag: there is nothing to release.
+        case nothingToProtect
     }
 
     /// Decide whether the backstop has anything to do, and which steps it may
@@ -139,7 +188,13 @@ public enum RecoveryPolicy {
             sessionDue: session.map { SessionPolicy.dueReason($0, now: facts.now) != nil } ?? false,
             battery: claimsFlag && facts.batteryGuardEnabled,
             ownership: ownership,
-            batteryVerdict: facts.batteryGuardEnabled ? verdict : .unread)
+            batteryVerdict: facts.batteryGuardEnabled ? verdict : .unread,
+            // Heat and the battery are independent protections of the SAME
+            // claim, so they share the gate: a flag the record claims, on any
+            // boot. Two separate kill switches, though — the thermal one does
+            // not switch the battery one off, and vice versa.
+            thermal: claimsFlag && facts.thermalGuardEnabled,
+            thermalGuardEnabled: facts.thermalGuardEnabled)
     }
 
     /// The battery step's decision, mapped onto what a protective-only caller

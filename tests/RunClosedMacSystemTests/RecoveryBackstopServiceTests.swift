@@ -83,6 +83,25 @@ final class RecoveryBackstopServiceTests: XCTestCase {
         let lockURL: URL
         let auditLog: RecoveryAuditLog
         let heartbeat: BackstopHeartbeatStore
+        /// ADR 025 — the thermal side of the world this rig observes.
+        let thermal: ThermalBox
+        let thermalLatch: ThermalLatchStore
+    }
+
+    /// The thermal world: state, clamshell bit, display attachment, monotonic
+    /// clock. One box so a test moves the machine with one assignment.
+    private final class ThermalBox: @unchecked Sendable {
+        var state: ThermalState
+        var lidClosed: Bool?
+        var externalDisplay: Bool?
+        var now: Double
+        init(state: ThermalState = .nominal, lidClosed: Bool? = true,
+             externalDisplay: Bool? = false, now: Double = 1_000) {
+            self.state = state
+            self.lidClosed = lidClosed
+            self.externalDisplay = externalDisplay
+            self.now = now
+        }
     }
 
     private let epoch = Date(timeIntervalSince1970: 1_800_000_000)
@@ -98,7 +117,11 @@ final class RecoveryBackstopServiceTests: XCTestCase {
                          battery: BatteryState,
                          appAlive: Bool = false,
                          bootID: String = "A",
-                         batteryGuardEnabled: Bool = true) -> Rig {
+                         batteryGuardEnabled: Bool = true,
+                         thermalGuardEnabled: Bool = true,
+                         thermalState: ThermalState = .nominal,
+                         lidClosed: Bool? = true,
+                         externalDisplay: Bool? = false) -> Rig {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("runclosed-backstop-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -133,7 +156,7 @@ final class RecoveryBackstopServiceTests: XCTestCase {
                 return (rec.bootID, rec.ownedEnabled)
             },
             applyLid: apply)
-        let guardService = LowBatteryGuardService(
+        var guardService = LowBatteryGuardService(
             lidService: LidMutationService(bootID: bootID, mutator: lid, store: lidStore,
                                            priorProvider: { flagBox.value }),
             latchStore: latchStore,
@@ -146,6 +169,24 @@ final class RecoveryBackstopServiceTests: XCTestCase {
             sessionService: sessionService)
         let heartbeatStore = BackstopHeartbeatStore(
             url: dir.appendingPathComponent("backstop_heartbeat.json"))
+        // ADR 025 — the SAME thermal policy the app runs, on injected readings
+        // so no test touches the real thermal state.
+        let thermalBox = ThermalBox(state: thermalState, lidClosed: lidClosed,
+                                    externalDisplay: externalDisplay)
+        let thermalLatch = ThermalLatchStore(
+            url: dir.appendingPathComponent("thermal_guard.json"))
+        guardService.thermalService = ThermalGuardService(
+            lidService: LidMutationService(bootID: bootID, mutator: lid,
+                                           store: lidStore,
+                                           priorProvider: { flagBox.value }),
+            latchStore: thermalLatch,
+            thermalProvider: { thermalBox.state },
+            lidClosedProvider: { thermalBox.lidClosed },
+            externalDisplayProvider: { thermalBox.externalDisplay },
+            monotonic: { thermalBox.now },
+            sleeper: sleeper,
+            auditLog: ThermalAuditLog(url: dir.appendingPathComponent("thermal_audit.jsonl")),
+            sessionService: sessionService)
         let service = RecoveryBackstopService(
             sessionService: sessionService,
             guardService: guardService,
@@ -154,12 +195,13 @@ final class RecoveryBackstopServiceTests: XCTestCase {
             heartbeatStore: heartbeatStore,
             appIsAlive: { aliveBox.alive },
             batteryGuardEnabled: { batteryGuardEnabled },
+            thermalGuardEnabled: { thermalGuardEnabled },
             wallClock: { clock.wall })
 
         return Rig(service: service, lid: lid, sleeper: sleeper, flag: flagBox, clock: clock,
                    sessionStore: sessionStore, latchStore: latchStore, lidStore: lidStore,
                    battery: batteryBox, alive: aliveBox, lockURL: lockURL, auditLog: auditLog,
-                   heartbeat: heartbeatStore)
+                   heartbeat: heartbeatStore, thermal: thermalBox, thermalLatch: thermalLatch)
     }
 
     private func saveSession(_ rig: Rig,
@@ -454,11 +496,27 @@ final class RecoveryBackstopServiceTests: XCTestCase {
         XCTAssertEqual(report.batteryMutation, nil, "…and the battery step still did not run")
     }
 
-    /// With the guard off and nothing scheduled, the minute stays free: no
-    /// lock, no `pmset`.
-    func testTheKillSwitchKeepsALoneClaimOnTheFastPath() {
+    /// With the battery guard off, the record still claims the flag for the
+    /// THERMAL step (ADR 025) — the two switches are independent — so the minute
+    /// is not free. It still costs no `pmset` and no mutation, which is what the
+    /// fast path was protecting.
+    func testTheBatteryKillSwitchLeavesTheThermalClaimOnTheMinute() {
         var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 6),
                           batteryGuardEnabled: false)
+        let outcome = rig.service.run()
+        guard case .completed(let report) = outcome else {
+            return XCTFail("the thermal step still claims the minute, got \(outcome)")
+        }
+        XCTAssertTrue(report.thermalStepRan)
+        XCTAssertTrue(rig.lid.calls.isEmpty, "no mutation: the machine is not hot")
+        XCTAssertEqual(rig.sleeper.count, 0)
+    }
+
+    /// The free minute needs BOTH switches off: then nothing is protecting the
+    /// claim and the fast path is honest again.
+    func testBothKillSwitchesRestoreTheFreeFastPath() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 6),
+                          batteryGuardEnabled: false, thermalGuardEnabled: false)
         XCTAssertEqual(rig.service.run(), .nothingToDo)
         XCTAssertTrue(rig.lid.calls.isEmpty)
         XCTAssertEqual(rig.sleeper.count, 0)
@@ -782,7 +840,8 @@ final class RecoveryBackstopServiceTests: XCTestCase {
             plan: RecoveryPolicy.plan(RecoveryPolicy.Facts(
                 recordBootID: "A", recordOwnedEnabled: true, currentBootID: "A",
                 session: nil,
-                now: SessionPolicy.Now(wall: epoch, continuousNanoseconds: 0, bootID: "A"))))
+                now: SessionPolicy.Now(wall: epoch, continuousNanoseconds: 0, bootID: "A"),
+                thermalGuardEnabled: true)))
         report.batteryMutation = .releaseRefused
         report.batteryReason = .criticalOwned
         report.batteryError = "notOwned"
@@ -1158,5 +1217,293 @@ final class RecoveryBackstopServiceTests: XCTestCase {
         XCTAssertEqual(RecoveryBackstopService.ExitCode.backendFailure.rawValue, 5)
         XCTAssertEqual(RecoveryBackstopService.ExitCode.usage.rawValue, 64)
         XCTAssertEqual(RecoveryBackstopService.ExitCode.busy.rawValue, 75)
+    }
+
+    // MARK: — The thermal step (ADR 025)
+
+    /// A session with no end time must be protected from HEAT even when the app
+    /// is gone — the exact argument that put the battery step in this agent.
+    /// Critical heat, lid closed, no display, flag ours: release + sleep, and
+    /// the run ends there.
+    func testCriticalHeatReleasesEvenWithAnIndefiniteSession() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 80), thermalState: .critical)
+        saveSession(rig, duration: nil)   // the plain switch, no deadline
+        let outcome = rig.service.run()
+
+        XCTAssertEqual(rig.lid.calls, [false], "disablesleep 0 through the ownership gate")
+        XCTAssertEqual(rig.sleeper.count, 1, "and the Mac is asked to sleep")
+        guard case .completed(let report) = outcome else {
+            return XCTFail("expected a completed run, got \(outcome)")
+        }
+        XCTAssertEqual(report.thermalReason, .criticalOwned)
+        XCTAssertEqual(report.thermalMutation, .released)
+        XCTAssertTrue(report.sessionEndedByHeat, "heat ENDS the session, it does not pause it")
+        XCTAssertNil(rig.sessionStore.load(), "the record is gone: nothing may revive it")
+        XCTAssertEqual(outcome.exitCode, .ok)
+    }
+
+    /// Heat ends the session for good: unlike a battery release, there is no
+    /// re-arm debt left behind, so nothing turns the flag back on later.
+    func testAHeatReleaseLeavesNoRearmDebt() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 80),
+                          thermalState: .critical)
+        saveSession(rig, duration: nil)
+        _ = rig.service.run()
+        XCTAssertFalse(rig.latchStore.load().latch.releasedByGuard,
+                       "a heat release is not a battery release: no re-arm is owed")
+    }
+
+    /// The battery step never runs on a heat tick — the flag is off and the
+    /// re-arm branch must not see it.
+    func testAHeatTickDoesNotAlsoRunTheBatteryStep() {
+        // Critical battery AND critical heat, with a re-arm owed: if the battery
+        // step ran, it would re-arm the flag on AC above 15%.
+        var rig = makeRig(flag: true, ownedBoot: "A",
+                          battery: Self.reading(false, 90),
+                          thermalState: .critical)
+        rig.latchStore.save(.init(latch: LowBatteryPolicy.Latch(releasedByGuard: true)))
+        _ = rig.service.run()
+        XCTAssertEqual(rig.lid.calls, [false], "the only write is the heat release")
+    }
+
+    /// The thermal kill switch is honoured: an operator who turned it off gets
+    /// no `disablesleep 0` + `pmset sleepnow` from launchd a minute later.
+    func testTheThermalKillSwitchStopsTheReleaseAndTheSleep() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 80), thermalGuardEnabled: false,
+                          thermalState: .critical)
+        saveSession(rig, duration: nil)
+        let outcome = rig.service.run()
+        XCTAssertTrue(rig.lid.calls.isEmpty, "no release when the thermal guard is off")
+        XCTAssertEqual(rig.sleeper.count, 0)
+        XCTAssertNotNil(rig.sessionStore.load())
+        guard case .completed(let report) = outcome else {
+            return XCTFail("expected a completed run, got \(outcome)")
+        }
+        XCTAssertFalse(report.thermalStepRan)
+    }
+
+    /// …and the switch is INDEPENDENT: turning the battery guard off still runs
+    /// the thermal step, and vice versa.
+    func testTheThermalStepRunsWithTheBatteryGuardKilled() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 90), batteryGuardEnabled: false,
+                          thermalState: .critical)
+        saveSession(rig, duration: nil)
+        _ = rig.service.run()
+        XCTAssertEqual(rig.lid.calls, [false], "heat is not the battery guard's to switch off")
+        XCTAssertEqual(rig.sleeper.count, 1)
+    }
+
+    func testTheBatteryStepRunsWithTheThermalGuardKilled() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(true, 4), thermalGuardEnabled: false,
+                          thermalState: .nominal)
+        saveSession(rig, duration: nil)
+        _ = rig.service.run()
+        XCTAssertEqual(rig.lid.calls, [false], "the battery release still happens")
+    }
+
+    /// A heat refusal (flag not ours) never writes, and never sleeps.
+    func testCriticalHeatOnAForeignFlagWritesNothing() {
+        var rig = makeRig(flag: true, ownedBoot: nil, battery: Self.reading(false, 80),
+                          thermalState: .critical)
+        _ = rig.service.run()
+        XCTAssertTrue(rig.lid.calls.isEmpty, "B2: a foreign flag is never released")
+        XCTAssertEqual(rig.sleeper.count, 0)
+    }
+
+    func testCriticalHeatWithTheLidOpenWritesNothing() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 80),
+                          thermalState: .critical, lidClosed: false)
+        saveSession(rig, duration: nil)
+        _ = rig.service.run()
+        XCTAssertTrue(rig.lid.calls.isEmpty)
+        XCTAssertEqual(rig.sleeper.count, 0)
+    }
+
+    func testCriticalHeatWithAnExternalDisplayWritesNothing() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 80),
+                          thermalState: .critical, externalDisplay: true)
+        saveSession(rig, duration: nil)
+        _ = rig.service.run()
+        XCTAssertTrue(rig.lid.calls.isEmpty)
+        XCTAssertEqual(rig.sleeper.count, 0)
+    }
+
+    /// A run whose thermal step governed it writes ONE line in the recovery
+    /// log — what THIS agent did — and maps its exit code like the battery step.
+    func testAHeatReleaseIsAuditedInTheRecoveryLog() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 80),
+                          thermalState: .critical)
+        saveSession(rig, duration: nil)
+        _ = rig.service.run()
+        let lines = rig.auditLog.load()
+        XCTAssertEqual(lines.count, 1)
+        XCTAssertEqual(lines.first?.step, "thermalRelease")
+        XCTAssertEqual(lines.first?.outcome, "released")
+        XCTAssertEqual(lines.first?.reason, "criticalOwned")
+        XCTAssertEqual(lines.first?.detail, "session ended by heat")
+    }
+
+    /// A failed thermal release reports a backend failure, exactly as a failed
+    /// battery release does: a protective action that did not happen is never
+    /// announced as a healthy minute.
+    func testAFailedHeatReleaseExits5() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 80),
+                          thermalState: .critical)
+        rig.lid.failWrites = true
+        saveSession(rig, duration: nil)
+        let outcome = rig.service.run()
+        XCTAssertEqual(outcome.exitCode, .backendFailure)
+        XCTAssertEqual(outcome.exitCode.rawValue, 5)
+        guard case .completed(let failed) = outcome else {
+            return XCTFail("expected a completed run, got \(outcome)")
+        }
+        XCTAssertEqual(failed.thermalMutation, .releaseFailed)
+    }
+
+    /// A minute with nothing thermal to do keeps the ADR 024 report unchanged:
+    /// the thermal block is present but empty, and the run is a fast path.
+    func testANominalMinuteKeepsTheFastPathAndTouchesNoThermalState() {
+        var rig = makeRig(flag: nil, ownedBoot: nil, battery: Self.reading(false, 80))
+        let outcome = rig.service.run()
+        XCTAssertEqual(outcome, .nothingToDo)
+        XCTAssertTrue(rig.lid.calls.isEmpty)
+        XCTAssertEqual(rig.sleeper.count, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: rig.thermalLatch.url.path),
+                       "the fast path must not write the thermal latch")
+    }
+
+    /// The whole grid: the backstop never issues an enable, heat included.
+    func testTheBackstopNeverEnablesTheFlagIncludingForHeat() {
+        let states: [ThermalState] = ThermalState.allCases
+        for thermal in states {
+            for lid in [true, false, nil] as [Bool?] {
+                for external in [true, false, nil] as [Bool?] {
+                    for ownedBoot in ["A", "OLD"] {
+                        for flag in [true, false] {
+                            var rig = makeRig(flag: flag, ownedBoot: ownedBoot,
+                                              battery: Self.reading(false, 80),
+                                              thermalState: thermal, lidClosed: lid,
+                                              externalDisplay: external)
+                            rig.latchStore.save(.init(
+                                latch: LowBatteryPolicy.Latch(releasedByGuard: true)))
+                            _ = rig.service.run()
+                            XCTAssertFalse(
+                                rig.lid.calls.contains(true),
+                                "an enable was issued for state=\(thermal) lid=\(String(describing: lid)) ext=\(String(describing: external)) owned=\(ownedBoot) flag=\(flag)")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The thermal step runs INSIDE the backstop's single lock section, exactly
+    /// like the battery one: a probe taken from the thermal readback has to
+    /// fail to acquire the lock.
+    func testTheThermalStepRunsInsideTheBackstopsLockSection() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 80),
+                          thermalState: .critical)
+        saveSession(rig, duration: nil)
+        let other = LidWriteLock(url: rig.lockURL)
+        final class Seen: @unchecked Sendable { var outside: [Bool] = [] }
+        let seen = Seen()
+        let thermalBox = rig.thermal
+        // Rebuild the guard's thermal service so its readback probes the lock.
+        rig.service.guardService.thermalService = ThermalGuardService(
+            lidService: rig.service.guardService.thermalService!.lidService,
+            latchStore: rig.thermalLatch,
+            thermalProvider: {
+                seen.outside.append(other.tryWithLock { 1 } == nil)
+                return thermalBox.state
+            },
+            lidClosedProvider: { thermalBox.lidClosed },
+            externalDisplayProvider: { thermalBox.externalDisplay },
+            monotonic: { thermalBox.now },
+            sleeper: rig.sleeper,
+            auditLog: ThermalAuditLog(url: rig.thermalLatch.url.deletingLastPathComponent()
+                .appendingPathComponent("thermal_audit.jsonl")),
+            sessionService: rig.service.sessionService)
+        _ = rig.service.run()
+        XCTAssertFalse(seen.outside.isEmpty, "the thermal step ran")
+        XCTAssertTrue(seen.outside.allSatisfy { $0 }, "the section is exclusive")
+        XCTAssertEqual(other.tryWithLock { 2 }, 2, "and released afterwards")
+    }
+
+    /// A thermal latch the backstop cannot write is a FAILED minute, not a
+    /// quiet one: with `seriousSince` unpersistable the sustained-heat release
+    /// can never fire, so this minute established nothing about heat being
+    /// covered. It must not feed a "fresh" heartbeat to the CLI.
+    func testAnUnwritableThermalLatchExits5() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 80),
+                          thermalState: .serious)
+        saveSession(rig, duration: nil)
+        let thermalBox = rig.thermal
+        let dir = rig.latchStore.url.deletingLastPathComponent()
+        // A path whose parent is a regular file: any write under it fails with
+        // ENOTDIR, a genuine I/O failure.
+        let blocker = dir.appendingPathComponent("latch-blocker")
+        try? Data("not a directory".utf8).write(to: blocker)
+        rig.service.guardService.thermalService = ThermalGuardService(
+            lidService: rig.service.guardService.thermalService!.lidService,
+            latchStore: ThermalLatchStore(
+                url: blocker.appendingPathComponent("nested/thermal_guard.json")),
+            thermalProvider: { thermalBox.state },
+            lidClosedProvider: { thermalBox.lidClosed },
+            externalDisplayProvider: { thermalBox.externalDisplay },
+            monotonic: { thermalBox.now },
+            sleeper: rig.sleeper,
+            auditLog: ThermalAuditLog(url: dir.appendingPathComponent("thermal_audit.jsonl")),
+            sessionService: rig.service.sessionService)
+
+        let outcome = rig.service.run()
+        guard case .completed(let report) = outcome else {
+            return XCTFail("expected a completed run, got \(outcome)")
+        }
+        XCTAssertTrue(report.thermalLatchSaveFailed)
+        XCTAssertEqual(outcome.exitCode, .backendFailure)
+        XCTAssertEqual(outcome.exitCode.rawValue, 5)
+    }
+
+    /// A COOL machine whose record still claims the flag must never release.
+    ///
+    /// `RecoveryPolicy.plan` selects the thermal step from FILE FACTS ONLY (the
+    /// ownership record plus the kill switch) and deliberately does not read
+    /// the thermal state there: a reading taken before the lock would be stale
+    /// by the time the section runs. The safety of that shortcut rests entirely
+    /// on the live re-check inside `ThermalGuardService.step()`, which re-reads
+    /// the state under the lock and answers `.nominal`. This test pins that
+    /// pairing, so a future "optimisation" that trusts the plan cannot start
+    /// releasing the flag on a cold Mac.
+    func testACoolMachineWithAClaimedFlagIsNeverReleased() {
+        for state in [ThermalState.nominal, .fair] {
+            var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 80),
+                              thermalState: state)
+            saveSession(rig, duration: nil)
+            let outcome = rig.service.run()
+            XCTAssertTrue(rig.lid.calls.isEmpty,
+                          "\(state) must never release the flag")
+            XCTAssertEqual(rig.sleeper.count, 0)
+            guard case .completed(let report) = outcome else {
+                return XCTFail("expected a completed run, got \(outcome)")
+            }
+            // The step RAN (the plan said it might have work) and decided not
+            // to act: exactly the live re-check doing its job.
+            XCTAssertTrue(report.thermalStepRan)
+            XCTAssertNil(report.thermalMutation)
+            XCTAssertEqual(outcome.exitCode, .ok)
+            XCTAssertNotNil(rig.sessionStore.load(), "the session is untouched")
+        }
+    }
+
+    /// The other half of the same contract: the plan is a cheap PREDICATE, so a
+    /// machine that does not claim the flag skips the thermal step entirely
+    /// rather than paying for a readback it cannot act on.
+    func testAMachineThatDoesNotClaimTheFlagSkipsTheThermalStep() {
+        var rig = makeRig(flag: false, ownedBoot: nil, battery: Self.reading(false, 80),
+                          thermalState: .critical)
+        let outcome = rig.service.run()
+        XCTAssertEqual(outcome, .nothingToDo, "nothing is ours: the fast path stays free")
+        XCTAssertTrue(rig.lid.calls.isEmpty)
+        XCTAssertEqual(rig.sleeper.count, 0)
     }
 }

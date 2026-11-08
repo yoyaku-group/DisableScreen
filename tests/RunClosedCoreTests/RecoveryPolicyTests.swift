@@ -43,7 +43,9 @@ final class RecoveryPolicyTests: XCTestCase {
         session: KeepAwakeSession? = nil,
         now: SessionPolicy.Now? = nil,
         battery: LowBatteryPolicy.Input? = nil,
-        latch: LowBatteryPolicy.Latch = LowBatteryPolicy.Latch()
+        latch: LowBatteryPolicy.Latch = LowBatteryPolicy.Latch(),
+        batteryGuardEnabled: Bool = true,
+        thermalGuardEnabled: Bool = true
     ) -> RecoveryPolicy.Facts {
         RecoveryPolicy.Facts(
             recordBootID: recordBootID,
@@ -52,7 +54,9 @@ final class RecoveryPolicyTests: XCTestCase {
             session: session,
             now: now ?? self.now(),
             battery: battery,
-            latch: latch)
+            latch: latch,
+            batteryGuardEnabled: batteryGuardEnabled,
+            thermalGuardEnabled: thermalGuardEnabled)
     }
 
     private func batteryInput(onBattery: Bool?, pct: Int?, lidFlag: Bool?,
@@ -400,5 +404,47 @@ final class RecoveryPolicyTests: XCTestCase {
         XCTAssertTrue(plan.batteryVerdict.releasesFlag)
         let unread = RecoveryPolicy.plan(facts(ownedEnabled: true))
         XCTAssertEqual(unread.batteryVerdict, .unread)
+    }
+
+    // MARK: — Why the thermal step was skipped (ADR 025)
+
+    /// A bare `thermal: false` cannot tell a post-mortem whether an OPERATOR
+    /// switched the guard off or whether there was simply nothing of ours to
+    /// protect. Those are different facts, and the plan now names them.
+    func testTheThermalSkipReasonDistinguishesSwitchOffFromNothingToProtect() {
+        // Switch off, flag claimed: the operator's decision wins the naming.
+        let off = RecoveryPolicy.plan(facts(ownedEnabled: true, thermalGuardEnabled: false))
+        XCTAssertFalse(off.thermal)
+        XCTAssertEqual(off.thermalSkipReason, .switchedOff)
+
+        // Switch on, nothing claimed: there is nothing to release.
+        let nothing = RecoveryPolicy.plan(facts(ownedEnabled: false, thermalGuardEnabled: true))
+        XCTAssertFalse(nothing.thermal)
+        XCTAssertEqual(nothing.thermalSkipReason, .nothingToProtect)
+
+        // Both: still the operator.
+        let both = RecoveryPolicy.plan(facts(ownedEnabled: false, thermalGuardEnabled: false))
+        XCTAssertEqual(both.thermalSkipReason, .switchedOff)
+    }
+
+    /// When the step DOES run there is no skip reason to report.
+    func testARunningThermalStepHasNoSkipReason() {
+        let plan = RecoveryPolicy.plan(facts(ownedEnabled: true, thermalGuardEnabled: true))
+        XCTAssertTrue(plan.thermal)
+        XCTAssertNil(plan.thermalSkipReason)
+    }
+
+    /// The two kill switches stay independent: killing the battery one must not
+    /// select the thermal one off, and vice versa.
+    func testTheTwoKillSwitchesAreIndependent() {
+        let batteryOff = RecoveryPolicy.plan(
+            facts(ownedEnabled: true, batteryGuardEnabled: false, thermalGuardEnabled: true))
+        XCTAssertFalse(batteryOff.battery)
+        XCTAssertTrue(batteryOff.thermal, "the battery switch does not kill the thermal step")
+
+        let thermalOff = RecoveryPolicy.plan(
+            facts(ownedEnabled: true, batteryGuardEnabled: true, thermalGuardEnabled: false))
+        XCTAssertTrue(thermalOff.battery)
+        XCTAssertFalse(thermalOff.thermal, "the thermal switch does not kill the battery step")
     }
 }

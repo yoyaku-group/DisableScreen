@@ -65,6 +65,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let dim = DimOverlayController()
     private let clock = SystemClock(bootID: BootID.current())
 
+    /// ADR 025: the ONE thermal observer and the ONE clamshell observer, both
+    /// placed at launch and removed at quit. The clamshell one feeds the same
+    /// guard tick; the 5 s refresh re-reads the state as a fallback, because a
+    /// notification can be missed across a sleep.
+    private let thermalObserver = ThermalObserver()
+    private let clamshellObserver = ClamshellObserver()
+    /// What the last tick said about heat, for the menu-bar title (ADR 025).
+    private var heatEndedSession = false
+
     /// Cached lid state — refreshed off-main by the shared status probe.
     private var lidCache: Bool??
     private var lidReady = false
@@ -87,6 +96,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// One store for the switch's writes: the canonical init creates the
     /// directory, which has no place on every main-thread action.
     private let sessionStore = SessionStore()
+    /// The thermal latch, read off the main thread with the 5 s poll like
+    /// `sessionStore` (ADR 025).
+    private let thermalLatchStore = ThermalLatchStore()
     /// `session.json` as last read off the main thread, with the 5 s lid poll
     /// (ADR 023). The title and the popup row read only this, never the
     /// file: they run on every icon refresh and popup rebuild.
@@ -135,9 +147,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         startLowBatteryGuard()
         startSessionCountdown()
+        startThermalObservers()
+    }
+
+    /// ADR 025: one observer each, placed at launch and removed at quit.
+    ///
+    /// The thermal notification ticks immediately — a `critical` arriving ten
+    /// seconds after the 30 s tick must not wait half a minute. The clamshell
+    /// one is debounced by the observer itself (2 s: closing the lid produces a
+    /// burst), and the 5 s refresh re-reads the state as its fallback.
+    private func startThermalObservers() {
+        thermalObserver.start { [weak self] in
+            Task { @MainActor in self?.runLowBatteryTick() }
+        }
+        clamshellObserver.start { [weak self] in
+            Task { @MainActor in self?.refreshLidCache() }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        thermalObserver.stop()
+        clamshellObserver.stop()
         var displayService = makeDisplayService()
         _ = displayService.restoreOwned()
         // Lid: restore ONLY if we own it on this boot (B2/ADR 015).
@@ -342,21 +372,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshLidCache() {
         let bootID = clock.bootID
         let sessionURL = sessionStore.url
+        let thermalLatchURL = thermalLatchStore.url
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let value = PowerReadback.lidStayAwake()
             let rec = OwnedLidAssertion(currentBootID: bootID).load()
             let owned = rec.ownedEnabled && rec.bootID == bootID
             let session = SessionStore(url: sessionURL).load()
+            // ADR 025: the latch is the source of truth for "the last release
+            // was for heat", so the bar keeps saying it across a relaunch and
+            // stops on its own once the machine has cooled (the policy clears
+            // it when the state falls back to nominal/fair).
+            let heatEnded = ThermalLatchStore(url: thermalLatchURL).load().latch.releasedForHeat
             DispatchQueue.main.async {
                 guard let self else { return }
                 let changed = self.lidCache != value
                 let sessionChanged = self.sessionCache != session
+                let heatChanged = self.heatEndedSession != heatEnded
                 self.lidCache = .some(value)
                 self.lidOwnedCache = owned
                 self.sessionCache = session
+                self.heatEndedSession = heatEnded
                 self.lidReady = true
                 self.syncKeepAwakeActivity()
-                if sessionChanged { self.updateStatusTitle() }
+                if sessionChanged || heatChanged { self.updateStatusTitle() }
                 if changed || sessionChanged { self.rebuildPanelIfVisible() }
             }
         }
@@ -400,6 +438,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
            let label = SessionPolicy.compactRemainingLabel(session, now: policyNow) {
             // "2h41" — the bar has no room for words.
             button.title = (session.pausedReason != nil ? " ⏸ " : " ") + label
+        } else if heatEndedSession {
+            // ADR 025: the session is gone and the reason is heat. The session
+            // label alone would read as a plain expiry, which is a different
+            // event (one the operator did not cause and cannot undo).
+            button.title = " " + L10n.t("ended: heat")
         } else {
             button.title = ""
         }
@@ -638,7 +681,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             continuousNanoseconds: clock.nowContinuousNanoseconds,
             bootID: self.clock.bootID)
         guard let session = sessionCache else {
-            return PopupState.SessionRow(label: nil, timed: false, indefinite: false,
+            // ADR 025: the session ended BECAUSE the Mac overheated. That is a
+            // different event from a deadline running out, and the operator
+            // needs to see it — otherwise it reads as a plain expiry they did
+            // not ask for.
+            let heatLabel = heatEndedSession
+                ? L10n.t("Session ended — heat")
+                : nil
+            return PopupState.SessionRow(label: heatLabel, timed: false, indefinite: false,
                                          pausedReason: nil, due: false)
         }
         let due = SessionPolicy.isDue(session, now: now)
@@ -970,9 +1020,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func runLowBatteryTick() {
         ensureLivenessLock()
-        guard LowBatteryGuardSettings.isEnabled() else {
+        let batteryEnabled = LowBatteryGuardSettings.isEnabled()
+        // ADR 025: the two switches are independent. Either guard running means
+        // the shared tick has work; both off means the session step alone runs.
+        let thermalEnabled = ThermalGuardSettings.isEnabled()
+        guard batteryEnabled || thermalEnabled else {
             if batteryAlert { batteryAlert = false; updateStatusIcon() }
-            // The battery kill switch must not switch deadlines off with it.
+            // Neither kill switch may switch deadlines off with it.
             runSessionOnlyTick()
             return
         }
@@ -981,6 +1035,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guardTickInFlight = true
         let bootID = clock.bootID
         guardQueue.async { [weak self, bootID] in
+            let session = SessionService.live(bootID: bootID)
             var service = LowBatteryGuardService(
                 lidService: LidMutationService(
                     bootID: bootID,
@@ -992,7 +1047,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 sleeper: PMSetSleeper(),
                 // ADR 023: the SAME tick (one LidWriteLock section) expires a
                 // due session and pauses/resumes it around a battery release.
-                sessionService: SessionService.live(bootID: bootID))
+                sessionService: session,
+                // ADR 025: heat runs FIRST in that same section and takes no
+                // lock of its own.
+                thermalService: thermalEnabled
+                    ? ThermalGuardService.live(bootID: bootID, sessionService: session)
+                    : nil)
+            if !batteryEnabled {
+                // The battery kill switch must not switch the thermal rule off
+                // with it — nor the deadlines. One section, thermal then
+                // session, never the battery step.
+                let outcome = service.thermalTick()
+                DispatchQueue.main.async {
+                    self?.handleLowBattery(outcome)
+                }
+                return
+            }
             let outcome = service.tick()
             DispatchQueue.main.async {
                 self?.handleLowBattery(outcome)
@@ -1054,6 +1124,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let e = outcome.evaluation
         let pct = e.input.chargePercent.map(String.init) ?? "?"
 
+        // ADR 025 — heat first: its notice is the one the operator needs most.
+        if let thermal = outcome.thermal { handleThermal(thermal) }
+
         // ADR 023: the session step ran first inside the same lock section.
         handleSessionStep(expiry: outcome.session, reconciled: outcome.sessionReconciled)
 
@@ -1063,6 +1136,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             batteryAlert = alert
             updateStatusIcon()
         }
+
+        // The battery step did not run: this was the thermal-only tick the app
+        // uses when the battery guard is switched off. Its evaluation is a real
+        // readback (the icon above already used it) but no battery decision was
+        // taken, so nothing battery-shaped may be announced.
+        guard outcome.batteryStepRan else {
+            if outcome.thermal?.mutation == .released { refreshLidCache() }
+            return
+        }
+
+        // A heat release governed the tick: the battery fields describe the
+        // flag AFTER it, and `outcome.mutation == .released` here means "for
+        // heat", never "for the battery". Announcing the battery text for it
+        // would tell the operator the wrong cause, so stop after the thermal
+        // notice.
+        if let thermal = outcome.thermal,
+           LowBatteryGuardService.thermalGovernsTheTick(thermal) {
+            if thermal.mutation == .released { refreshLidCache() }
+            return
+        }
+
         if e.decision.action != .none || outcome.mutation != nil {
             FileHandle.standardError.write(Data(
                 ("[RunClosed] low-battery: level=\(e.decision.level.rawValue) action=\(e.decision.action.rawValue) "
@@ -1116,6 +1210,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                    L10n.t("%@%% on battery and the lid stay-awake state cannot be read. Plug in now.", pct))
         default:
             break
+        }
+    }
+
+    /// The thermal step's share of a tick (ADR 025): the trace, the bar state
+    /// and the operator notice.
+    ///
+    /// The notice comes from `ThermalGuardService.Notice`, resolved in the
+    /// service so this layer only owns words and L10n.
+    private func handleThermal(_ outcome: ThermalGuardService.TickOutcome) {
+        let d = outcome.evaluation.decision
+        let i = outcome.evaluation.input
+        let lid: String = i.lidClosed.map { $0 ? "closed" : "open" } ?? "unknown"
+        let external: String = i.externalDisplayConnected.map { $0 ? "yes" : "no" } ?? "unknown"
+        let mutation: String = outcome.mutation?.rawValue ?? "-"
+        let error: String = outcome.mutationError ?? "-"
+        let sleep: String = outcome.sleepAttempted ? String(outcome.sleepRC ?? -1) : "-"
+        var line = "[RunClosed] thermal: state=\(i.state.rawValue) action=\(d.action.rawValue)"
+        line += " reason=\(d.reason.rawValue) lid=\(lid) externalDisplay=\(external)"
+        line += " ownership=\(i.ownership.rawValue) mutation=\(mutation)"
+        line += " error=\(error) sleep=\(sleep)"
+        if outcome.latchSaveFailed { line += " latchSaveFailed=true" }
+        line += "\n"
+        FileHandle.standardError.write(Data(line.utf8))
+
+        // "Session ended — heat" in the popup and the bar, once the release
+        // landed. Cleared by the next tick that is no longer hot (the latch is
+        // the source of truth, so a relaunch keeps saying it until the machine
+        // has cooled).
+        if outcome.sessionEndedByHeat {
+            heatEndedSession = true
+            updateStatusIcon()
+            refreshSessionDisplay()
+        }
+
+        guard outcome.shouldNotify, let notice = outcome.notice else { return }
+        switch notice {
+        case .releasedCritical:
+            notify(L10n.t("Mac too hot: sleeping now"),
+                   L10n.t("The Mac reached a critical temperature with the lid closed and no display attached, so nothing was cooling it. RunClosed turned lid stay-awake off and the Mac is going to sleep. The session ended — it does not come back on by itself."))
+        case .releasedSustained:
+            notify(L10n.t("Mac too hot: sleeping now"),
+                   L10n.t("The Mac stayed at a high temperature for %@ minutes with the lid closed and no display attached. RunClosed turned lid stay-awake off and the Mac is going to sleep. The session ended — it does not come back on by itself.",
+                          String(Int(ThermalPolicy.sustainedReleaseSeconds / 60))))
+        case .releaseFailed:
+            notify(L10n.t("Mac too hot: cooling needed"),
+                   L10n.t("Lid stay-awake could not be turned off (%@) and the Mac is still running hot with the lid closed. Open the lid or plug in a display so it can cool.", outcome.mutationError ?? "-"))
+        case .releaseRefused:
+            notify(L10n.t("Mac too hot: cooling needed"),
+                   L10n.t("The Mac is running hot with the lid closed, but lid stay-awake is not RunClosed's (%@), so it was left alone. Open the lid, plug in a display, or turn the switch off then on so RunClosed owns it.", outcome.mutationError ?? "-"))
+        case .seriousHeadsUp:
+            notify(L10n.t("Mac getting hot"),
+                   L10n.t("The lid is closed with no display attached, so nothing is cooling the Mac. If this lasts %@ minutes RunClosed turns lid stay-awake off and lets it sleep.",
+                          String(Int(ThermalPolicy.sustainedReleaseSeconds / 60))))
+        case .seriousNotProtected:
+            notify(L10n.t("Mac getting hot"),
+                   L10n.t("The lid is closed with no display attached and the Mac is getting hot, but lid stay-awake is not RunClosed's, so it cannot turn it off. Open the lid, plug in a display, or turn the switch off then on so RunClosed owns it."))
         }
     }
 

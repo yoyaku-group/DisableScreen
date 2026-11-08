@@ -7,6 +7,50 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Thermal guard and clamshell detection (ADR 025). `pmset disablesleep 1`
+  also blocks macOS's own emergency sleep, and nothing covered HEAT: a Mac
+  sitting with the lid closed under a fleet of agents can run hot with nothing
+  cooling it, because the panel is off, the workload continues, and macOS
+  cannot sleep the machine to cool it. That is the second half of the
+  2026-10-14 incident. One rule is added: when the machine is hot and nothing
+  is cooling it, release the flag and let it sleep. `ThermalPolicy` (Core) is
+  pure — `(Input, Latch) -> (Decision, Latch)`, like `LowBatteryPolicy` — and
+  has **no enable case at all**: a `critical` state with the lid closed, no
+  display attached and the flag provably ours releases and sleeps immediately;
+  `serious` in that same situation gives a ten-minute grace period so a
+  compiler burst does not end a session, then releases. The clock measures ten
+  minutes of heat that COULD be released: any interruption (the lid reopened,
+  a display attached, ownership lost, the flag going off) resets it, so a Mac that ran hot and then
+  cooled does not release the instant the lid comes back down. Three refusals make it
+  safe: an open lid (the air circulates and the operator is there), an attached
+  display (the machine is in use), and a flag that is not ours (B2 — alert
+  only, never mutated; a record from a previous boot is not active ownership
+  either). Unknown is never `false`: an unreadable clamshell bit or display
+  inventory refuses the release, so the doubt never releases. Heat **ends** the
+  session (clearing the pending battery re-arm) rather than pausing it: a
+  machine that overheated must not be woken again by the guard. `ThermalReadback`
+  maps `ProcessInfo.processInfo.thermalState`; a `thermalStateDidChangeNotification`
+  observer ticks immediately so a `critical` does not wait for the 30 s timer.
+  `ClamshellObserver` (new — the repository had no clamshell detection) reads
+  `AppleClamshellState` on `IOPMrootDomain`, collapses the close burst into one
+  tick with a 2 s debounce, and is backed by a re-read on the existing 5 s
+  refresh because a notification can be missed across a sleep. The thermal step
+  runs FIRST in the app's single `LidWriteLock` section, before the battery
+  step — heat kills faster than the drain — and a heat tick stops there, so the
+  battery re-arm branch can never turn the flag back on for a machine that is
+  still hot. The ADR 024 backstop runs the SAME policy: a session with no end
+  time must be protected from heat even if the app crashed. `ThermalGuardSettings`
+  is a separate kill switch (`defaults write com.benjaminbelaga.RunClosed
+  thermalGuardEnabled -bool false`, absent = enabled), honoured by the app and
+  by the backstop, and independent of the battery one in both directions. The
+  audit mechanics are extracted into `JSONLAuditLog` (same `O_APPEND` discipline,
+  `low_battery_audit.jsonl` byte-for-byte unchanged) and `thermal_audit.jsonl`
+  gets one line per ACTION, never one per minute without effect. The CLI gains
+  read-only `thermal status [--json]` and pure `thermal simulate <state>` with
+  `--lid`, `--external-display`, `--lid-flag`, `--ownership` and `--since`; the
+  popup says "Session ended — heat" and the menu bar `ended: heat`. 118 new tests (policy grid, grace hold,
+  service on fakes, backstop, shared tick, persistence, simulate), 575/575.
+
 - Recovery backstop (ADR 024). Until now only the running app enforced a
   session deadline and the low-battery guard, so a crash or a quit left
   `pmset disablesleep 1` on with nothing to turn it off: the Mac stayed awake
