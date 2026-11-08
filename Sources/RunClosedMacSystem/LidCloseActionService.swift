@@ -741,7 +741,17 @@ public struct LidCloseActionService {
     private func confirmExistingMute(
         record: LidCloseActionJournal.Record
     ) -> AudioEffect {
-        guard let entry = record.audio.first else { return .alreadyMuted }
+        // The CURRENT default output, not `audio.first`: with more than one
+        // recorded device, checking the first one let the service report the
+        // mute applied while the device actually in use stayed audible (Lord
+        // review round 4, follow-up).
+        // The CURRENT default output, not `audio.first`: with more than one
+        // recorded device, checking the first one let the service report the
+        // mute applied while the device actually in use stayed audible (Lord
+        // review round 4, follow-up).
+        let currentUID = audio.readDefaultOutput()?.uid
+        guard let entry = record.audio.first(where: { $0.deviceUID == currentUID })
+                ?? record.audio.first else { return .alreadyMuted }
         guard let snapshot = audio.readOutput(uid: entry.deviceUID),
               let muted = snapshot.isMuted else {
             return .failed

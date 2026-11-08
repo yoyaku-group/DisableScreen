@@ -1429,6 +1429,34 @@ final class LidCloseActionServiceTests: XCTestCase {
         XCTAssertTrue(out.resumedPids.contains(4711))
     }
 
+
+    // MARK: — Lord review round 4, follow-ups
+
+    /// The mute confirmation must check the CURRENT default output. With two
+    /// devices recorded, checking `audio.first` reported success while the
+    /// device actually in use stayed audible.
+    func testSecondOutputUnmutedExternallyIsReMuted() {
+        var rig = makeRig(muted: false)
+        let cfg = settings()
+        _ = stepEnclosed(&rig, cfg)
+
+        // Switch to headphones and let them be muted and recorded.
+        rig.audio.others["BuiltInSpeakerDevice"] = rig.audio.device
+        rig.audio.device = AudioOutputSnapshot(uid: "Headphones", isMuted: false,
+                                               volume: 0.7, canMute: true)
+        _ = stepEnclosed(&rig, cfg)
+        XCTAssertEqual(rig.journal.load().audio.count, 2)
+
+        // Something un-mutes the CURRENT output behind our back.
+        rig.audio.device?.isMuted = false
+
+        let out = stepEnclosed(&rig, cfg)
+
+        XCTAssertEqual(rig.audio.device?.isMuted, true,
+                       "the current output was left audible")
+        XCTAssertEqual(out.apply, .applied)
+    }
+
     // MARK: — Journal durability
 
     /// The journal is written BEFORE the effect: the file on disk carries the

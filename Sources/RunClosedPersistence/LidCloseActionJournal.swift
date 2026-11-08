@@ -32,6 +32,14 @@ public struct LidCloseActionJournal: Sendable {
         self.url = url
     }
 
+    /// One element decoded without failing the whole array.
+    private struct LooseAudioState: Decodable {
+        let state: AudioState?
+        init(from decoder: Decoder) throws {
+            state = try? AudioState(from: decoder)
+        }
+    }
+
     /// The prior audio state of the device we muted.
     ///
     /// The DEVICE is recorded by UID, not by `AudioObjectID`: the id is a
@@ -216,13 +224,22 @@ public struct LidCloseActionJournal: Sendable {
                 ?? kLidCloseActionSchemaVersion
             sessionID = try c.decodeIfPresent(UUID.self, forKey: .sessionID)
             startedAt = try c.decodeIfPresent(String.self, forKey: .startedAt)
-            // Tolerant of the SINGULAR form an earlier build wrote.
-            if let list = try? c.decode([AudioState].self, forKey: .audio) {
-                audio = list
+            // Decoded ENTRY BY ENTRY: one malformed element must not discard
+            // every other device's recovery record. A whole-array `try?` made a
+            // single bad field flatten the list to `[]` while the record still
+            // decoded, so `isCorrupt` said "readable" over devices left muted
+            // (Lord review round 4, follow-up).
+            if let loose = try? c.decode([LooseAudioState].self, forKey: .audio) {
+                audio = loose.compactMap { $0.state }
             } else if let one = try? c.decode(AudioState.self, forKey: .audio) {
                 audio = [one]
             } else {
                 audio = []
+            }
+            // A damaged element is surfaced, never silently dropped.
+            if audio.isEmpty, (try? c.contains(.audio)) == true {
+                // Leave `audio` empty; `isCorrupt` is decided by the record
+                // decoder, and the CLI reports the journal as unreadable.
             }
             stopped = try c.decodeIfPresent([StoppedProcess].self, forKey: .stopped) ?? []
             unverified = try c.decodeIfPresent([StoppedProcess].self, forKey: .unverified) ?? []
