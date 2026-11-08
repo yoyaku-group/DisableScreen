@@ -515,8 +515,27 @@ public struct LidCloseActionService {
                 droppedUnproved = true
                 continue
             }
+            // A pending SIGSTOP may not have landed yet: `isStopped == false`
+            // does NOT mean the process is free of our signal, only that the
+            // transition is not visible. Sending `SIGCONT` is the right move
+            // here (it is a no-op on a running process and cancels the pending
+            // stop), but dropping the entry on that reading is not: if the
+            // signal lands afterwards the app is frozen with nothing to recover
+            // it (gate finding, `Deselecting an app discards recovery for a
+            // pending SIGSTOP`).
             if processes.isStopped(pid: entry.pid) == true {
                 processes.resume(pid: entry.pid)
+            } else {
+                // Cancel the pending stop, then re-read: only a POSITIVE
+                // "running" after the `SIGCONT` lets the entry go.
+                processes.resume(pid: entry.pid)
+                if processes.isStopped(pid: entry.pid) == false {
+                    resumedDropped.append(entry.pid)
+                } else {
+                    stillUnverified.append(entry)
+                    droppedUnproved = true
+                }
+                continue
             }
             if processes.isStopped(pid: entry.pid) == false {
                 resumedDropped.append(entry.pid)
