@@ -186,13 +186,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 mutator: LidAssertions.live(),
                 store: OwnedLidAssertion(currentBootID: bootID),
                 priorProvider: { PowerReadback.lidStayAwake() })
-            _ = lidService.restoreIfOwned()
-            // ADR 026: the quit is one of the four points where the lid-close
-            // actions are undone. Inside the lock like every other lid writer,
-            // and BEFORE the session record goes: the undo is unconditional
-            // here — the journal is the authority, not the conditions.
+            // ADR 026: the undo runs BEFORE the lid protection is released.
+            // `restoreIfOwned` below turns normal sleep behaviour back on, and
+            // with the lid already closed the Mac can sleep immediately —
+            // before a later line ever ran. That would put it down muted with
+            // apps frozen (gate finding, `Quit releases lid protection before
+            // restoring paused apps`). Inside the lock like every other lid
+            // writer; the journal is the authority, not the conditions.
             var lidClose = LidCloseActionService.live(bootID: bootID)
             let lidCloseUndo = lidClose.undoAll()
+            _ = lidService.restoreIfOwned()
             if lidCloseUndo.changed || lidCloseUndo.shouldNotify {
                 FileHandle.standardError.write(Data(
                     ("[RunClosed] quit: lid-close actions undone "

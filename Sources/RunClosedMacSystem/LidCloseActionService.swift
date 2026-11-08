@@ -195,7 +195,7 @@ public struct LidCloseActionService {
         // step into `.undo` (which re-raises the notice) instead of falling to
         // "nothing of ours" and going quiet (caught by ai-review-gate).
         let outstanding = !record.isEmpty || !record.unverified.isEmpty
-            || record.unverifiedAudio != nil
+            || !record.unverifiedAudio.isEmpty
         return Evaluation(
             input: input,
             decision: LidCloseActionPolicy.decide(input, currentlyApplied: outstanding),
@@ -236,7 +236,7 @@ public struct LidCloseActionService {
         // holds only those silenced the operator notice forever (gate finding,
         // `Persisted unverified processes stop raising attention`).
         guard !record.isEmpty || !record.unverified.isEmpty
-                || record.unverifiedAudio != nil else {
+                || !record.unverifiedAudio.isEmpty else {
             outcome.undo = .nothingToDo
             return outcome
         }
@@ -327,10 +327,8 @@ public struct LidCloseActionService {
         // undo can restore it (gate finding, `Temporary device absence
         // permanently discards restoration`).
         if decision.muteAudio, record.audio == nil,
-           let stranded = record.unverifiedAudio,
-           let back = audio.readOutput(uid: stranded.deviceUID), back.isMuted != false {
+           let stranded = firstReturnedStrandedDevice(&record) {
             record.audio = stranded
-            record.unverifiedAudio = nil
             journal.save(record)
         }
 
@@ -519,6 +517,20 @@ public struct LidCloseActionService {
         return .success(.stopped)
     }
 
+    /// The first stranded device that has COME BACK still muted, removed from
+    /// the list. `nil` when none has.
+    private func firstReturnedStrandedDevice(
+        _ record: inout LidCloseActionJournal.Record
+    ) -> LidCloseActionJournal.AudioState? {
+        for (index, stranded) in record.unverifiedAudio.enumerated() {
+            guard let back = audio.readOutput(uid: stranded.deviceUID),
+                  back.isMuted != false else { continue }
+            record.unverifiedAudio.remove(at: index)
+            return stranded
+        }
+        return nil
+    }
+
     /// Read an output device, retrying once before believing it is gone.
     ///
     /// "Gone" is a destructive conclusion: it clears the journal entry and
@@ -581,10 +593,9 @@ public struct LidCloseActionService {
         // switch being turned off is exactly when the operator expects the
         // sound back, and the apply path only re-adopts while the switch is on
         // (gate finding, `Disabling audio restoration skips stranded devices`).
-        if !decision.muteAudio, record.audio == nil, let stranded = record.unverifiedAudio,
-           let back = readOutputTwice(uid: stranded.deviceUID), back.isMuted != false {
+        if !decision.muteAudio, record.audio == nil,
+           let stranded = firstReturnedStrandedDevice(&record) {
             record.audio = stranded
-            record.unverifiedAudio = nil
         }
 
         if !decision.muteAudio, record.audio != nil {
@@ -678,7 +689,7 @@ public struct LidCloseActionService {
         // holding only those must still reach the notice below rather than
         // reading as "nothing of ours".
         guard !record.isEmpty || !record.unverified.isEmpty
-                || record.unverifiedAudio != nil else {
+                || !record.unverifiedAudio.isEmpty else {
             // Nothing of ours is applied. Not an error (idempotence): a lid
             // closed twice, or an undo with no prior action, is a no-op.
             outcome.undo = .nothingToDo
@@ -768,7 +779,7 @@ public struct LidCloseActionService {
         // remained (gate finding, `Persisted unverified processes stop raising
         // attention`).
         guard !record.stopped.isEmpty else {
-            if !record.unverified.isEmpty || record.unverifiedAudio != nil {
+            if !record.unverified.isEmpty || !record.unverifiedAudio.isEmpty {
                 outcome.unverifiedPids = record.unverified.map { $0.pid }
                 outcome.shouldNotify = true
                 outcome.notice = record.unverified.isEmpty ? .audioLeftMuted : .appsLeftPaused
@@ -838,10 +849,8 @@ public struct LidCloseActionService {
         // turned off) while the device is unplugged, and its return must still
         // be restorable — otherwise it stays muted indefinitely (gate finding,
         // `Returning audio devices are never restored during undo`).
-        if record.audio == nil, let stranded = record.unverifiedAudio,
-           let back = readOutputTwice(uid: stranded.deviceUID), back.isMuted != false {
+        if record.audio == nil, let stranded = firstReturnedStrandedDevice(&record) {
             record.audio = stranded
-            record.unverifiedAudio = nil
             journal.save(record)
         }
         guard let prior = record.audio else { return }
@@ -850,6 +859,27 @@ public struct LidCloseActionService {
         // `nil`, drop the entry and report `deviceGone`, which left a muted
         // device with nothing to retry from (gate finding). Two reads tell a
         // transient failure from a real removal.
+        // A SUCCESSFUL read resets the consecutive-unreadable counter.
+        //
+        // Without this the counter only ever grew: a cable that flapped 200
+        // times one evening, then a perfectly healthy device for hours, would
+        // still be sitting at 200 — and 160 unrelated failures later the
+        // threshold would conclude "gone" long after the continuity was broken.
+        // The threshold has to mean CONSECUTIVE passes.
+
+
+        // A SUCCESSFUL read resets the consecutive-unreadable counter.
+        //
+        // Without this the counter only ever grew: a cable that flapped 200
+        // times one evening, then a perfectly healthy device for hours, would
+        // still be sitting at 200 — and 160 unrelated failures later the
+        // threshold would conclude "gone" long after the continuity was broken.
+        // The threshold has to mean CONSECUTIVE passes.
+        if record.audio?.unreadablePasses != 0, audio.readOutput(uid: prior.deviceUID) != nil {
+            record.audio?.unreadablePasses = 0
+            journal.save(record)
+        }
+
         guard let current = readOutputTwice(uid: prior.deviceUID) else {
             // Still unreadable after the retry. That is NOT proof the device
             // was removed: clearing the entry here left a muted device with no
@@ -872,7 +902,12 @@ public struct LidCloseActionService {
                 // operator, and if the same UID reappears still muted the next
                 // apply re-adopts it rather than forgetting it.
                 record.audio = nil
-                record.unverifiedAudio = escalated
+                // APPEND, never replace: several outputs can be muted across a
+                // session, and overwriting lost the earlier device's record
+                // (gate finding).
+                if !record.unverifiedAudio.contains(where: { $0.deviceUID == escalated.deviceUID }) {
+                    record.unverifiedAudio.append(escalated)
+                }
                 journal.save(record)
                 outcome.audioDeviceGone = true
                 writeAudit(outcome: "deviceGone", reason: "undo",
@@ -883,6 +918,14 @@ public struct LidCloseActionService {
             }
             record.audio = escalated
             journal.save(record)
+            // An unconfirmed restore must ASK FOR ATTENTION: the backstop's
+            // reporting hangs off `shouldNotify`, so silence here meant a Mac
+            // that could quit or sleep still muted with nobody told (gate
+            // finding, `Unreadable audio restoration does not request
+            // attention`).
+            outcome.shouldNotify = true
+            outcome.notice = .audioLeftMuted
+            outcome.audioRestoreFailed = true
             writeAudit(outcome: "partial", reason: "undo", evaluation: outcome.evaluation,
                        audio: "readUnavailable",
                        audioError: "the device could not be read; the restore is unconfirmed",
@@ -949,7 +992,7 @@ public struct LidCloseActionService {
     private func finish(journal record: inout LidCloseActionJournal.Record,
                         appsStuck: Bool) -> UndoOutcome {
         if record.isEmpty && record.unverified.isEmpty && !appsStuck
-            && record.unverifiedAudio == nil {
+            && record.unverifiedAudio.isEmpty {
             // The delete must be PROVED too. `clear()` is best effort, and a
             // silent failure here leaves stale ownership on disk that a later
             // undo could act on — reversing something the operator did

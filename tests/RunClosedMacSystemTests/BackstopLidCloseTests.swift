@@ -248,8 +248,8 @@ final class BackstopLidCloseTests: XCTestCase {
     /// And a stranded audio device counts the same way.
     func testFastPathHonoursAStrandedDevice() {
         var rig = makeRig(flag: nil, ownedBoot: nil)
-        rig.journal.save(.init(unverifiedAudio: .init(
-            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)))
+        rig.journal.save(.init(unverifiedAudio: [.init(
+            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)]))
 
         let outcome = rig.service.run()
 

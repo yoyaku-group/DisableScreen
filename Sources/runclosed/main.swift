@@ -1482,8 +1482,8 @@ func cmdLidClose(_ rest: [String]) -> Int32 {
                 // Without this the operator sees `applied: false` and could not
                 // tell that a restore is still owed (gate finding, `Status
                 // reports success while audio restoration remains unresolved`).
-                "unverifiedAudioDeviceUID": journal.unverifiedAudio?.deviceUID as Any? ?? NSNull(),
-                "unverifiedAudioWasMuted": journal.unverifiedAudio?.wasMuted as Any? ?? NSNull(),
+                "unverifiedAudioDeviceUIDs": journal.unverifiedAudio.map { $0.deviceUID },
+                "unverifiedAudioWasMuted": journal.unverifiedAudio.map { $0.wasMuted },
                 "readable": !journalCorrupt,
             ],
             "lastAction": entries.last.map { entry -> [String: Any] in
@@ -1497,7 +1497,7 @@ func cmdLidClose(_ rest: [String]) -> Int32 {
         // Exit 3 when ANYTHING is still owed: a process to verify, or an audio
         // restore to complete. Reporting 0 over an unresolved obligation is the
         // "healthy" signal this lot exists to avoid.
-        let unresolved = !journal.unverified.isEmpty || journal.unverifiedAudio != nil
+        let unresolved = !journal.unverified.isEmpty || !journal.unverifiedAudio.isEmpty
             || journalCorrupt
         return unresolved ? 3 : 0
 

@@ -147,8 +147,11 @@ public struct LidCloseActionJournal: Sendable {
         /// This is a REPORT, written by the undo; it is not a claim of
         /// ownership, so it never itself authorises a `SIGCONT`.
         public var unverified: [StoppedProcess]
-        /// An audio device this service muted that became unreachable and was
-        /// concluded gone.
+        /// Audio devices this service muted that became unreachable and were
+        /// concluded gone. A LIST: several outputs can be muted across a session
+        /// (the default output changes), and a single slot made the second one
+        /// overwrite the first device's record (gate finding, `A second missing
+        /// device overwrites the first device's recovery record`).
         ///
         /// Kept rather than discarded because a device can RETURN: headphones
         /// unplugged and plugged back in still hold their mute state. Moving
@@ -156,7 +159,7 @@ public struct LidCloseActionJournal: Sendable {
         /// keeping it visible to the operator and re-adoptable by a later apply
         /// (gate finding, `Temporary device absence permanently discards
         /// restoration`).
-        public var unverifiedAudio: AudioState?
+        public var unverifiedAudio: [AudioState]
 
         public init(schemaVersion: Int = kLidCloseActionSchemaVersion,
                     sessionID: UUID? = nil,
@@ -164,7 +167,7 @@ public struct LidCloseActionJournal: Sendable {
                     audio: AudioState? = nil,
                     stopped: [StoppedProcess] = [],
                     unverified: [StoppedProcess] = [],
-                    unverifiedAudio: AudioState? = nil) {
+                    unverifiedAudio: [AudioState] = []) {
             self.schemaVersion = schemaVersion
             self.sessionID = sessionID
             self.startedAt = startedAt
@@ -211,7 +214,15 @@ public struct LidCloseActionJournal: Sendable {
             audio = try c.decodeIfPresent(AudioState.self, forKey: .audio)
             stopped = try c.decodeIfPresent([StoppedProcess].self, forKey: .stopped) ?? []
             unverified = try c.decodeIfPresent([StoppedProcess].self, forKey: .unverified) ?? []
-            unverifiedAudio = try c.decodeIfPresent(AudioState.self, forKey: .unverifiedAudio)
+            // Tolerant of the SINGULAR form an earlier build wrote: a file from
+            // before this field became a list must not fail to decode.
+            if let list = try? c.decode([AudioState].self, forKey: .unverifiedAudio) {
+                unverifiedAudio = list
+            } else if let one = try? c.decode(AudioState.self, forKey: .unverifiedAudio) {
+                unverifiedAudio = [one]
+            } else {
+                unverifiedAudio = []
+            }
         }
     }
 

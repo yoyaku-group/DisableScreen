@@ -846,7 +846,7 @@ final class LidCloseActionServiceTests: XCTestCase {
                        "a concluded-gone device must stay an outstanding obligation")
         let rec = rig.journal.load()
         XCTAssertNil(rec.audio)
-        XCTAssertEqual(rec.unverifiedAudio?.deviceUID, "BuiltInSpeakerDevice")
+        XCTAssertEqual(rec.unverifiedAudio.first?.deviceUID, "BuiltInSpeakerDevice")
         XCTAssertTrue(rec.isEmpty, "no live effect remains")
     }
 
@@ -855,8 +855,8 @@ final class LidCloseActionServiceTests: XCTestCase {
     /// absence permanently discards restoration`).
     func testReturningDeviceIsReAdopted() {
         var rig = makeRig(muted: false)
-        rig.journal.save(.init(unverifiedAudio: .init(
-            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)))
+        rig.journal.save(.init(unverifiedAudio: [.init(
+            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)]))
         // The device is back and still muted.
         rig.audio.device?.isMuted = true
 
@@ -1008,8 +1008,8 @@ final class LidCloseActionServiceTests: XCTestCase {
     func testReturningDeviceIsRestoredDuringUndo() {
         let rig0 = makeRig(muted: false)
         var rig = rig0
-        rig.journal.save(.init(unverifiedAudio: .init(
-            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)))
+        rig.journal.save(.init(unverifiedAudio: [.init(
+            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)]))
         rig.audio.device?.isMuted = true
 
         let undo = rig.service.undoAll()
@@ -1022,10 +1022,10 @@ final class LidCloseActionServiceTests: XCTestCase {
     /// Reopening a journal must carry the audio obligation forward, or a new
     /// session silently forgets a device that has not come back yet.
     func testReopeningCarriesUnverifiedAudioForward() {
-        let prior = LidCloseActionJournal.Record(unverifiedAudio: .init(
-            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5))
+        let prior = LidCloseActionJournal.Record(unverifiedAudio: [.init(
+            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)])
         let next = prior.reopened(sessionID: UUID(), at: "2026-11-08T10:00:00Z")
-        XCTAssertEqual(next.unverifiedAudio?.deviceUID, "BuiltInSpeakerDevice",
+        XCTAssertEqual(next.unverifiedAudio.first?.deviceUID, "BuiltInSpeakerDevice",
                        "reopening dropped the audio obligation")
     }
 
@@ -1093,8 +1093,8 @@ final class LidCloseActionServiceTests: XCTestCase {
     /// `Audio-only unverified obligations stop driving recovery`).
     func testAudioOnlyObligationStillDrivesTheStep() {
         var rig = makeRig()
-        rig.journal.save(.init(unverifiedAudio: .init(
-            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)))
+        rig.journal.save(.init(unverifiedAudio: [.init(
+            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)]))
         rig.audio.device?.isMuted = true
 
         // No session, switch off, lid open: every APPLY reason is gone.
@@ -1169,15 +1169,48 @@ final class LidCloseActionServiceTests: XCTestCase {
     /// stranded devices`).
     func testTurningMuteOffRestoresAStrandedDeviceThatReturned() {
         var rig = makeRig(muted: false)
-        rig.journal.save(.init(unverifiedAudio: .init(
-            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)))
+        rig.journal.save(.init(unverifiedAudio: [.init(
+            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)]))
         rig.audio.device?.isMuted = true
 
         _ = stepEnclosed(&rig, settings(mute: false))
 
         XCTAssertEqual(rig.audio.device?.isMuted, false,
                        "a returned stranded device stayed muted")
-        XCTAssertNil(rig.journal.load().unverifiedAudio)
+        XCTAssertTrue(rig.journal.load().unverifiedAudio.isEmpty)
+    }
+
+
+    /// The gate threshold must count CONSECUTIVE unreadable passes. A device
+    /// that flaps, then works healthily for hours, then fails again must not
+    /// accumulate: otherwise an old counter concludes "gone" long after the
+    /// continuity was broken (Lord review, round 3 — the last open point).
+    func testUnreadablePassesResetOnASuccessfulRead() {
+        var rig = makeRig(muted: false)
+        _ = stepEnclosed(&rig, settings())
+        XCTAssertEqual(rig.audio.device?.isMuted, true)
+
+        // 300 unreadable passes.
+        rig.audio.deviceGone = true
+        for _ in 0..<300 { _ = rig.service.undoAll() }
+        XCTAssertEqual(rig.journal.load().audio?.unreadablePasses, 300)
+
+        // The device is REACHABLE again but its mute flag stays unreadable, so
+        // the restore cannot be verified and the entry (rightly) survives —
+        // which is exactly the state where the counter must reset.
+        rig.audio.deviceGone = false
+        rig.audio.muteFlagUnreadable = true
+        _ = rig.service.undoAll()
+        XCTAssertEqual(rig.journal.load().audio?.unreadablePasses, 0,
+                       "a healthy read did not reset the counter")
+        rig.audio.muteFlagUnreadable = false
+
+        // And a fresh 300 failures must still be BELOW the threshold.
+        rig.audio.deviceGone = true
+        for _ in 0..<299 { _ = rig.service.undoAll() }
+        let out = rig.service.undoAll()
+        XCTAssertFalse(out.audioDeviceGone,
+                       "an old counter concluded 'gone' after a broken continuity")
     }
 
     // MARK: — Journal durability

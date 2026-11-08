@@ -372,7 +372,7 @@ public struct RecoveryBackstopService {
             lidCloseJournalPending: {
                 let rec = lidCloseJournal.load()
                 return !rec.isEmpty || !rec.unverified.isEmpty
-                    || rec.unverifiedAudio != nil
+                    || !rec.unverifiedAudio.isEmpty
             }())
         let plan = RecoveryPolicy.plan(facts)
         let outcome: Outcome
