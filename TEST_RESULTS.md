@@ -1631,3 +1631,21 @@ le lit comme OFF (pas comme « corrompu, on ignore »), sans crash, et la
 politique répond alors `.undo` sur un journal non vide : le tick suivant remet
 le son. Cinq tests le verrouillent
 (`LidCloseActionSettingsKillSwitchTests`) au lieu d'une phrase.
+
+### Tour 15 — trois WARN, dont une régression que j'ai introduite
+
+**0 CRITICAL, 3 WARN.** Deux corrigent le tour 14, un est une régression pure.
+
+| Défaut | Correction |
+|---|---|
+| Mon `saturatingAdd` bornait la SOMME à zéro, ce qui ne suffit pas : une entrée malformée donne `1`, un compteur persisté `-1` donne `-1`, et `1 + (-1) = 0` est parfaitement légal. Le dommage détecté s'annulait donc lui-même et `isCorrupt` disait « sain ». | Le compteur PERSISTÉ est borné à zéro avant l'addition. Un compte de dommage négatif n'a aucun sens. |
+| **Régression introduite au tour 14** : le tick « session seule » passait `Readings.lidEnvironment()`, dont `session` vaut toujours `nil`. La politique lisait donc « pas de session » : elle n'appliquait jamais les actions et **annulait** des effets légitimement appliqués. | La session est chargée après le pas, comme dans le backstop. |
+| Désactiver les deux interrupteurs pouvait rapporter `.applied` sur une restauration PARTIELLE (deux appareils, un revenu, un illisible), et `.nothingRequested` quand rien ne revenait alors qu'il restait du travail. | `.partial` quand une restauration a échoué ; `.applied` garde son sens : tout ce qui était demandé a abouti. |
+
+La régression du deuxième point est la plus instructive du lot : en corrigeant
+« le tick session-seule ignore les actions capot », j'ai branché le pas sans lui
+donner la session, ce qui a transformé un défaut d'omission en défaut d'action
+inverse — pire que l'original. Un correctif qui ajoute un chemin doit recevoir
+toutes les entrées que ce chemin consomme.
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.

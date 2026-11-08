@@ -288,14 +288,16 @@ public struct LidCloseActionJournal: Sendable {
         /// the process rather than reporting it — taking the valid obligations
         /// down with it.
         static func saturatingAdd(_ a: Int, _ b: Int) -> Int {
-            let (sum, overflow) = a.addingReportingOverflow(b)
-            // CLAMPED AT ZERO on the way out, too. A persisted `-1` survived the
-            // addition and CANCELLED a real damage count: one malformed entry
-            // plus `-1` read as zero, so `hasDroppedEntries` and `isCorrupt`
-            // both said "healthy" over a lost restoration obligation — and the
-            // next save wrote that zero back, erasing the signal durably (gate
-            // finding, `Un compteur négatif masque les entrées perdues`).
-            if overflow { return b > 0 ? Int.max : Int.min }
+            // The PERSISTED counter is clamped to zero on the way IN, not the
+            // sum on the way out. Clamping the sum did not work: one malformed
+            // entry gives `1`, a persisted `-1` gives `-1`, and `1 + (-1)` is a
+            // perfectly legal `0` — so the detected damage cancelled itself and
+            // `isCorrupt` said "healthy" over a lost obligation. A NEGATIVE
+            // damage count is meaningless, so it is normalised before it can
+            // subtract from anything (gate finding, `Un compteur négatif annule
+            // les dommages détectés`).
+            let (sum, overflow) = a.addingReportingOverflow(max(0, b))
+            if overflow { return a > 0 ? Int.max : Int.min }
             return max(0, sum)
         }
 

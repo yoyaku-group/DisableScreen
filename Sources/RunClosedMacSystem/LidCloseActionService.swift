@@ -1108,7 +1108,20 @@ public struct LidCloseActionService {
             // (gate finding, `Failed persistence after resume leaves stale
             // signal authority`). Reported, never swallowed.
             if !journal.save(record) { outcome.journalSaveFailed = true }
-            outcome.apply = outcome.apply ?? .applied
+            // `.partial` when a restore FAILED, not a blanket `.applied`.
+            // `changed` only means "something moved on the machine": with two
+            // devices, one coming back and one unreadable, this reported the
+            // apply as a success while a device stayed muted — and with NEITHER
+            // restored it reported `.nothingRequested` despite outstanding
+            // recovery work (gate finding, `Disabling both effects reports
+            // success after a partial restore`). `.applied` keeps its meaning:
+            // everything asked for landed.
+            if outcome.apply == nil {
+                let incomplete = outcome.audioRestoreFailed
+                    || !outcome.unverifiedPids.isEmpty
+                    || outcome.shouldNotify
+                outcome.apply = incomplete ? .partial : .applied
+            }
         }
 
         // Any reversal is an effect, not "nothing requested".

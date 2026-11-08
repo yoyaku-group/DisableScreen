@@ -1233,8 +1233,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 () -> (SessionService.StepOutcome, LidCloseActionService.TickOutcome) in
                 let s = service.step()
                 var lidCloseService = LidCloseActionService.live(bootID: bootID)
-                let out = lidCloseService.step(
-                    readings: LidCloseActionService.Readings.lidEnvironment())
+                // The SESSION must be the one just loaded, not the `nil` that
+                // `lidEnvironment()` reports: the policy reads `nil` as "no
+                // session", so this path would never APPLY the actions and —
+                // worse — would UNDO effects that are legitimately applied
+                // (gate finding, `Session-only tick omits the active session`).
+                // Same rule as the backstop: read the session AFTER the step.
+                var readings = LidCloseActionService.Readings.lidEnvironment()
+                readings.session = service.load()
+                let out = lidCloseService.step(readings: readings)
                 return (s, out)
             }
             DispatchQueue.main.async {
