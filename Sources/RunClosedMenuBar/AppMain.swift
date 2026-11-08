@@ -1229,7 +1229,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var line = "[RunClosed] thermal: state=\(i.state.rawValue) action=\(d.action.rawValue)"
         line += " reason=\(d.reason.rawValue) lid=\(lid) externalDisplay=\(external)"
         line += " ownership=\(i.ownership.rawValue) mutation=\(mutation)"
-        line += " error=\(error) sleep=\(sleep)\n"
+        line += " error=\(error) sleep=\(sleep)"
+        if outcome.latchSaveFailed { line += " latchSaveFailed=true" }
+        line += "\n"
         FileHandle.standardError.write(Data(line.utf8))
 
         // "Session ended — heat" in the popup and the bar, once the release

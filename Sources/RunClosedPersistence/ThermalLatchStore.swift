@@ -62,11 +62,27 @@ public struct ThermalLatchStore: Sendable {
         return rec
     }
 
-    public func save(_ record: Record) {
+    /// Write the latch. Returns whether it actually landed.
+    ///
+    /// The return value is NOT optional politeness: `seriousSince` lives in
+    /// this file, and the sustained-heat release reads it back on the next
+    /// tick. A save that fails silently makes every tick look like the FIRST
+    /// tick of an episode, so the ten-minute grace period restarts forever and
+    /// the guard never releases — a protective rule that is quietly dead, with
+    /// nothing in any log saying so. Same contract, and same reason, as
+    /// `BackstopHeartbeatStore.save` (ADR 024): the caller must be able to tell
+    /// "persisted" from "lost".
+    @discardableResult
+    public func save(_ record: Record) -> Bool {
         var rec = record
         rec.updatedAt = ISO8601DateFormatter().string(from: Date())
-        guard let data = try? JSONEncoder().encode(rec) else { return }
-        try? data.write(to: url, options: .atomic)
+        guard let data = try? JSONEncoder().encode(rec) else { return false }
+        do {
+            try data.write(to: url, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
     }
 }
 

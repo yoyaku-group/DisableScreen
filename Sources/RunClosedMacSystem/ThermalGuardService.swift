@@ -137,6 +137,16 @@ public struct ThermalGuardService {
         /// The session was ended by the thermal release (ADR 025: heat ENDS a
         /// session, it does not pause it).
         public var sessionEndedByHeat: Bool = false
+        /// The latch could not be persisted this tick.
+        ///
+        /// Reported rather than swallowed because of what it costs: the
+        /// sustained-heat clock (`seriousSince`) lives in that file, so a latch
+        /// that never lands restarts the ten-minute grace period on every tick
+        /// and the `.seriousSustained` release NEVER fires. The guard looks
+        /// healthy and is silently inert. Callers surface it (stderr here, the
+        /// popup/backstop report elsewhere) exactly as the ADR 024 backstop
+        /// surfaces a heartbeat it could not write.
+        public var latchSaveFailed: Bool = false
     }
 
     /// Which notification the caller should show. Resolved here, rendered by
@@ -217,9 +227,26 @@ public struct ThermalGuardService {
         }
 
         if record != before {
-            latchStore.save(record)
+            persistLatch(record, into: &outcome)
         }
         return outcome
+    }
+
+    /// Persist the latch, and make a failure VISIBLE.
+    ///
+    /// The stderr line is the safety net, not the notification: the guard's own
+    /// audit trail records what it did, while this records that its memory is
+    /// broken — the one failure mode that makes an untouched machine look
+    /// protected while it is not. `TickOutcome.latchSaveFailed` carries the same
+    /// fact to the callers that can do something with it.
+    private func persistLatch(_ record: ThermalLatchStore.Record,
+                              into outcome: inout TickOutcome) {
+        guard !latchStore.save(record) else { return }
+        outcome.latchSaveFailed = true
+        FileHandle.standardError.write(Data(
+            ("[RunClosed] thermal: latch could NOT be written to \(latchStore.url.path) "
+             + "— the sustained-heat clock will restart every tick, so the "
+             + "ten-minute release cannot fire until this is fixed\n").utf8))
     }
 
     /// The ONE thermal release branch — shared by the app's guard tick and the
@@ -250,15 +277,21 @@ public struct ThermalGuardService {
                 outcome.sessionEndedByHeat = true
             }
             // Persist the latch BEFORE asking for sleep: the Mac may go down
-            // right after `sleepnow`.
-            latchStore.save(record)
-            audit(outcome, evaluation: evaluation, recordBootID: recordBootID)
+            // right after `sleepnow`, and a latch written afterwards would be
+            // lost with it (journal before change, ADR 009/022).
+            persistLatch(record, into: &outcome)
             // Best effort, and NOT retried: the protective action already
             // happened, so the Mac follows its normal power management and
             // sleeps/throttles on its own. Retrying would mean calling
             // `pmset sleepnow` every 30 s against an operator who may have
             // plugged a display in — worse than a missed acceleration.
             attemptSleep(&outcome)
+            // Audit AFTER the sleep attempt, not before: the line carries
+            // `sleepRC`, and a post-mortem of an overheat has to be able to say
+            // whether the Mac actually slept or merely had the flag released.
+            // The latch is persisted above for the opposite reason — it is
+            // state, this is the record of what happened.
+            audit(outcome, evaluation: evaluation, recordBootID: recordBootID)
         case .success(let op):
             outcome.mutation = .releaseFailed
             outcome.mutationError = op.error ?? "release not verified (state=\(op.state.rawValue))"

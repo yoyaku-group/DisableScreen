@@ -167,6 +167,10 @@ public struct RecoveryBackstopService {
         public var sessionEndedByHeat = false
         /// Whether the thermal step ran at all (the kill switch can stop it).
         public var thermalStepRan = false
+        /// The thermal latch could not be persisted: the sustained-heat clock
+        /// restarts every minute, so the ten-minute release cannot fire. A
+        /// protective action that cannot happen is a failure, not a detail.
+        public var thermalLatchSaveFailed = false
 
         public init(plan: RecoveryPolicy.Plan) {
             self.plan = plan
@@ -185,6 +189,11 @@ public struct RecoveryBackstopService {
             case .releaseRefused: return .refused
             case .released, nil: break
             }
+            // A latch that cannot be written makes the sustained-heat release
+            // unreachable, so this minute did NOT establish that heat is
+            // covered. Reporting it as ok would feed a "fresh" heartbeat to the
+            // CLI on the strength of protection that cannot fire.
+            if thermalLatchSaveFailed { return .backendFailure }
             // The battery step maps its own outcome. Previously only a nil
             // mutation with an error yielded 5, so a critical-battery release
             // that FAILED reported success — a protective action that did not
@@ -429,6 +438,13 @@ public struct RecoveryBackstopService {
         if plan.thermal {
             let thermal = guardService.runThermalStep()
             report.thermalStepRan = true
+            // Captured BEFORE the "does it govern?" branch, and deliberately:
+            // a `.warn` tick does not govern the run, but it is exactly the
+            // tick that writes `seriousSince` (the heads-up starts the clock).
+            // Read inside the branch, an unwritable latch on a warn-only minute
+            // went unreported — and that minute looks perfectly healthy while
+            // the ten-minute release is already unreachable.
+            report.thermalLatchSaveFailed = thermal?.latchSaveFailed ?? false
             if let thermal, LowBatteryGuardService.thermalGovernsTheTick(thermal) {
                 report.thermalReason = thermal.evaluation.decision.reason
                 report.thermalMutation = thermal.mutation
@@ -587,6 +603,7 @@ public struct RecoveryBackstopService {
                 obj["thermalMutation"] = report.thermalMutation?.rawValue as Any? ?? NSNull()
                 obj["thermalError"] = report.thermalError as Any? ?? NSNull()
                 obj["sessionEndedByHeat"] = report.sessionEndedByHeat
+                obj["thermalLatchSaveFailed"] = report.thermalLatchSaveFailed
             }
             if let step = report.session {
                 obj["sessionExpiry"] = String(describing: step.expiry)

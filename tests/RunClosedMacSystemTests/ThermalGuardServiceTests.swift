@@ -292,12 +292,27 @@ final class ThermalGuardServiceTests: XCTestCase {
         XCTAssertEqual(lines.first?.lid, "closed")
         XCTAssertEqual(lines.first?.externalDisplay, "none")
         XCTAssertEqual(lines.first?.ownership, "ownedThisBoot")
-        // The line is written BEFORE `pmset sleepnow` (journal before change,
-        // ADR 009/022: the Mac may go down right after the call), so it cannot
-        // carry the sleep's exit status. That is the same shape the battery
-        // trail has, and the sleeprc is what `TickOutcome` hands the caller.
-        XCTAssertNil(lines.first?.sleepRC)
+        // The line is written AFTER the sleep attempt, so it carries what
+        // `pmset sleepnow` actually answered. A post-mortem of an overheat has
+        // to be able to tell "the flag was released and the Mac slept" from
+        // "the flag was released and the Mac stayed awake" — a nil there made
+        // the field useless. The LATCH is still persisted before the call
+        // (journal before change), because state and record are not the same
+        // thing: one must survive the sleep, the other must describe it.
+        XCTAssertEqual(lines.first?.sleepRC, 0)
         XCTAssertEqual(out.sleepRC, 0)
+    }
+
+    /// And when the sleep is REFUSED, that is what the line says: the release
+    /// happened, the Mac did not sleep, and the audit must not read as success.
+    func testTheAuditLineCarriesARefusedSleep() {
+        var rig = makeRig(state: .critical, flag: true, ownedBoot: "A")
+        rig.sleeper.rc = 1
+        let out = rig.service.step()
+        XCTAssertEqual(out.mutation, .released)
+        let line = rig.audit.load().first
+        XCTAssertEqual(line?.outcome, "released")
+        XCTAssertEqual(line?.sleepRC, 1, "a refused sleepnow is recorded as such")
     }
 
     /// A heat refusal that holds must not write a line every 30 s: 2 880
@@ -631,5 +646,108 @@ final class ThermalGuardServiceTests: XCTestCase {
         XCTAssertNil(outcome.mutation, "a critical battery is not acted on with the guard off")
         XCTAssertEqual(rig.lid.calls, [])
         XCTAssertEqual(rig.sleeper.count, 0)
+    }
+
+    // MARK: — A latch that cannot be written
+
+    /// The failure mode this guard cannot afford to swallow.
+    ///
+    /// `seriousSince` lives in the latch file, so a save that fails makes every
+    /// tick look like the FIRST tick of an episode: the ten-minute clock
+    /// restarts forever and `.seriousSustained` NEVER fires. The guard goes on
+    /// looking healthy while being completely inert. So the store reports it,
+    /// and the service surfaces it on the outcome.
+    func testAFailedLatchWriteIsReportedNotSwallowed() {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("runclosed-thermal-latchfail-\(UUID().uuidString)",
+                                    isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+
+        // A latch path whose PARENT is a regular file: any write under it
+        // fails with ENOTDIR, which is a genuine I/O failure rather than a
+        // permission trick that root could bypass.
+        let blocker = dir.appendingPathComponent("blocker")
+        try? Data("not a directory".utf8).write(to: blocker)
+        let unwritable = blocker.appendingPathComponent("nested/thermal_guard.json")
+
+        let lidStore = OwnedLidAssertion(currentBootID: "A",
+                                         url: dir.appendingPathComponent("owned_lid.json"))
+        lidStore.save(.init(bootID: "A", ownedEnabled: true, referenceState: "on"))
+        let flagBox = FlagBox(true)
+        let lid = FakeLid(flag: flagBox)
+        let sleeper = FakeSleeper()
+        let world = World(state: .serious, lidClosed: true, externalDisplay: false)
+        var service = ThermalGuardService(
+            lidService: LidMutationService(bootID: "A", mutator: lid, store: lidStore,
+                                           priorProvider: { flagBox.value }),
+            latchStore: ThermalLatchStore(url: unwritable),
+            thermalProvider: { world.state },
+            lidClosedProvider: { world.lidClosed },
+            externalDisplayProvider: { world.externalDisplay },
+            monotonic: { world.now },
+            sleeper: sleeper,
+            auditLog: ThermalAuditLog(url: dir.appendingPathComponent("thermal_audit.jsonl")))
+
+        // A `serious` tick mutates the latch (warnedSerious + seriousSince), so
+        // it is exactly the tick whose save can fail.
+        let out = service.step()
+        XCTAssertTrue(out.latchSaveFailed, "a latch write that failed must say so")
+        XCTAssertEqual(out.evaluation.decision.action, .warn)
+
+        // The store itself reports it too — the service is not guessing.
+        XCTAssertFalse(ThermalLatchStore(url: unwritable).save(.init(latch: .init())))
+    }
+
+    /// The complementary case, so the flag means something: a normal write is
+    /// NOT reported as a failure.
+    func testASuccessfulLatchWriteIsNotFlagged() {
+        var rig = makeRig(state: .serious, flag: true, ownedBoot: "A")
+        let out = rig.service.step()
+        XCTAssertFalse(out.latchSaveFailed)
+    }
+
+    /// The consequence, stated as a test: with the latch unwritable the
+    /// sustained release can never be reached, because the clock restarts on
+    /// every tick. This is why the failure has to be loud.
+    func testAnUnwritableLatchMakesTheSustainedReleaseUnreachable() {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("runclosed-thermal-inert-\(UUID().uuidString)",
+                                    isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+
+        let blocker = dir.appendingPathComponent("blocker")
+        try? Data("not a directory".utf8).write(to: blocker)
+        let unwritable = blocker.appendingPathComponent("nested/thermal_guard.json")
+
+        let lidStore = OwnedLidAssertion(currentBootID: "A",
+                                         url: dir.appendingPathComponent("owned_lid.json"))
+        lidStore.save(.init(bootID: "A", ownedEnabled: true, referenceState: "on"))
+        let flagBox = FlagBox(true)
+        let lid = FakeLid(flag: flagBox)
+        let sleeper = FakeSleeper()
+        let world = World(state: .serious, lidClosed: true, externalDisplay: false, now: 1_000)
+        var service = ThermalGuardService(
+            lidService: LidMutationService(bootID: "A", mutator: lid, store: lidStore,
+                                           priorProvider: { flagBox.value }),
+            latchStore: ThermalLatchStore(url: unwritable),
+            thermalProvider: { world.state },
+            lidClosedProvider: { world.lidClosed },
+            externalDisplayProvider: { world.externalDisplay },
+            monotonic: { world.now },
+            sleeper: sleeper,
+            auditLog: ThermalAuditLog(url: dir.appendingPathComponent("thermal_audit.jsonl")))
+
+        // Walk well past the grace period, one tick at a time.
+        for minute in stride(from: 0, through: 30, by: 5) {
+            world.now = 1_000 + Double(minute) * 60
+            let out = service.step()
+            XCTAssertTrue(out.latchSaveFailed, "every tick fails to persist")
+            XCTAssertNil(out.mutation, "and nothing is ever released (minute \(minute))")
+        }
+        XCTAssertEqual(lid.calls, [],
+                       "the silent-inert failure this flag exists to expose")
+        XCTAssertEqual(sleeper.count, 0)
     }
 }

@@ -1427,4 +1427,39 @@ final class RecoveryBackstopServiceTests: XCTestCase {
         XCTAssertTrue(seen.outside.allSatisfy { $0 }, "the section is exclusive")
         XCTAssertEqual(other.tryWithLock { 2 }, 2, "and released afterwards")
     }
+
+    /// A thermal latch the backstop cannot write is a FAILED minute, not a
+    /// quiet one: with `seriousSince` unpersistable the sustained-heat release
+    /// can never fire, so this minute established nothing about heat being
+    /// covered. It must not feed a "fresh" heartbeat to the CLI.
+    func testAnUnwritableThermalLatchExits5() {
+        var rig = makeRig(flag: true, ownedBoot: "A", battery: Self.reading(false, 80),
+                          thermalState: .serious)
+        saveSession(rig, duration: nil)
+        let thermalBox = rig.thermal
+        let dir = rig.latchStore.url.deletingLastPathComponent()
+        // A path whose parent is a regular file: any write under it fails with
+        // ENOTDIR, a genuine I/O failure.
+        let blocker = dir.appendingPathComponent("latch-blocker")
+        try? Data("not a directory".utf8).write(to: blocker)
+        rig.service.guardService.thermalService = ThermalGuardService(
+            lidService: rig.service.guardService.thermalService!.lidService,
+            latchStore: ThermalLatchStore(
+                url: blocker.appendingPathComponent("nested/thermal_guard.json")),
+            thermalProvider: { thermalBox.state },
+            lidClosedProvider: { thermalBox.lidClosed },
+            externalDisplayProvider: { thermalBox.externalDisplay },
+            monotonic: { thermalBox.now },
+            sleeper: rig.sleeper,
+            auditLog: ThermalAuditLog(url: dir.appendingPathComponent("thermal_audit.jsonl")),
+            sessionService: rig.service.sessionService)
+
+        let outcome = rig.service.run()
+        guard case .completed(let report) = outcome else {
+            return XCTFail("expected a completed run, got \(outcome)")
+        }
+        XCTAssertTrue(report.thermalLatchSaveFailed)
+        XCTAssertEqual(outcome.exitCode, .backendFailure)
+        XCTAssertEqual(outcome.exitCode.rawValue, 5)
+    }
 }
