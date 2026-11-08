@@ -1649,3 +1649,17 @@ inverse — pire que l'original. Un correctif qui ajoute un chemin doit recevoir
 toutes les entrées que ce chemin consomme.
 
 Suite : **720/720**, 0 échec, 0 warning, rc=0.
+### Tour 16 — deux WARN, dont l'ordre que le plan nommait
+
+**0 CRITICAL, 2 WARN.**
+
+| Défaut | Correction |
+|---|---|
+| Le tick « session seule » que j'ai branché au tour 14 exécutait `service.step()` — qui expire la session et **relâche le flag** — AVANT le pas d'actions capot. Capot fermé, macOS peut suspendre juste après le relâchement : le Mac s'endormait son coupé et applis figées. C'est exactement l'ordre que le plan nomme (« à la fin de session : annuler les effets, PUIS relâcher »), et que les chemins batterie, thermique et quit appliquent déjà. | Annulation d'abord (session encore vivante), puis le pas de session, puis une passe ordinaire sur la session d'après. Les deux résultats sont fusionnés. |
+| Le verdict d'apply ignorait les annulations échouées : audio désactivé avec un appareil non rétabli ⇒ `.applied` sur un Mac encore muet, voire `.nothingRequested` alors qu'il restait du travail. | `.partial` dès qu'une annulation échoue. `.failed` serait faux aussi : il promet une machine intacte, et un appareil qu'on n'a pas pu réactiver est précisément un effet vivant de notre fait. |
+
+Ce tour ne trouve plus de jumeau : les deux défauts sont neufs, dans le code que
+j'ai ajouté aux tours 14 et 15. C'est le signe que le balayage systématique du
+tour 14 a fini de purger la classe « règle appliquée d'un seul côté ».
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.

@@ -478,8 +478,20 @@ public struct LidCloseActionService {
         if !journal.save(record) { outcome.journalSaveFailed = true }
         outcome.evaluation.journalBefore = record
 
-        outcome.apply = combine(audio: decision.muteAudio ? audioEffect : .skipped,
+        // A REVERSAL that failed is part of this tick's verdict too. `combine`
+        // only sees the effects asked for by the CURRENT switches, so when the
+        // audio switch is off and one of its devices could not be un-muted
+        // while the app step succeeded, the tick reported `.applied` over a Mac
+        // that is still muted — and with nothing successfully reversed it could
+        // report `.nothingRequested` over outstanding recovery work (gate
+        // finding, `Apply verdict discards failed effect restoration`).
+        // `.partial` is the honest answer: something landed, something did not.
+        let requested = combine(audio: decision.muteAudio ? audioEffect : .skipped,
                                 apps: decision.pauseApps ? appsEffect : .skipped)
+        // `.partial` whenever a REVERSAL failed: something landed, something did
+        // not. `.failed` would also be wrong — it promises an untouched machine,
+        // and a device we could not un-mute is precisely a live effect of ours.
+        outcome.apply = outcome.audioRestoreFailed ? .partial : requested
         // OR, never assign: `undoEffectsThatAreNowOff` may already have reversed
         // something, and a partial stop DID freeze a process. Assigning here
         // erased both, so callers refeshing their caches kept stale state

@@ -1231,18 +1231,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let lock = LidWriteLock()
             let (step, lidClose) = lock.withLock {
                 () -> (SessionService.StepOutcome, LidCloseActionService.TickOutcome) in
-                let s = service.step()
+                // ORDER: restore BEFORE expiring the session.
+                //
+                // `service.step()` expires a due session and releases the flag,
+                // and with the lid closed macOS can suspend immediately after
+                // that release — before the lid-close step ever runs, leaving
+                // the sound muted and the apps frozen across the sleep. This is
+                // the plan's own rule ("at the end of a session: undo the
+                // effects, then release"), and the battery, thermal and quit
+                // paths already apply it; this new path was the one that did
+                // not (gate finding, `Session expiry can sleep before restoring
+                // paused apps`).
+                //
+                // So: undo-only pass FIRST (with the session still alive, which
+                // is what makes it an `undo` rather than a fresh `apply`), then
+                // the session step, then the ordinary pass on the post-step
+                // session so a still-valid session keeps its actions.
                 var lidCloseService = LidCloseActionService.live(bootID: bootID)
-                // The SESSION must be the one just loaded, not the `nil` that
-                // `lidEnvironment()` reports: the policy reads `nil` as "no
-                // session", so this path would never APPLY the actions and —
-                // worse — would UNDO effects that are legitimately applied
-                // (gate finding, `Session-only tick omits the active session`).
-                // Same rule as the backstop: read the session AFTER the step.
+                let pre = lidCloseService.undoAll()
+                let s = service.step()
                 var readings = LidCloseActionService.Readings.lidEnvironment()
                 readings.session = service.load()
-                let out = lidCloseService.step(readings: readings)
-                return (s, out)
+                let post = lidCloseService.step(readings: readings)
+                let merged = pre.merging(post)
+                return (s, merged)
             }
             DispatchQueue.main.async {
                 guard let self else { return }
