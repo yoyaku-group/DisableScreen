@@ -228,6 +228,35 @@ final class BackstopLidCloseTests: XCTestCase {
         rig.sessionStore.save(KeepAwakeSession(startedAt: epoch, bootID: "A"))
     }
 
+
+    /// The FAST PATH must take the lock when only OBLIGATIONS remain: a record
+    /// holding `unverified` processes or a stranded device is not `isEmpty`, but
+    /// it still needs the backstop (gate finding, `Recovery fast path ignores
+    /// unverified obligations`).
+    func testFastPathHonoursAJournalOfObligationsOnly() {
+        var rig = makeRig(flag: nil, ownedBoot: nil)
+        rig.journal.save(.init(unverified: [
+            .init(pid: 4711, startSeconds: 1, startMicroseconds: 0,
+                  bootID: "A", path: "/x", appName: "Slack")]))
+
+        let outcome = rig.service.run()
+
+        XCTAssertNotEqual(outcome, .nothingToDo,
+                          "an outstanding obligation took the fast path")
+    }
+
+    /// And a stranded audio device counts the same way.
+    func testFastPathHonoursAStrandedDevice() {
+        var rig = makeRig(flag: nil, ownedBoot: nil)
+        rig.journal.save(.init(unverifiedAudio: .init(
+            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)))
+
+        let outcome = rig.service.run()
+
+        XCTAssertNotEqual(outcome, .nothingToDo,
+                          "a stranded audio obligation took the fast path")
+    }
+
     // MARK: — Apply
 
     /// A live session with the lid closed applies the actions through the same

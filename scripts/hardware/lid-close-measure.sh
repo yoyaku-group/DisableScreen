@@ -117,8 +117,13 @@ saw_lid_closed=0
 saw_panel_active=0
 saw_panel_inactive=0
 saw_panel_unreadable=0
-trap 'echo "interrupted"' INT
-while true; do
+# Ctrl-C must WRITE THE REPORT, not die wherever the interrupt lands. A flag set
+# by the trap is checked before each sample and before each sleep, so an
+# interrupt that arrives while a probe is running still ends the run cleanly
+# (gate finding, `Ctrl-C only ends measurement when it interrupts sleep`).
+interrupted=0
+trap 'interrupted=1; echo "interrupted"' INT
+while [[ "$interrupted" == "0" ]]; do
   l="$(lid)"; p="$(panel)"; c="$(conditions)"
   line="$(date '+%F %T') clamshell=$l $p $c"
   echo "$line" | tee -a "$LOG"

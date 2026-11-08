@@ -359,7 +359,21 @@ public struct RecoveryBackstopService {
             latch: guardService.latchStore.load().latch,
             batteryGuardEnabled: batteryGuardEnabled(),
             thermalGuardEnabled: thermalGuardEnabled(),
-            lidCloseJournalPending: !lidCloseJournal.load().isEmpty)
+            // Obligations count, not just live effects: a record holding only
+            // `unverified` processes or a stranded device still needs the
+            // backstop, and `Record.isEmpty` deliberately excludes them
+            // (gate finding, `Recovery fast path ignores unverified
+            // obligations`).
+            // Obligations count, not just live effects: a record holding only
+            // `unverified` processes or a stranded device still needs the
+            // backstop, and `Record.isEmpty` deliberately excludes them
+            // (gate finding, `Recovery fast path ignores unverified
+            // obligations`).
+            lidCloseJournalPending: {
+                let rec = lidCloseJournal.load()
+                return !rec.isEmpty || !rec.unverified.isEmpty
+                    || rec.unverifiedAudio != nil
+            }())
         let plan = RecoveryPolicy.plan(facts)
         let outcome: Outcome
         if !plan.needsWork {
