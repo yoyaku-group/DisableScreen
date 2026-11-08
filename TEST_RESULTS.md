@@ -1250,20 +1250,20 @@ exécutées.
 ```
 $ arch -arm64 swift build && arch -arm64 swift test
 RunClosedCoreTests           194 passed
-RunClosedPersistenceTests     87 passed
-RunClosedMacSystemTests      384 passed
+RunClosedPersistenceTests     88 passed
+RunClosedMacSystemTests      385 passed
 RunClosedHelperSupportTests   40 passed
 RunClosedAppTests             11 passed
                              ---
-                             716 passed, 0 failures, 0 warnings, rc=0
+                             718 passed, 0 failures, 0 warnings, rc=0
 ```
 
 The earlier runs in this section reported 657, then 663, then 671 — each one
-true of the commit it ran on. The final figure is **716**, measured on the head
-that closes the lot (rounds 7, 8 and 9 included), and it is the only number that
+true of the commit it ran on. The final figure is **718**, measured on the head
+that closes the lot (rounds 7 to 10 included), and it is the only number that
 describes the code being merged.
 
-139 tests nouveaux pour ce lot, mesurés de 577 (L3) à 716 : politique pure
+141 tests nouveaux pour ce lot, mesurés de 577 (L3) à 718 : politique pure
 (`LidCloseActionPolicyTests`), service sur fakes (`LidCloseActionServiceTests`,
 dont les deux contre-épreuves de la ronde 7), persistance
 (`LidCloseActionJournalTests` + `LidCloseActionSettingsKillSwitchTests`),
@@ -1537,6 +1537,26 @@ Deux leçons de méthode, tirées de mes propres erreurs dans ce tour :
   que le retrait du correctif le fasse échouer.
 
 Suite : **716/716**, 0 échec, 0 warning, rc=0.
+
+### Tour 10 — quatre WARN et une suggestion, dont deux dans mes propres correctifs
+
+Le tour 10 a revu le commit du tour 9. **0 CRITICAL, 4 WARN, 1 SUGGESTION**, tous réels.
+
+| Défaut | Correction | Contre-épreuve |
+|---|---|---|
+| `schemaVersion` était encore décodé avec `try` : un `"1"` chaîne jetait le Record avant toute lecture, donc un fichier plein d'obligations valides lisait vide. Même classe que les compteurs du tour 9 — j'en avais corrigé deux sur trois. | `try?`, comme les compteurs. | `testAMisTypedSchemaVersionKeepsTheObligations` — avec `try`, audio ET processus lisent `[]`. |
+| La notice audio écrasait celle des apps : quand une app reste figée **et** que le son ne revient pas, seul `.audioLeftMuted` sortait. L'opérateur n'apprenait jamais que l'app était encore gelée — le pire des deux états, silencieusement perdu. | `?? ` au lieu d'une affectation nue : la première notice, celle des apps, gagne. | Couvert par la relecture ; le comportement est désormais « un avis par passe, le plus grave d'abord ». |
+| **Mon** correctif du tour 9 était incomplet : `releaseFailed` manquait dans l'ensemble « undo only ». Le service thermique annule AVANT d'écrire ; un échec d'écriture laisse donc les effets restaurés et la session active, puis le pas ordinaire re-mutait et re-figeait tout. | `releaseFailed` rejoint `releaseRefused` sur les deux chemins. | `testAFailedThermalReleaseDoesNotReApplyTheRestoredEffects` — sans lui, `isMuted == true` ET le processus re-figé. |
+| **Mon** `else if` du tour 9 remplaçait le résultat thermique au lieu de fusionner, et `thermalOutcome` ne fusionnait pas non plus. Le pid repris par la première annulation disparaissait du JSON. | Fusion aux deux endroits. | Couvert ; le motif est désormais un seul appel à `TickOutcome.merging`. |
+| (SUGGESTION) `sessionID` et `startedAt` étaient assignés au record, puis jetés quand le code relisait `evaluation.journalBefore` — le journal ne pouvait pas dire à quelle session il appartenait. | Les métadonnées d'épisode sont reportées sur le record relu. | — |
+
+Le schéma est net : trois des cinq points sont des **correctifs de mes propres
+correctifs**, tous de la même famille — un résultat calculé puis jeté, une
+condition appliquée à un site mais pas à son jumeau. La fusion vit maintenant
+dans `TickOutcome.merging` et n'est plus recopiée à la main ; c'est la seule
+raison pour laquelle ce tour n'a pas trouvé une cinquième copie.
+
+Suite : **718/718**, 0 échec, 0 warning, rc=0.
 
 ### Le coupe-circuit, éprouvé et non affirmé
 

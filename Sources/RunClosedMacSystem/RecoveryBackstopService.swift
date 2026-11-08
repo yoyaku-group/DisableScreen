@@ -576,7 +576,8 @@ public struct RecoveryBackstopService {
                         report.lidClose = report.lidClose.map { $0.merging(second) } ?? second
                     }
                     report.lidCloseStepRan = true
-                } else if thermal.mutation == .releaseRefused,
+                } else if thermal.mutation == .releaseRefused
+                            || thermal.mutation == .releaseFailed,
                           thermal.lidCloseUndo != nil
                             || thermal.lidCloseJournalCorrupt {
                     // A thermal REFUSAL is still a PROTECTIVE outcome: the heat
@@ -594,7 +595,16 @@ public struct RecoveryBackstopService {
                     // (`LowBatteryGuardService.lockedTick` and `thermalTick`)
                     // already apply this exact rule; the backstop was the one
                     // path missing it.
-                    report.lidClose = guardService.runLidCloseUndo()
+                    // MERGE with the thermal undo's own result. It may have
+                    // resumed an app that this second pass cannot see (the
+                    // journal is already cleared), and replacing dropped that
+                    // pid and its `changed` signal from the JSON (gate finding,
+                    // `Le second undo efface le résultat de récupération
+                    // thermique`).
+                    if let undo = thermal.lidCloseUndo { report.lidClose = undo }
+                    if let second = guardService.runLidCloseUndo() {
+                        report.lidClose = report.lidClose.map { $0.merging(second) } ?? second
+                    }
                     report.lidCloseStepRan = true
                     if guardService.lidCloseActions?.journal.isCorrupt == true {
                         report.lidCloseJournalCorrupt = true

@@ -364,13 +364,29 @@ public struct LidCloseActionService {
         }
 
         var record = evaluation.journalBefore
-        record.sessionID = currentSessionIdentity
-        record.startedAt = ISO8601DateFormatter().string(from: wallClock())
+        let episodeSessionID = currentSessionIdentity
+        let episodeStartedAt = ISO8601DateFormatter().string(from: wallClock())
+        record.sessionID = episodeSessionID
+        record.startedAt = episodeStartedAt
 
         // Effects whose own switch is now off are reversed first, on the
         // record we just loaded, so the rest of `apply` works on a clean slate.
         undoEffectsThatAreNowOff(evaluation: evaluation, into: &outcome)
+        // Re-read the record that helper produced, and RE-APPLY the episode
+        // metadata onto it. It is derived from `evaluation.journalBefore`, which
+        // never received the two assignments above, so without this the saves
+        // below persist an episode with no session and no start time — the
+        // journal could not say WHICH session it belongs to, which is exactly
+        // what those fields exist for (gate finding, `Episode identity and
+        // timestamp assignments are discarded`).
+        //
+        // Only when the helper actually wrote a record: re-applying on top of a
+        // record it merely re-read would also be correct, but keeping the
+        // original `evaluation.journalBefore` path byte for byte when nothing
+        // changed avoids inventing metadata on a no-op tick.
         record = outcome.evaluation.journalBefore
+        record.sessionID = episodeSessionID
+        record.startedAt = episodeStartedAt
 
         var audioEffect = AudioEffect.skipped
         var audioError: String?
@@ -1441,8 +1457,15 @@ public struct LidCloseActionService {
             }
             return
         }
+        // `??`, never a bare assignment. `resumeStoppedProcesses` runs FIRST and
+        // may already have set `.appsLeftPaused`; overwriting it here made the
+        // outcome carry only the audio notice, so an operator shown that one
+        // message was never told that an app is still frozen — the worse of the
+        // two states, silently dropped (gate finding, `Audio recovery failure
+        // overwrites the paused-app notice`). One notice per pass by design;
+        // the first, which is the app one, wins.
         outcome.shouldNotify = true
-        outcome.notice = .audioLeftMuted
+        outcome.notice = outcome.notice ?? .audioLeftMuted
         outcome.audioRestoreFailed = true
     }
 

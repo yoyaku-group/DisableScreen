@@ -293,14 +293,38 @@ public struct LowBatteryGuardService {
         // through the thermal notice, not a second "session ended" one.
         outcome.sessionEndedNaturally = false
         outcome.batteryStepRan = false
-        // The SAME rule as the battery tick: a thermal REFUSAL already undid the
-        // effects, so running the ordinary step here re-applies them. This entry
-        // point (`thermalTick`, used when the battery guard is switched off) was
-        // missed by the previous fix (gate finding, `Thermal-only tick bypasses
-        // protective undo suppression`).
-        if thermal.mutation == .releaseRefused, thermal.lidCloseUndo != nil
-            || thermal.lidCloseJournalCorrupt {
-            outcome.lidClose = runLidCloseUndo()
+        // The SAME rule as the battery tick: a protective thermal outcome
+        // already undid the effects, so running the ordinary step here
+        // re-applies them. This entry point (`thermalTick`, used when the
+        // battery guard is switched off) was missed by the previous fix (gate
+        // finding, `Thermal-only tick bypasses protective undo suppression`).
+        //
+        // `releaseFailed` belongs to that set, and that is not obvious: the
+        // thermal service undoes BEFORE writing the flag, so a write that then
+        // fails leaves the effects RESTORED and the session still active. The
+        // ordinary step would see an active session with the lid still closed
+        // and mute and suspend all over again — reversing the restore it was
+        // handed (gate finding, `Réapplication après un échec de libération
+        // thermique`). Any thermal outcome that ran an undo means "undo only".
+        let thermalRestored = thermal.lidCloseUndo != nil || thermal.lidCloseJournalCorrupt
+        if thermal.mutation == .releaseRefused || thermal.mutation == .releaseFailed,
+           thermalRestored {
+            // MERGE, never replace: the thermal undo may have resumed a process
+            // this second pass cannot see (the journal is already cleared), and
+            // replacing dropped its pid and `changed` signal from the report
+            // (gate finding, `Le second undo efface le résultat de récupération
+            // thermique`).
+            if let undo = thermal.lidCloseUndo { outcome.lidClose = undo }
+            if let second = runLidCloseUndo() {
+                outcome.lidClose = outcome.lidClose.map { $0.merging(second) } ?? second
+            }
+        } else if thermal.mutation == .released, let undo = thermal.lidCloseUndo {
+            // The release slept, so the thermal undo IS the result of this
+            // tick's recovery; still merge a late pass rather than replace it.
+            outcome.lidClose = undo
+            if let second = runLidCloseUndo() {
+                outcome.lidClose = undo.merging(second)
+            }
         } else {
             outcome.lidClose = runLidCloseStep()
         }

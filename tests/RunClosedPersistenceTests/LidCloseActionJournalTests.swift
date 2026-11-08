@@ -214,6 +214,37 @@ final class LidCloseActionCorruptEntryTests: XCTestCase {
                        "a bad COUNTER discarded a valid process obligation")
     }
 
+    /// A mis-typed `schemaVersion` must not cost the obligations either — same
+    /// class as the counters, but it sits at the TOP of the decode, so a
+    /// throwing read there discarded the file before anything else was read
+    /// (gate finding, `Un schemaVersion mal typé invalide tout le journal`).
+    ///
+    /// Counter-proof: with `try` this reads an empty `audio` list.
+    func testAMisTypedSchemaVersionKeepsTheObligations() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("runclosed-badver-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("lid_close_actions.json")
+
+        let json = """
+        {"schemaVersion":"1",
+         "audio":[{"deviceUID":"Headphones","wasMuted":false,"volume":0.7}],
+         "stopped":[{"pid":4711,"startSeconds":1700000000,"startMicroseconds":0,
+                     "bootID":"A","path":"/Applications/Slack.app/Contents/MacOS/Slack",
+                     "appName":"Slack"}],
+         "unverified":[],"unverifiedAudio":[]}
+        """
+        try Data(json.utf8).write(to: url)
+
+        let rec = LidCloseActionJournal(url: url).load()
+
+        XCTAssertEqual(rec.audio.map { $0.deviceUID }, ["Headphones"],
+                       "a bad schemaVersion discarded a valid audio obligation")
+        XCTAssertEqual(rec.stopped.map { $0.pid }, [4711],
+                       "a bad schemaVersion discarded a valid process obligation")
+    }
+
 }
 
 /// Legacy-shape decoding.

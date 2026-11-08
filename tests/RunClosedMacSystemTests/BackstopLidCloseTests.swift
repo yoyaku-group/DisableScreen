@@ -15,10 +15,17 @@ final class BackstopLidCloseTests: XCTestCase {
 
     private final class FakeLid: LidAssertion, @unchecked Sendable {
         var calls: [Bool] = []
+        /// When true the write is ACKED but the flag does not move, so the
+        /// service's own readback reports `releaseFailed`.
+        var acceptWithoutEffect = false
         let flag: FlagBox
         init(flag: FlagBox) { self.flag = flag }
         func setEnabled(_ enabled: Bool) -> OperationResult {
             calls.append(enabled)
+            guard !acceptWithoutEffect else {
+                return OperationResult(requestID: "t", action: .sleepAll, state: .failed,
+                                       nativeRC: 0, readbackOK: false)
+            }
             flag.value = enabled
             return OperationResult(requestID: "t", action: .sleepAll, state: .verified,
                                    nativeRC: 0, readbackOK: true)
@@ -573,6 +580,40 @@ final class BackstopLidCloseTests: XCTestCase {
 
         XCTAssertEqual(report.lidClose?.resumedPids, [4711],
                        "the process the SECOND undo resumed is missing")
+    }
+
+    /// A FAILED thermal release is protective too: the thermal service undid
+    /// the effects BEFORE writing the flag, so a write that then fails leaves
+    /// them restored and the session still active. The ordinary step would see
+    /// that active session with the lid still closed and mute and suspend all
+    /// over again — reversing the restore it was handed (gate finding,
+    /// `Réapplication après un échec de libération thermique`).
+    ///
+    /// Counter-proof: without `releaseFailed` in the undo-only set, the audio
+    /// reads `isMuted == true` again.
+    func testAFailedThermalReleaseDoesNotReApplyTheRestoredEffects() {
+        var rig = makeRig(apps: [(4711, "Slack", 1_700_000_000)],
+                          audioMuted: true,
+                          thermalGuardEnabled: true)
+        rig.journal.save(.init(
+            audio: [.init(deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)],
+            stopped: [.init(pid: 4711, startSeconds: 1_700_000_000, startMicroseconds: 0,
+                            bootID: "A", path: "/x", appName: "Slack")]))
+        rig.processes.table[4711]?.stopped = true
+        rig.sessionStore.save(KeepAwakeSession(
+            startedAt: Date(timeIntervalSince1970: 1_700_000_000 - 600),
+            endsAtWall: nil, bootID: "A"))
+        // The write will be ACKED but not take, so the thermal service reports
+        // `releaseFailed` AFTER having restored the effects.
+        rig.lid.acceptWithoutEffect = true
+        rig.service.guardService.thermalService = makeCriticalThermal(rig: rig)
+
+        _ = rig.service.run()
+
+        XCTAssertEqual(rig.audio.device?.isMuted, false,
+                       "a failed thermal release re-muted the output it had just restored")
+        XCTAssertEqual(rig.processes.table[4711]?.stopped, false,
+                       "a failed thermal release re-paused the app it had just resumed")
     }
 
     // MARK: — Reporting

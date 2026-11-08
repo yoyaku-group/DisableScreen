@@ -283,7 +283,13 @@ public struct LidCloseActionJournal: Sendable {
 
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
-            schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion)
+            // `try?` for the SAME reason as the damage counters below: a
+            // `"schemaVersion": "1"` threw BEFORE a single obligation was read,
+            // and `load()` returned an empty record over a file full of valid
+            // entries — devices left muted, processes left frozen, with
+            // `isCorrupt` the only trace (gate finding, `Un schemaVersion mal
+            // typé invalide tout le journal`).
+            schemaVersion = (try? c.decodeIfPresent(Int.self, forKey: .schemaVersion))
                 ?? kLidCloseActionSchemaVersion
             // METADATA must not be able to fail the whole record: a mis-typed
             // `sessionID` or `startedAt` is cosmetic, and throwing here
