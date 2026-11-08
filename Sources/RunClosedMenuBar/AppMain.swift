@@ -206,11 +206,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // quit must not release the lid protection over it (gate finding,
             // `Unreadable journal bypasses quit recovery guard`).
             let journalUnreadable = LidCloseActionJournal().isCorrupt
+            // Only a LIVE unreversed effect may keep the protection on. A
+            // HISTORICAL obligation — a process whose pid was recycled — is not
+            // a live effect: nothing of ours is still applied, so holding the
+            // flag forever would keep the Mac awake over an obligation that can
+            // never be resolved (gate finding, `Historical process obligations
+            // prevent quit from releasing lid protection`).
+            let settled = LidCloseActionJournal().load()
+            let liveLeft = !settled.audio.isEmpty || !settled.stopped.isEmpty
             let undoOutstanding = journalUnreadable
                 || lidCloseUndo.undo == .incomplete
-                || lidCloseUndo.undo == .unverifiedProcesses
-                || lidCloseUndo.audioRestoreFailed
-                || !lidCloseUndo.unverifiedPids.isEmpty
+                || (lidCloseUndo.audioRestoreFailed && !settled.audio.isEmpty)
+                || (!lidCloseUndo.unverifiedPids.isEmpty && liveLeft)
+                || (lidCloseUndo.undo == .unverifiedProcesses && liveLeft)
             if !undoOutstanding {
                 _ = lidService.restoreIfOwned()
             } else {

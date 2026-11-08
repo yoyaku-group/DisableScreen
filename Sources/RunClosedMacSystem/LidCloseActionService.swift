@@ -764,6 +764,13 @@ public struct LidCloseActionService {
                 record.audio.append(stranded)
             }
         }
+        // PERSIST what the re-adoption just changed. `firstReturnedStrandedDevice`
+        // may have RESOLVED a stranded entry (returned and already audible),
+        // and without writing that back the caller's later `record = ...`
+        // replaced the fresh snapshot with the stale one — restoring state that
+        // was already settled (gate finding, `Resolved stranded audio entries
+        // are restored from stale state`).
+        outcome.evaluation.journalBefore = record
 
         if !decision.muteAudio, !record.audio.isEmpty {
             var scratch = TickOutcome(evaluation: evaluation)
