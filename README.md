@@ -43,7 +43,9 @@ as the audited baseline (see [Repository layout](#repository-layout)).
   whose process id was recycled is left paused and listed "to verify" rather
   than resumed blindly. Screen brightness and keyboard backlight are
   deliberately **not** included yet: they need a proof-of-undo that only the
-  hardware measurement can provide (ADR 026). CLI:
+  hardware measurement can provide (ADR 026). Kill switch: the right-click
+  menu, or `defaults write com.benjaminbelaga.RunClosed lidCloseActions -bool
+  false`, which the next tick reads as "undo whatever is journaled". CLI:
   `runclosed lid-close status --json | simulate`.
 - **Recovery backstop** — a per-user LaunchAgent runs `runclosed-cli recover
   --backstop` every 60 s and takes only protective actions while the app is not

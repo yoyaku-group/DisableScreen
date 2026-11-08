@@ -1250,18 +1250,19 @@ exécutées.
 ```
 $ arch -arm64 swift build && arch -arm64 swift test
 RunClosedCoreTests           194 passed
-RunClosedPersistenceTests     79 passed
+RunClosedPersistenceTests     84 passed
 RunClosedMacSystemTests      327 passed
 RunClosedHelperSupportTests   40 passed
 RunClosedAppTests             11 passed
                              ---
-                             662 passed, 0 failures, 0 warnings
+                             656 passed, 0 failures, 0 warnings
 ```
 
-63 tests nouveaux pour ce lot : 19 de politique pure
+79 tests nouveaux pour ce lot : 19 de politique pure
 (`LidCloseActionPolicyTests`), 33 de service sur fakes
-(`LidCloseActionServiceTests`), 11 de persistance
-(`LidCloseActionJournalTests`), 11 de backstop (`BackstopLidCloseTests`).
+(`LidCloseActionServiceTests`), 16 de persistance (11 `LidCloseActionJournalTests`
++ 5 `LidCloseActionSettingsKillSwitchTests`), 11 de backstop
+(`BackstopLidCloseTests`). Le total de la suite passe donc de 577 (L3) à 656.
 Aucun test ne touche la sortie audio réelle ni ne signale un vrai processus :
 les fakes sont la seule voie, et le brief l'exige.
 
@@ -1362,3 +1363,14 @@ la machine réelle (`session start`, `recover --backstop`, `backstop register`,
   dans le lot, et avec quel critère de relecture. Tant qu'elle n'est pas faite,
   ces deux actions restent NOT_TESTED et non codées.
 - Le rendu du sous-menu clic droit sur la build installée.
+
+### Le coupe-circuit, éprouvé et non affirmé
+
+Le premier message de commit annonçait un rollback sans l'avoir vérifié. Le
+chemin qu'un opérateur prend réellement est
+`defaults write com.benjaminbelaga.RunClosed lidCloseActions -bool false`, qui
+remplace le blob JSON du réglage par un booléen. `LidCloseActionSettingsStore.load`
+le lit comme OFF (pas comme « corrompu, on ignore »), sans crash, et la
+politique répond alors `.undo` sur un journal non vide : le tick suivant remet
+le son. Cinq tests le verrouillent
+(`LidCloseActionSettingsKillSwitchTests`) au lieu d'une phrase.

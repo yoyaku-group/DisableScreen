@@ -57,6 +57,10 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   something is left to verify) and `runclosed lid-close simulate` (a pure
   decision on injected values, mutating nothing). The app's quit teardown
   undoes inside the same `LidWriteLock` section as the rest of the release.
+  Kill switch: the right-click menu, or
+  `defaults write com.benjaminbelaga.RunClosed lidCloseActions -bool false`,
+  which reads as OFF and makes the next tick restore whatever the journal
+  still holds.
 
 - Thermal guard and clamshell detection (ADR 025). `pmset disablesleep 1`
   also blocks macOS's own emergency sleep, and nothing covered HEAT: a Mac
