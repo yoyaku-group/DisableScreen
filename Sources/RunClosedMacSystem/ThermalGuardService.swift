@@ -275,9 +275,28 @@ public struct ThermalGuardService {
         // the Mac can suspend before this function's later lines ever run —
         // leaving the sound muted and apps paused across the sleep (gate
         // finding, `Thermal undo runs after releasing lid protection`).
+        var undoIncomplete = false
         if var actions = lidCloseActions {
-            outcome.lidCloseUndo = actions.undoAll()
+            let undo = actions.undoAll()
+            outcome.lidCloseUndo = undo
             lidCloseActions = actions
+            // An INCOMPLETE undo means effects are still applied. Releasing the
+            // flag here would let the Mac sleep with an app suspended or the
+            // sound muted, before any further recovery attempt (gate finding,
+            // `Le relâchement thermique ignore une annulation incomplète`). The
+            // release is skipped and the operator is told instead.
+            undoIncomplete = undo.undo == .incomplete
+                || undo.undo == .unverifiedProcesses
+                || undo.audioRestoreFailed
+                || !undo.unverifiedPids.isEmpty
+        }
+        if undoIncomplete {
+            outcome.mutation = .releaseRefused
+            outcome.mutationError = "the lid-close undo is incomplete; not releasing "
+                + "the flag so the Mac cannot sleep with effects still applied"
+            outcome.shouldNotify = true
+            outcome.notice = .releaseFailed
+            return
         }
         // `.automatic` only: heat has no cross-boot widening. A stale record is
         // NOT active ownership, and the policy already refused that case — if

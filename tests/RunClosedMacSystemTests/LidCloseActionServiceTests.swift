@@ -682,7 +682,11 @@ final class LidCloseActionServiceTests: XCTestCase {
 
         let out = stepEnclosed(&rig, settings())
 
-        XCTAssertEqual(out.apply, .failed, "an unverified mute must not read as applied")
+        // `.partial`, not `.failed`: the write was ACCEPTED, so the machine may
+        // well be muted — `.failed` promises nothing landed, which contradicts
+        // `changed`. The entry must survive for a retry either way.
+        XCTAssertEqual(out.apply, .partial, "an unconfirmed mute read as nothing landed")
+        XCTAssertTrue(out.changed, "an accepted mute did not count as a change")
         XCTAssertEqual(rig.journal.load().audio.first?.deviceUID, "BuiltInSpeakerDevice",
                        "an unreadable readback dropped the only record of the mute")
     }
@@ -1687,6 +1691,19 @@ final class LidCloseActionServiceTests: XCTestCase {
         let out = stepEnclosed(&rig, settings())
 
         XCTAssertTrue(out.changed, "an accepted mute was reported as no change")
+    }
+
+
+    /// An UNCONFIRMED mute is `.partial`, never `.failed`: `.failed` promises
+    /// nothing landed, which contradicts `changed` (gate finding).
+    func testUnconfirmedMuteIsPartialNotFailed() {
+        var rig = makeRig(muted: false)
+        rig.audio.readbackUnreadable = true
+
+        let out = stepEnclosed(&rig, settings())
+
+        XCTAssertEqual(out.apply, .partial)
+        XCTAssertTrue(out.changed)
     }
 
     // MARK: — Journal durability

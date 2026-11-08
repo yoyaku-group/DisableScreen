@@ -909,8 +909,13 @@ public struct LidCloseActionService {
         let audioOK = audio == .muted || audio == .alreadyMuted || audio == .alreadyRecorded
         let appsOK = apps == .stopped
         // `partial` means SOMETHING landed for that effect, so it is not a
-        // failure — but it is not a clean success either.
+        // failure — but it is not a clean success either. An UNCONFIRMED audio
+        // write is the same shape: the write was accepted, so the machine may
+        // be muted; reporting `.failed` ("nothing landed") contradicts
+        // `changed == true` (gate finding, `An unconfirmed mute is classified
+        // as no effect`).
         let appsPartial = apps == .partial
+        let audioUnconfirmed = audio == .unconfirmed
         let audioAsked = audio != .skipped
         let appsAsked = apps != .skipped
         let asked = [audioAsked, appsAsked].filter { $0 }.count
@@ -920,7 +925,7 @@ public struct LidCloseActionService {
         // Anything landed at all (including a partial effect) is `.partial`,
         // never `.failed`: `.failed` promises the machine is untouched, and
         // the undo's decision to run hangs off that promise.
-        if ok > 0 || appsPartial { return .partial }
+        if ok > 0 || appsPartial || audioUnconfirmed { return .partial }
         return .failed
     }
 

@@ -629,9 +629,18 @@ public struct LowBatteryGuardService {
         // again would UNDO the protective restore that `attemptSleep` performed
         // moments earlier (gate finding, `The final policy step can reapply
         // effects after protective sleep`). A sleep attempt means "undo only".
-        outcome.lidClose = outcome.sleepAttempted
-            ? runLidCloseUndo()
-            : runLidCloseStep()
+        if outcome.sleepAttempted {
+            // The protective undo ALREADY ran inside `attemptSleep` and left a
+            // real result (resumed pids, `changed`). Running `undoAll` again
+            // here reads the now-cleared journal and returns `nothingToDo`,
+            // OVERWRITING that result — so callers lost the resumed pids and the
+            // changed signal and never refreshed (gate finding, `Final undo
+            // overwrites the protective undo's result`). Keep what happened.
+            // `nil` means no lid-close layer was wired, which needs no marker;
+            // otherwise the protective undo's own result stays as the outcome.
+        } else {
+            outcome.lidClose = runLidCloseStep()
+        }
         return outcome
     }
 
