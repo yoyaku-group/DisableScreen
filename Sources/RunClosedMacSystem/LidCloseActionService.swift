@@ -671,7 +671,12 @@ public struct LidCloseActionService {
         let hasOutstanding = !record.unverified.filter { names.contains($0.appName) }.isEmpty
 
         guard !pending.isEmpty else {
-            if hasOutstanding { return .success(.unconfirmed) }
+            // `droppedUnproved` belongs in this exit too: my previous commit
+            // added it only to the tail return, so with a COMPLETE scan and no
+            // new targets the branch still reported `.stopped` over a
+            // de-selection whose resume failed (gate finding, `Le retour sans
+            // nouveaux processus masque une reprise échouée`).
+            if hasOutstanding || droppedUnproved { return .success(.unconfirmed) }
             return scanIncomplete ? .success(.unconfirmed) : .success(.stopped)
         }
 

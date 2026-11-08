@@ -171,6 +171,8 @@ public struct RecoveryBackstopService {
         /// restarts every minute, so the ten-minute release cannot fire. A
         /// protective action that cannot happen is a failure, not a detail.
         public var thermalLatchSaveFailed = false
+        /// The thermal step reported a corrupt lid-close journal.
+        public var thermalLidCloseCorrupt = false
         /// The lid-close step's result (ADR 026). `nil` when the step did not
         /// run (kill switch off, or no layer wired).
         public var lidClose: LidCloseActionService.TickOutcome?
@@ -521,6 +523,7 @@ public struct RecoveryBackstopService {
                 report.thermalReason = thermal.evaluation.decision.reason
                 report.thermalMutation = thermal.mutation
                 report.thermalError = thermal.mutationError
+                report.thermalLidCloseCorrupt = thermal.lidCloseJournalCorrupt
                 report.sleepAttempted = thermal.sleepAttempted
                 report.sleepRC = thermal.sleepRC
                 report.sessionEndedByHeat = thermal.sessionEndedByHeat
@@ -672,7 +675,12 @@ public struct RecoveryBackstopService {
             // This branch does not run `runLidCloseStep`, so the corruption
             // check there never fires (gate finding, `Undo-only recovery
             // bypasses journal corruption reporting`).
-            if guardService.lidCloseActions?.journal.isCorrupt == true {
+            // The thermal service reports this itself once its veto budget is
+            // spent; carry BOTH sources or the thermal release still returns a
+            // healthy minute over a truncated journal (gate finding, `La sortie
+            // thermique omet de propager la corruption du journal`).
+            if guardService.lidCloseActions?.journal.isCorrupt == true
+                || report.thermalLidCloseCorrupt == true {
                 report.lidCloseJournalCorrupt = true
             }
             report.lidClose = guardService.runLidCloseUndo()
