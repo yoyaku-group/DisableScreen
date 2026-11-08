@@ -128,11 +128,13 @@ while [[ "$interrupted" == "0" ]]; do
   # silent abort BEFORE the report is written. Each assignment tolerates that,
   # so the trap's flag is what ends the run (gate finding, `Ctrl-C during a
   # probe can bypass report generation`).
-  # Read the lid BEFORE and AFTER the panel probe: agreement between the two
-  # endpoints does not prove the state DURING it, and a lid that closed for the
-  # first read, opened while panel() ran and closed again before the last one
-  # would otherwise qualify an open-lid panel reading (gate finding, `Sequential
-  # probes still allow an open-lid panel reading to qualify`).
+  # Read the lid BEFORE and AFTER the panel probe. This NARROWS but cannot
+  # eliminate the race: a lid closed for the first read, opened during the probe
+  # and closed again before the last one still qualifies. Sampling cannot prove
+  # continuity between two observations — that is a property of the METHOD, not
+  # of this script, and it is recorded as a limitation rather than papered over
+  # with a third read that would have the same gap. The protocol therefore tells
+  # the operator to leave the lid still during a sample.
   l="$(lid || true)"; p="$(panel || true)"; l2="$(lid || true)"; c="$(conditions || true)"
   line="$(date '+%F %T') clamshell=$l $p $c"
   echo "$line" | tee -a "$LOG"

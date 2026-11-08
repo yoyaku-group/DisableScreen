@@ -613,7 +613,15 @@ public struct LidCloseActionService {
                 // suspension`).
                 return processes.isStopped(pid: entry.pid) != true
             }
-        guard !pending.isEmpty else { return .success(.stopped) }
+        guard !pending.isEmpty else {
+            // Nothing NEW to stop, but a SELECTED entry may still be sitting in
+            // `unverified` from an earlier tick — an obligation the operator was
+            // told about. Returning a clean `.stopped` made every subsequent
+            // tick claim `.applied` over it (gate finding, `Outstanding
+            // unverified stops are reported as successfully applied`).
+            let selectedUnverified = record.unverified.filter { names.contains($0.appName) }
+            return selectedUnverified.isEmpty ? .success(.stopped) : .success(.unconfirmed)
+        }
 
         var stopped: [LidCloseActionJournal.StoppedProcess] = []
         var failed: [Int32] = []

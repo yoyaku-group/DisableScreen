@@ -116,8 +116,13 @@ public struct LibprocPauseBackend: ProcessPauseBackend {
             // gap is recorded only while nothing has matched yet: if the run
             // found its targets and simply could not read some unrelated pid,
             // the pause proceeds.
+            // Record the gap WITHOUT consulting `out` here: doing that made the
+            // result depend on the ORDER pids came back in (gate finding, `An
+            // unrelated unreadable process can prevent all app suspension` was
+            // the same defect seen from the other side). The decision is made
+            // once, after the loop.
             guard let path = Self.path(ofPid: pid) else {
-                if out.isEmpty { sawMatchingButUnreadable = true }
+                sawMatchingButUnreadable = true
                 continue
             }
             guard let name = appNames.first(where: { Self.matches(path: path, appName: $0) })
@@ -133,7 +138,12 @@ public struct LibprocPauseBackend: ProcessPauseBackend {
         // readable one let the service stop a SUBSET and report `.applied`
         // while the other app kept running (gate finding, `Partial enumeration
         // failures are reported as complete success`).
-        if sawMatchingButUnreadable { return nil }
+        // ONLY an empty result is ambiguous: no target matched, and some
+        // process was unreadable, so the unreadable one may have been the
+        // target. With at least one real match the run is useful — pausing it
+        // beats pausing nothing because some unrelated system process cannot be
+        // read. Order-independent by construction.
+        if out.isEmpty, sawMatchingButUnreadable { return nil }
         return out
     }
 
