@@ -358,8 +358,16 @@ public struct LidCloseActionService {
         // the per-effect block below is the only thing that can do it.
         guard decision.muteAudio || decision.pauseApps else {
             undoEffectsThatAreNowOff(evaluation: evaluation, into: &outcome)
-            // `.nothingRequested` only when nothing was actually reversed.
-            if outcome.apply == nil { outcome.apply = .nothingRequested }
+            // `.nothingRequested` only when nothing was actually reversed AND
+            // nothing failed to be. A restoration that FAILED left a device
+            // muted or an app frozen, so "no work requested" is false: there IS
+            // outstanding work, it just did not succeed (gate finding,
+            // `Apply verdict omits failed restoration on two return paths`).
+            if outcome.apply == nil {
+                let incomplete = outcome.audioRestoreFailed
+                    || !outcome.unverifiedPids.isEmpty
+                outcome.apply = incomplete ? .partial : .nothingRequested
+            }
             return
         }
 
@@ -1543,7 +1551,10 @@ public struct LidCloseActionService {
             // Still unreadable after the retry. NOT proof of removal: the entry
             // stays and counts up, and "gone" is only concluded after several
             // SEPARATE passes.
-            prior.unreadablePasses += 1
+            // Saturating, belt and braces: the decoder clamps a persisted value,
+            // but an entry built in memory could still arrive near Int.max.
+            prior.unreadablePasses = prior.unreadablePasses >= Int.max
+                ? Int.max : prior.unreadablePasses + 1
             if prior.unreadablePasses >= Self.unreadablePassesBeforeGone {
                 // Concluding "gone" must not FORGET the device: it can come
                 // back. The obligation moves to `unverifiedAudio` instead.

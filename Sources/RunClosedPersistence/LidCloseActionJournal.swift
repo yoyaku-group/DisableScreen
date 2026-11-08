@@ -108,7 +108,13 @@ public struct LidCloseActionJournal: Sendable {
                 missingPriorState = true
             }
             volume = try c.decodeIfPresent(Float.self, forKey: .volume)
-            unreadablePasses = try c.decodeIfPresent(Int.self, forKey: .unreadablePasses) ?? 0
+            // CLAMPED at zero, like the damage counters: a persisted
+            // `Int.max` was carried straight into `prior.unreadablePasses += 1`
+            // in `unmuteOne`, which TRAPS in Swift and kills recovery before
+            // the other audio and process obligations are restored (gate
+            // finding, `Unbounded persisted retry counter can crash recovery`).
+            unreadablePasses = max(0, (try? c.decode(
+                Int.self, forKey: .unreadablePasses)) ?? 0)
         }
     }
 

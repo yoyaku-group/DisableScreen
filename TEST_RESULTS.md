@@ -1705,3 +1705,29 @@ Ce qui reste, et qui n'est plus de la relecture :
   comportement réel : son, `SIGSTOP`/`SIGCONT` sur les vraies apps, capot.
 
 Suite : **720/720**, 0 échec, 0 warning, rc=0.
+
+### Tour 19 — la relecture du head, et deux défauts de la même classe
+
+Le reçu de revue du head `1d5f32b` (exigé par la gate d'acceptation) a rendu
+**0 CRITICAL, 4 WARN**.
+
+Deux sont corrigés, deux restent assumés et documentés.
+
+**Corrigés**
+
+| Défaut | Correction |
+|---|---|
+| `unreadablePasses` persisté n'était pas borné : un `Int.max` dans le journal atteignait `prior.unreadablePasses += 1` dans `unmuteOne`, qui **trappe**, tuant la récupération avant que les autres obligations audio et processus soient restaurées. Troisième occurrence de la même classe (compteurs de dommage, `schemaVersion`, puis ce compteur de réessai). | Borné à zéro au décodage ET incrément saturant en mémoire. |
+| L'early return du désabonnement total assignait `.nothingRequested` même quand une restauration avait échoué. | `.partial` si `audioRestoreFailed` ou `unverifiedPids` non vide. |
+
+**Assumés, non corrigés — et pourquoi**
+
+| Défaut | Pourquoi il reste |
+|---|---|
+| L'expiration de session, dans `lockedThermalTick` comme dans `lockedTick`, relâche le flag avant que le pas d'actions capot ne tourne. Capot fermé, macOS peut suspendre entre les deux. | La correction correcte est que la restauration vive DANS le chemin de relâchement de `SessionService`, pas dans ses appelants. C'est un changement de conception du service de session, hors du périmètre de ce lot, et il toucherait les trois lots déjà fusionnés (ADR 022, 023, 025). À traiter comme un lot propre. |
+| La marge d'une seconde du tick « session seule » ne ferme pas la course (le processus peut être désochedulé au-delà). | Même cause racine, même correction, même périmètre. La marge réduit la fenêtre sans la fermer, et je ne présente pas cela comme une fermeture. |
+
+Ces deux points sont écrits ici pour ne pas être perdus : ils décrivent un ordre
+que le plan nomme explicitement et que trois chemins n'appliquent pas encore.
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.
