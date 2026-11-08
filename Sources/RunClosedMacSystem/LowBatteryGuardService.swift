@@ -410,6 +410,15 @@ public struct LowBatteryGuardService {
         public var mutationError: String?
         public var sleepAttempted = false
         public var sleepRC: Int32?
+        /// The lid-close undo this step performed before sleeping (ADR 026).
+        ///
+        /// Carried out of here so the ADR 024 backstop can put it in its report.
+        /// Without it the backstop kept only its OWN second undo — which finds a
+        /// cleared journal and answers `nothingToDo` — so the processes this
+        /// step really resumed were absent from the JSON, and a minute that had
+        /// finished a recovery could still read as a failure (gate finding, `Le
+        /// résultat du second undo est perdu`).
+        public var lidClose: LidCloseActionService.TickOutcome?
 
         public init(decision: LowBatteryPolicy.Decision, chargePercent: Int?,
                     minutesRemaining: Int?) {
@@ -476,6 +485,10 @@ public struct LowBatteryGuardService {
             outcome.mutationError = tick.mutationError
             outcome.sleepAttempted = tick.sleepAttempted
             outcome.sleepRC = tick.sleepRC
+            // `performRelease` filled this in on the battery path (the
+            // protective sleep runs the undo first). Carrying it out of the
+            // guard is what lets the backstop report a resume it performed.
+            outcome.lidClose = tick.lidClose
         }
         // The backstop shows NO notification, so it must not consume the
         // operator's warnings on the app's behalf. `LowBatteryPolicy` sets

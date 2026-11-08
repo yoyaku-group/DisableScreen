@@ -311,7 +311,7 @@ public struct LidCloseActionJournal: Sendable {
                 // honest (gate finding, `Malformed audio fields bypass
                 // corruption reporting`).
                 audio = []
-                if (try? c.contains(.audio)) == true { droppedAudioEntries += 1 }
+                if (c.contains(.audio)) == true { droppedAudioEntries += 1 }
             }
             // The obligation list is decoded ELEMENT-WISE too: one malformed
             // record must not discard the valid ones, which is a lost recovery
@@ -327,18 +327,27 @@ public struct LidCloseActionJournal: Sendable {
                 if one.missingPriorState { droppedAudioEntries += 1 }
             } else {
                 unverifiedAudio = []
-                if (try? c.contains(.unverifiedAudio)) == true { droppedAudioEntries += 1 }
+                if (c.contains(.unverifiedAudio)) == true { droppedAudioEntries += 1 }
             }
             // Damage already recorded on a PREVIOUS load survives: a save
             // writes only the kept entries, so without this the next read would
             // look healthy (see `droppedAudioEntries`).
-            droppedAudioEntries += try c.decodeIfPresent(
-                Int.self, forKey: .droppedAudioEntries) ?? 0
-            droppedProcessEntries += try c.decodeIfPresent(
-                Int.self, forKey: .droppedProcessEntries) ?? 0
+            // `try?`, NOT `try`. These two counters are DIAGNOSTIC metadata: a
+            // file carrying `"droppedAudioEntries": "1"` (a string, a typo, an
+            // older writer) threw out of the whole `Record` decode, `load()`
+            // then returned an EMPTY record, and every valid audio and process
+            // obligation in that same file became unreachable — a device left
+            // muted, apps left frozen, and `isCorrupt` the only trace (gate
+            // finding, `Malformed damage counters discard all valid recovery
+            // entries`). A counter that cannot be read is worth nothing; the
+            // obligations next to it are worth everything.
+            droppedAudioEntries += (try? c.decodeIfPresent(
+                Int.self, forKey: .droppedAudioEntries)) ?? 0
+            droppedProcessEntries += (try? c.decodeIfPresent(
+                Int.self, forKey: .droppedProcessEntries)) ?? 0
 
             // A damaged element is surfaced, never silently dropped.
-            if audio.isEmpty, (try? c.contains(.audio)) == true {
+            if audio.isEmpty, (c.contains(.audio)) == true {
                 // Leave `audio` empty; `isCorrupt` is decided by the record
                 // decoder, and the CLI reports the journal as unreadable.
             }
@@ -353,14 +362,14 @@ public struct LidCloseActionJournal: Sendable {
                 // Present but malformed as a WHOLE: that is a lost obligation,
                 // not an empty list (the same rule the audio field follows).
                 stopped = []
-                if (try? c.contains(.stopped)) == true { droppedProcessEntries += 1 }
+                if (c.contains(.stopped)) == true { droppedProcessEntries += 1 }
             }
             if let loose = try? c.decode([LooseStoppedProcess].self, forKey: .unverified) {
                 unverified = loose.compactMap { $0.value }
                 droppedProcessEntries += loose.filter { $0.value == nil }.count
             } else {
                 unverified = []
-                if (try? c.contains(.unverified)) == true { droppedProcessEntries += 1 }
+                if (c.contains(.unverified)) == true { droppedProcessEntries += 1 }
             }
         }
     }

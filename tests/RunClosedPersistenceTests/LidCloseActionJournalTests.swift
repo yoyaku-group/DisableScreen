@@ -178,6 +178,42 @@ final class LidCloseActionCorruptEntryTests: XCTestCase {
                       "a journal that lost an entry reported as healthy")
     }
 
+    /// A mis-typed DAMAGE COUNTER must not cost the obligations next to it.
+    ///
+    /// The counters are diagnostic metadata. Decoding them with a hard `try`
+    /// threw out of the whole `Record`, so `load()` returned an EMPTY record and
+    /// every valid audio and process entry in that same file became unreachable:
+    /// a device left muted, apps left frozen, with only `isCorrupt` to say so
+    /// (gate finding, `Malformed damage counters discard all valid recovery
+    /// entries`).
+    ///
+    /// Counter-proof: with `try` this reads an empty `audio` list.
+    func testAMisTypedDamageCounterKeepsTheObligations() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("runclosed-badcounter-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("lid_close_actions.json")
+
+        let json = """
+        {"schemaVersion":1,
+         "audio":[{"deviceUID":"Headphones","wasMuted":false,"volume":0.7}],
+         "stopped":[{"pid":4711,"startSeconds":1700000000,"startMicroseconds":0,
+                     "bootID":"A","path":"/Applications/Slack.app/Contents/MacOS/Slack",
+                     "appName":"Slack"}],
+         "unverified":[],"unverifiedAudio":[],
+         "droppedAudioEntries":"1"}
+        """
+        try Data(json.utf8).write(to: url)
+
+        let rec = LidCloseActionJournal(url: url).load()
+
+        XCTAssertEqual(rec.audio.map { $0.deviceUID }, ["Headphones"],
+                       "a bad COUNTER discarded a valid audio obligation")
+        XCTAssertEqual(rec.stopped.map { $0.pid }, [4711],
+                       "a bad COUNTER discarded a valid process obligation")
+    }
+
 }
 
 /// Legacy-shape decoding.

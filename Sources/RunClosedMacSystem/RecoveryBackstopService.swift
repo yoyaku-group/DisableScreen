@@ -659,6 +659,13 @@ public struct RecoveryBackstopService {
         report.batteryError = battery.mutationError
         report.sleepAttempted = battery.sleepAttempted
         report.sleepRC = battery.sleepRC
+        // The protective step already undid the lid-close effects before it
+        // asked the Mac to sleep. That is a real result — which apps came back,
+        // what could not be restored — and it must reach the report, or the
+        // second undo below (over an already-cleared journal) is the only voice
+        // and it says `nothingToDo` (gate finding, `Le résultat du second undo
+        // est perdu`).
+        if let undo = battery.lidClose { report.lidClose = undo }
         switch battery.mutation {
         case .released, .releaseFailed, .releaseRefused:
             // `releaseFailed` is the one outcome that REPEATS: a persistent
@@ -729,13 +736,19 @@ public struct RecoveryBackstopService {
                 || report.thermalLidCloseCorrupt == true {
                 report.lidCloseJournalCorrupt = true
             }
-            // KEEP the protective undo's result: this second pass finds a
+            // MERGE, do not keep-the-first. This second pass usually finds a
             // cleared journal and reports `nothingToDo`, so assigning it erased
-            // the resumed pids and `changed` of a run that really did resume
-            // apps (gate finding, `La seconde annulation efface le résultat de
-            // la récupération`).
-            let second = guardService.runLidCloseUndo()
-            if report.lidClose == nil { report.lidClose = second }
+            // the resumed pids of a run that really did resume apps (gate
+            // finding, `La seconde annulation efface le résultat de la
+            // récupération`). But "keep the first" is wrong the other way: the
+            // first pass may have LEFT a process unconfirmed and this pass
+            // RESUMED it, and then the report names a recovery that is not
+            // finished while the machine is already whole (gate finding, `Le
+            // résultat du second undo est perdu`). Both directions lose
+            // something; merging loses neither.
+            if let second = guardService.runLidCloseUndo() {
+                report.lidClose = report.lidClose.map { $0.merging(second) } ?? second
+            }
             report.lidCloseStepRan = true
         } else {
             runLidCloseStep(&report, recordBootID: recordBootID)

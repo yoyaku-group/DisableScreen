@@ -1250,20 +1250,20 @@ exécutées.
 ```
 $ arch -arm64 swift build && arch -arm64 swift test
 RunClosedCoreTests           194 passed
-RunClosedPersistenceTests     86 passed
-RunClosedMacSystemTests      383 passed
+RunClosedPersistenceTests     87 passed
+RunClosedMacSystemTests      384 passed
 RunClosedHelperSupportTests   40 passed
 RunClosedAppTests             11 passed
                              ---
-                             714 passed, 0 failures, 0 warnings, rc=0
+                             716 passed, 0 failures, 0 warnings, rc=0
 ```
 
 The earlier runs in this section reported 657, then 663, then 671 — each one
-true of the commit it ran on. The final figure is **714**, measured on the head
-that closes the lot (rounds 7 and 8 included), and it is the only number that
+true of the commit it ran on. The final figure is **716**, measured on the head
+that closes the lot (rounds 7, 8 and 9 included), and it is the only number that
 describes the code being merged.
 
-137 tests nouveaux pour ce lot, mesurés de 577 (L3) à 714 : politique pure
+139 tests nouveaux pour ce lot, mesurés de 577 (L3) à 716 : politique pure
 (`LidCloseActionPolicyTests`), service sur fakes (`LidCloseActionServiceTests`,
 dont les deux contre-épreuves de la ronde 7), persistance
 (`LidCloseActionJournalTests` + `LidCloseActionSettingsKillSwitchTests`),
@@ -1507,6 +1507,36 @@ ne gagne donc plus : seul un verdict qui a réellement fait quelque chose
 remplace le précédent.
 
 Suite : **714/714**, 0 échec, 0 warning, rc=0.
+
+### Tour 9 — deux WARN, dont un site oublié
+
+Le tour 9 a revu le commit du tour 8. **0 CRITICAL, 2 WARN**, les deux réels.
+
+| Défaut | Correction | Contre-épreuve |
+|---|---|---|
+| La branche BATTERIE du backstop gardait `if report.lidClose == nil`, donc un processus laissé « à vérifier » par la première annulation et REPRIS par celle d'après-veille disparaissait du rapport : la minute pouvait encore se lire comme un échec sur une machine déjà remise d'aplomb. | Fusion sur les deux sites (`TickOutcome.merging`), comme le chemin thermique. | `testTheBatterySleepPathMergesTheSecondUndo` — sans la fusion, `resumedPids` est vide. |
+| Les compteurs de dommage du journal étaient décodés avec `try` et non `try?`. Un `"droppedAudioEntries": "1"` (chaîne, typo, ancien writer) faisait échouer le décodage du Record ENTIER : `load()` rendait un enregistrement vide et toutes les obligations valides du même fichier devenaient inaccessibles — appareil muet, apps figées, `isCorrupt` pour seule trace. | `try?` sur les deux compteurs : une métadonnée illisible ne vaut rien, les obligations à côté valent tout. | `testAMisTypedDamageCounterKeepsTheObligations` — avec `try`, l'audio ET le processus lisent `[]`. |
+
+En écrivant la contre-épreuve du premier point, un troisième défaut est apparu,
+dans mon propre diagnostic : le rapport ne lisait jamais le `lidClose` du pas
+protecteur (`ProtectiveOutcome` ne le portait pas), donc la seconde annulation
+était la seule voix même quand la première avait réellement repris un processus.
+`ProtectiveOutcome.lidClose` existe maintenant et le backstop le reporte.
+
+Deux leçons de méthode, tirées de mes propres erreurs dans ce tour :
+
+- **Un build incrémental ne prouve pas « 0 warning ».** Trois warnings
+  pré-existants de `LidCloseActionJournal.swift` (`try?` sur des appels qui ne
+  jettent pas) n'apparaissaient qu'après suppression du cache du module. C'est la
+  deuxième fois dans ce lot ; la règle est désormais : recompiler le module
+  touché, pas seulement le projet.
+- **Un test qui passe avec le correctif n'a rien prouvé** tant qu'on ne l'a pas
+  vu échouer sans lui. Trois de mes tests de ce tour étaient vacants à la
+  première écriture (service thermique sans `lidCloseActions`, batterie à 60 % sur
+  secteur donc aucun sommeil, journal déjà vidé). Chacun a été corrigé jusqu'à ce
+  que le retrait du correctif le fasse échouer.
+
+Suite : **716/716**, 0 échec, 0 warning, rc=0.
 
 ### Le coupe-circuit, éprouvé et non affirmé
 

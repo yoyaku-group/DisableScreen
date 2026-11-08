@@ -77,6 +77,9 @@ final class BackstopLidCloseTests: XCTestCase {
         /// When true, `SIGCONT` is delivered but the process stays stopped —
         /// the wedged app that makes an undo `.incomplete`.
         var resumeHasNoEffect = false
+        /// When set, the first N-1 `resume` calls are delivered but do not take,
+        /// and the N-th does. Models a resume that only lands on a later pass.
+        var resumeFailsUntil: Int?
 
         func runningProcesses(matching appNames: [String]) -> ProcessScan? {
             ProcessScan(targets: table.values.filter { appNames.contains($0.name) }
@@ -101,6 +104,10 @@ final class BackstopLidCloseTests: XCTestCase {
             // That is what makes an undo `.incomplete` and, in turn, what makes
             // the thermal step refuse its release.
             guard !resumeHasNoEffect else { return true }
+            if let limit = resumeFailsUntil {
+                let attempts = resumeCalls.filter { $0 == pid }.count
+                guard attempts >= limit else { return true }
+            }
             p.stopped = false
             table[pid] = p
             return true
@@ -137,7 +144,9 @@ final class BackstopLidCloseTests: XCTestCase {
                                                    pauseApps: true),
                          apps: [(pid: Int32, name: String, start: UInt64)] = [],
                          audioMuted: Bool = false,
-                         thermalGuardEnabled: Bool = false) -> Rig {
+                         thermalGuardEnabled: Bool = false,
+                         batteryCharge: Int = 60,
+                         onBattery: Bool = false) -> Rig {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("runclosed-backstop-lid-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -191,8 +200,9 @@ final class BackstopLidCloseTests: XCTestCase {
             // A healthy battery at 60 %: nothing the battery step wants to do,
             // so whatever happens here is the lid-close step's doing.
             batteryProvider: {
-                BatteryState(onBattery: false, chargePercent: 60, minutesRemaining: nil,
-                             isCharging: true, batteryPresent: true)
+                BatteryState(onBattery: onBattery, chargePercent: batteryCharge,
+                             minutesRemaining: nil,
+                             isCharging: !onBattery, batteryPresent: true)
             },
             sleeper: FakeSleeper(),
             lock: LidWriteLock(url: lockURL),
@@ -526,6 +536,43 @@ final class BackstopLidCloseTests: XCTestCase {
 
         XCTAssertFalse(rig.audio.writes.contains { $0.muted },
                        "a backstop run newly muted the output")
+    }
+
+    /// The BATTERY sleep path runs a second undo after `attemptSleep`, and it
+    /// must MERGE. "Keep the first" left the report saying a recovery was
+    /// unfinished after the second pass had finished it — the process the second
+    /// pass resumed was missing, so the minute could still exit as a failure
+    /// over a machine that was whole (gate finding, `Le résultat du second undo
+    /// est perdu`).
+    ///
+    /// Counter-proof: with `if report.lidClose == nil` the resumed pid below is
+    /// absent from the report.
+    func testTheBatterySleepPathMergesTheSecondUndo() {
+        // On BATTERY, nearly flat: the low-battery step releases and sleeps, so
+        // the post-sleep undo actually runs. (At 60 % on AC — the rig's default
+        // — there is no sleep and this branch is never reached, which is why my
+        // first version of this test failed.)
+        var rig = makeRig(apps: [(4711, "Slack", 1_700_000_000)],
+                          batteryCharge: 4,
+                          onBattery: true)
+        rig.journal.save(.init(
+            audio: [.init(deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)],
+            stopped: [.init(pid: 4711, startSeconds: 1_700_000_000, startMicroseconds: 0,
+                            bootID: "A", path: "/x", appName: "Slack")]))
+        rig.audio.device?.isMuted = true
+        rig.processes.table[4711]?.stopped = true
+        saveIndefiniteSession(rig)
+        // The pre-sleep undo cannot free the app; the post-sleep one can. That
+        // is the exact shape the merge exists for.
+        rig.processes.resumeFailsUntil = 2
+
+        let outcome = rig.service.run()
+        guard case .completed(let report) = outcome else {
+            return XCTFail("expected a completed run, got \(outcome)")
+        }
+
+        XCTAssertEqual(report.lidClose?.resumedPids, [4711],
+                       "the process the SECOND undo resumed is missing")
     }
 
     // MARK: — Reporting
