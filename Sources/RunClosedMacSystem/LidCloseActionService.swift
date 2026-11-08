@@ -534,20 +534,24 @@ public struct LidCloseActionService {
             // signal lands afterwards the app is frozen with nothing to recover
             // it (gate finding, `Deselecting an app discards recovery for a
             // pending SIGSTOP`).
-            if processes.isStopped(pid: entry.pid) == true {
-                processes.resume(pid: entry.pid)
-            } else {
-                // Cancel the pending stop, then re-read: only a POSITIVE
-                // "running" after the `SIGCONT` lets the entry go.
-                processes.resume(pid: entry.pid)
-                if processes.isStopped(pid: entry.pid) == false {
-                    resumedDropped.append(entry.pid)
-                } else {
-                    stillUnverified.append(entry)
-                    droppedUnproved = true
-                }
-                continue
+            // Always send `SIGCONT` first: it is a no-op on a running process
+            // and it CANCELS a pending stop. A readback that is unavailable must
+            // not skip the signal, or a de-selected app could never be released
+            // (gate finding, `Deselected apps are not resumed when stopped-state
+            // readback is unavailable`).
+            processes.resume(pid: entry.pid)
+            switch processes.isStopped(pid: entry.pid) {
+            case .some(false):
+                resumedDropped.append(entry.pid)
+            case .some(true):
+                stillUnverified.append(entry)
+                droppedUnproved = true
+            case .none:
+                // Unprovable: keep it listed rather than claiming it resumed.
+                stillUnverified.append(entry)
+                droppedUnproved = true
             }
+            continue
             if processes.isStopped(pid: entry.pid) == false {
                 resumedDropped.append(entry.pid)
             } else {
