@@ -1331,7 +1331,7 @@ public struct LidCloseActionService {
         // — 2. Sound.
         unmuteRecordedDevice(journal: &record, into: &outcome)
 
-        outcome.undo = finish(journal: &record, appsStuck: appsStuck)
+        outcome.undo = finish(journal: &record, appsStuck: appsStuck, into: &outcome)
         outcome.evaluation.journalBefore = record
     }
 
@@ -1693,7 +1693,8 @@ public struct LidCloseActionService {
     /// take. That is a retryable failure and an `.incomplete` undo, never
     /// `.restored` just because the SOUND came back.
     private func finish(journal record: inout LidCloseActionJournal.Record,
-                        appsStuck: Bool) -> UndoOutcome {
+                        appsStuck: Bool,
+                        into outcome: inout TickOutcome) -> UndoOutcome {
         if record.isEmpty && record.unverified.isEmpty && !appsStuck
             && record.unverifiedAudio.isEmpty {
             // The delete must be PROVED too. `clear()` is best effort, and a
@@ -1714,8 +1715,17 @@ public struct LidCloseActionService {
             return clear ? .restored : .incomplete
         }
         // A save that does not land leaves the PREVIOUS record on disk, so the
-        // undo did not reach a state anyone can rely on.
-        guard journal.save(record) else { return .incomplete }
+        // undo did not reach a state anyone can rely on — and the caller must be
+        // able to tell a BROKEN journal from an ordinary retryable process
+        // failure. Returning `.incomplete` alone collapsed the two, so
+        // `journalSaveFailed` stayed false and a caller could not distinguish
+        // "try again" from "the recorder itself is broken" (gate finding, `The
+        // undo path can fail to persist recovery state without reporting the
+        // journal failure to callers`).
+        guard journal.save(record) else {
+            outcome.journalSaveFailed = true
+            return .incomplete
+        }
         if appsStuck { return .incomplete }
         return record.isEmpty ? .unverifiedProcesses : .incomplete
     }

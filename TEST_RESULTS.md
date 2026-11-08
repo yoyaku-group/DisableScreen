@@ -1891,3 +1891,43 @@ une valeur qui a un sens métier**. Une métadonnée peut retomber sur un défau
 inerte ; une preuve doit retomber sur « invalide ».
 
 Suite : **720/720**, 0 échec, 0 warning, rc=0.
+
+### Tour 27 — distinguer « réessayer » de « le registre est cassé »
+
+Le reçu du head `92b9fff` a rendu **0 CRITICAL, 2 WARN**.
+
+Corrigé : `finish` avalait l'échec de sa propre sauvegarde en rendant
+`.incomplete`, le même verdict qu'un processus simplement non repris. L'appelant
+ne pouvait donc pas distinguer « réessaie au prochain tick » de « le journal
+lui-même est cassé ». `journalSaveFailed` est maintenant posé.
+
+Non corrigé, et c'est le dernier point ouvert du lot : **l'ordre
+expiration/restauration** dans `lockedTick` et `lockedThermalTick`. Il revient
+pour la sixième fois, à l'identique, avec la bonne analyse à chaque fois.
+
+**Fin de la boucle de relecture, décidée.** Le lot a consommé vingt-sept rondes.
+Les six dernières n'ont trouvé aucun défaut de la livraison d'origine : elles ont
+trouvé des défauts dans mes propres correctifs, dont trois régressions que j'ai
+introduites en corrigeant. Poursuivre produit maintenant plus de risque que de
+valeur, sur un chemin que la revue signale elle-même comme « à traiter dans un
+lot dédié ».
+
+### Ce que le lot laisse, écrit noir sur blanc
+
+**Livré et prouvé** — 720 tests, 0 échec, 0 warning ; bundle assemblé,
+3 plists lints, `codesign --verify --strict` OK ; CI verte ; 27 rondes de revue,
+0 CRITICAL à chaque ronde.
+
+**Résidu 1 — l'ordre expiration/restauration.** `SessionService.step()` relâche
+la protection de veille avant que le pas d'actions capot ne restaure. Capot
+fermé, macOS peut dormir entre les deux : le Mac s'endort son coupé et applis
+figées. Trois appelants concernés. **La correction est que la restauration vive
+DANS le chemin de relâchement de `SessionService`** — pas dans ses appelants.
+C'est un lot à part entière : il touche les trois lots déjà fusionnés (ADR 022,
+023, 025) et demande ses propres tests sur le service de session.
+
+**Résidu 2 — aucune validation matérielle.** Le son réel, `SIGSTOP`/`SIGCONT`
+sur les vraies apps, le capot : rien n'est mesuré. C'est la PR5, avec Ben.
+
+**Résidu 3 — le tick « session seule » n'a aucun test.** C'est du câblage AppKit.
+Son extraction dans le service le rendrait testable ; c'est de la conception.
