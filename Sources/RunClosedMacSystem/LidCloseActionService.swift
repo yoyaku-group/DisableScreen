@@ -589,6 +589,17 @@ public struct LidCloseActionService {
         guard let targets = processes.runningProcesses(matching: names) else {
             return .failure("could not enumerate processes to pause")
         }
+        // A SELECTED unverified entry whose stop has since LANDED is excluded
+        // from enumeration (the backend skips stopped processes), so it was
+        // never reported even though it is ours and frozen (gate finding,
+        // `Selected unverified stops disappear from subsequent outcome
+        // reporting`). Say so.
+        let selectedUnverified = record.unverified.filter { names.contains($0.appName) }
+        if !selectedUnverified.isEmpty {
+            outcome.shouldNotify = true
+            outcome.notice = outcome.notice ?? .appsLeftPaused
+            outcome.unverifiedPids = record.unverified.map { $0.pid }
+        }
         let known = Set(record.stopped.map { $0.pid })
         let pending = targets
             .map { $0.journalEntry(bootID: bootID) }

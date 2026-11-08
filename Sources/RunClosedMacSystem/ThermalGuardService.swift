@@ -272,14 +272,16 @@ public struct ThermalGuardService {
     /// broken — the one failure mode that makes an untouched machine look
     /// protected while it is not. `TickOutcome.latchSaveFailed` carries the same
     /// fact to the callers that can do something with it.
+    @discardableResult
     private func persistLatch(_ record: ThermalLatchStore.Record,
-                              into outcome: inout TickOutcome) {
-        guard !latchStore.save(record) else { return }
+                              into outcome: inout TickOutcome) -> Bool {
+        guard !latchStore.save(record) else { return true }
         outcome.latchSaveFailed = true
         FileHandle.standardError.write(Data(
             ("[RunClosed] thermal: latch could NOT be written to \(latchStore.url.path) "
              + "— the sustained-heat clock will restart every tick, so the "
              + "ten-minute release cannot fire until this is fixed\n").utf8))
+        return false
     }
 
     /// The ONE thermal release branch — shared by the app's guard tick and the
@@ -341,9 +343,25 @@ public struct ThermalGuardService {
             // writes prevent the thermal veto budget from advancing`). The
             // persisted counter is the cross-restart memory; this one is the
             // within-process floor.
+            // The counter must survive the RECREATION of this service on every
+            // tick (`live()` builds a new one), so it lives in the latch store
+            // and is advanced even when the SAVE fails — the in-memory copy is
+            // what bounds the refusals within this process, the file is what
+            // carries it across. Relying on an instance property meant the
+            // budget reset every tick and the overheating Mac was refused
+            // forever (gate finding, `Le compteur mémoire ne survit pas aux
+            // ticks réels`).
             record.lidCloseVetoes += 1
             vetoesThisProcess += 1
-            if max(record.lidCloseVetoes, vetoesThisProcess) <= Self.maximumLidCloseVetoes {
+            // A refusal is only honest if the count can be REMEMBERED. When the
+            // latch cannot be written the budget can never be exhausted — the
+            // service is rebuilt every tick and reloads the same stale count —
+            // so refusing again would keep an overheating Mac awake forever.
+            // In that case protection wins immediately (gate finding, `Le
+            // compteur mémoire ne survit pas aux ticks réels`).
+            let canRemember = persistLatch(record, into: &outcome)
+            if canRemember,
+               max(record.lidCloseVetoes, vetoesThisProcess) <= Self.maximumLidCloseVetoes {
                 outcome.mutation = .releaseRefused
                 outcome.mutationError = "the lid-close undo is incomplete; not releasing "
                     + "the flag so the Mac cannot sleep with effects still applied "

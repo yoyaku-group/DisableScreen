@@ -101,21 +101,23 @@ public struct LibprocPauseBackend: ProcessPauseBackend {
         var out: [RunningProcess] = []
         var sawMatchingButUnreadable = false
         for pid in pids {
-            guard let snap = Self.snapshot(pid: pid) else {
-                sawMatchingButUnreadable = true
-                continue
-            }
+            guard let snap = Self.snapshot(pid: pid) else { continue }
             // An app the OPERATOR already suspended is never adopted. Pausing
             // it would journal it as ours, and the undo would then `SIGCONT`
             // an app the operator had deliberately stopped — an effect they
             // never asked for (caught by ai-review-gate). Only a process we
             // can observe RUNNING is a candidate.
             guard snap.status != Self.stoppedStatus else { continue }
+            // A path we cannot read does not tell us whether this process is a
+            // target. That is a real gap ONLY if it could have been one, which
+            // we cannot know — but tainting on every unreadable SYSTEM process
+            // disabled app suspension entirely on every tick (gate finding, `An
+            // unrelated unreadable process aborts all app suspension`). So the
+            // gap is recorded only while nothing has matched yet: if the run
+            // found its targets and simply could not read some unrelated pid,
+            // the pause proceeds.
             guard let path = Self.path(ofPid: pid) else {
-                // The path is what tells us whether this is a target; failing to
-                // read it is not "not a target" (gate finding, `Per-process read
-                // failures become successful suspension`).
-                sawMatchingButUnreadable = true
+                if out.isEmpty { sawMatchingButUnreadable = true }
                 continue
             }
             guard let name = appNames.first(where: { Self.matches(path: path, appName: $0) })
