@@ -317,10 +317,10 @@ public struct LidCloseActionJournal: Sendable {
                 audio = loose.compactMap { $0.state }
                 droppedAudioEntries = loose.filter { $0.state == nil }.count
                 // A recoverable entry that lost its prior state is damage too.
-                droppedAudioEntries += audio.filter { $0.missingPriorState }.count
+                droppedAudioEntries = Self.saturatingAdd(droppedAudioEntries, audio.filter { $0.missingPriorState }.count)
             } else if let one = try? c.decode(AudioState.self, forKey: .audio) {
                 audio = [one]
-                if one.missingPriorState { droppedAudioEntries += 1 }
+                if one.missingPriorState { droppedAudioEntries = Self.saturatingAdd(droppedAudioEntries, 1) }
             } else {
                 // NEITHER shape decoded: the field is PRESENT but malformed as a
                 // whole (e.g. `"audio": {"deviceUID": 17}`). That is a lost
@@ -328,7 +328,7 @@ public struct LidCloseActionJournal: Sendable {
                 // honest (gate finding, `Malformed audio fields bypass
                 // corruption reporting`).
                 audio = []
-                if (c.contains(.audio)) == true { droppedAudioEntries += 1 }
+                if (c.contains(.audio)) == true { droppedAudioEntries = Self.saturatingAdd(droppedAudioEntries, 1) }
             }
             // The obligation list is decoded ELEMENT-WISE too: one malformed
             // record must not discard the valid ones, which is a lost recovery
@@ -337,14 +337,14 @@ public struct LidCloseActionJournal: Sendable {
             // still supported and is NOT damage.
             if let loose = try? c.decode([LooseAudioState].self, forKey: .unverifiedAudio) {
                 unverifiedAudio = loose.compactMap { $0.state }
-                droppedAudioEntries += loose.filter { $0.state == nil }.count
-                droppedAudioEntries += unverifiedAudio.filter { $0.missingPriorState }.count
+                droppedAudioEntries = Self.saturatingAdd(droppedAudioEntries, loose.filter { $0.state == nil }.count)
+                droppedAudioEntries = Self.saturatingAdd(droppedAudioEntries, unverifiedAudio.filter { $0.missingPriorState }.count)
             } else if let one = try? c.decode(AudioState.self, forKey: .unverifiedAudio) {
                 unverifiedAudio = [one]
-                if one.missingPriorState { droppedAudioEntries += 1 }
+                if one.missingPriorState { droppedAudioEntries = Self.saturatingAdd(droppedAudioEntries, 1) }
             } else {
                 unverifiedAudio = []
-                if (c.contains(.unverifiedAudio)) == true { droppedAudioEntries += 1 }
+                if (c.contains(.unverifiedAudio)) == true { droppedAudioEntries = Self.saturatingAdd(droppedAudioEntries, 1) }
             }
             // Damage already recorded on a PREVIOUS load survives: a save
             // writes only the kept entries, so without this the next read would
@@ -383,19 +383,19 @@ public struct LidCloseActionJournal: Sendable {
             // records`).
             if let loose = try? c.decode([LooseStoppedProcess].self, forKey: .stopped) {
                 stopped = loose.compactMap { $0.value }
-                droppedProcessEntries += loose.filter { $0.value == nil }.count
+                droppedProcessEntries = Self.saturatingAdd(droppedProcessEntries, loose.filter { $0.value == nil }.count)
             } else {
                 // Present but malformed as a WHOLE: that is a lost obligation,
                 // not an empty list (the same rule the audio field follows).
                 stopped = []
-                if (c.contains(.stopped)) == true { droppedProcessEntries += 1 }
+                if (c.contains(.stopped)) == true { droppedProcessEntries = Self.saturatingAdd(droppedProcessEntries, 1) }
             }
             if let loose = try? c.decode([LooseStoppedProcess].self, forKey: .unverified) {
                 unverified = loose.compactMap { $0.value }
-                droppedProcessEntries += loose.filter { $0.value == nil }.count
+                droppedProcessEntries = Self.saturatingAdd(droppedProcessEntries, loose.filter { $0.value == nil }.count)
             } else {
                 unverified = []
-                if (c.contains(.unverified)) == true { droppedProcessEntries += 1 }
+                if (c.contains(.unverified)) == true { droppedProcessEntries = Self.saturatingAdd(droppedProcessEntries, 1) }
             }
         }
     }

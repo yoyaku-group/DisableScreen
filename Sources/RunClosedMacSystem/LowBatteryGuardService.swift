@@ -694,7 +694,18 @@ public struct LowBatteryGuardService {
             (thermal.mutation == .releaseRefused || thermal.mutation == .releaseFailed)
                 && (thermal.lidCloseUndo != nil || thermal.lidCloseJournalCorrupt)
         } ?? false
-        if outcome.sleepAttempted || thermalVetoed {
+        // A PROTECTIVE BATTERY RELEASE also undid the effects before it tried to
+        // write, so re-applying here reverses its restore. `sleepAttempted`
+        // covers the usual case, but NOT the one where the sleep retry budget is
+        // already spent: `attemptSleepOnceAfterFailure` returns without sleeping,
+        // `sleepAttempted` stays false, and this line then muted the audio and
+        // suspended the apps immediately after they had been restored (gate
+        // finding, `Protective undo suppression misses an already-consumed sleep
+        // attempt`). Any tick that performed a protective release — verified OR
+        // failed — is undo-only, whether or not it managed to sleep.
+        let batteryRestored = outcome.mutation == .released
+            || outcome.mutation == .releaseFailed
+        if outcome.sleepAttempted || thermalVetoed || batteryRestored {
             // A TRUNCATED journal means `undoAll` read an empty record and could
             // not see the obligations it was meant to recover. This branch
             // returns without running `runLidCloseStep`, so the corruption check

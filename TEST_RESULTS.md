@@ -1588,6 +1588,18 @@ Le tour 12 a rendu **3 WARN, 0 CRITICAL**, tous réels.
 
 Suite : **720/720**, 0 échec, 0 warning, rc=0.
 
+### Tour 13 — trois WARN, dont deux correctifs du tour 12 incomplets
+
+Le tour 13 a rendu **3 WARN, 0 CRITICAL**, tous réels.
+
+| Défaut | Correction | Contre-épreuve |
+|---|---|---|
+| Le tour 12 bornait `saturatingAdd` sur l'addition du DÉCODAGE, mais les incréments de la boucle utilisaient encore `+=`. Un `Int.max` persisté atteignait donc quand même un `+=` et **trappait**. | Les dix sites d'accumulation passent par `saturatingAdd`. Zéro `+=` restant sur ces compteurs. | Le test du tour 12 couvre le décodage ; le balayage mécanique `grep` prouve qu'il ne reste aucun site nu. |
+| `unmuteOne` incrémentait `unreadablePasses` sans vérifier `journal.save`. Un compteur qui ne s'écrit pas n'avance jamais : le seuil « disparu après N passes » n'est jamais atteint, et un appareil vraiment retiré est réessayé indéfiniment. | L'échec est reporté (`journalSaveFailed`), même sans changement machine — c'est le registre lui-même qui est cassé. | Couvert. |
+| La suppression de réapplication ne regardait que `sleepAttempted` et le veto thermique. Quand le budget de réessai de sommeil est épuisé, `attemptSleepOnceAfterFailure` sort **sans** sommeil : `sleepAttempted` reste faux, et le pas ordinaire re-mutait et re-figeait juste après le relâchement protecteur. | Tout tick ayant fait un relâchement protecteur — vérifié OU échoué — est « undo only » (`batteryRestored`). | Couvert ; le test existant `testABatteryReleaseDoesNotReapply` reste vert. |
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0 (ces trois correctifs n'ajoutent aucun test : ils durcissent des chemins déjà couverts).
+
 ### Le coupe-circuit, éprouvé et non affirmé
 
 Le premier message de commit annonçait un rollback sans l'avoir vérifié. Le

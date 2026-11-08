@@ -1526,7 +1526,14 @@ public struct LidCloseActionService {
                 return .done
             }
             replaceAudio(prior, in: &record)
-            journal.save(record)
+            // A COUNT that does not land never advances: the entry keeps its
+            // persisted `unreadablePasses`, so the "gone after N passes"
+            // threshold is never reached and a device that really is gone is
+            // retried forever. Reported for the same reason every other save
+            // failure here is (gate finding, `Failed audio recovery journal
+            // writes are not reported`), and reported even when nothing moved
+            // on the machine — the recorder itself is what broke.
+            if !journal.save(record) { outcome.journalSaveFailed = true }
             writeAudit(outcome: "partial", reason: "undo", evaluation: outcome.evaluation,
                        audio: "readUnavailable",
                        audioError: "the device could not be read; the restore is unconfirmed",
