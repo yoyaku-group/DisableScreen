@@ -422,11 +422,11 @@ public struct LidCloseActionService {
             outcome.audioRestoreFailed = true
         }
 
-        if decision.muteAudio, let stranded = firstReturnedStrandedDevice(&record) {
+        if decision.muteAudio, let stranded = firstReturnedStrandedDevice(&record, into: &outcome) {
             if !record.audio.contains(where: { $0.deviceUID == stranded.deviceUID }) {
                 record.audio.append(stranded)
             }
-            journal.save(record)
+            if !journal.save(record) { outcome.journalSaveFailed = true }
         }
 
         // — 1. Sound. The CURRENT default output is muted whenever it is not
@@ -596,9 +596,14 @@ public struct LidCloseActionService {
         case .some(true):
             return .success(.muted)
         case .some(false):
-            // Proved still audible: nothing was written, so the entry goes.
+            // Proved still audible: nothing was written, so the entry goes. A
+            // failure to remove it must not be swallowed — the journal would
+            // keep an entry for a device we never muted, and a later undo would
+            // mute it instead of restoring it.
             removeAudio(snapshot.uid, in: &record)
-            journal.save(record)
+            guard journal.save(record) else {
+                return .journalFailed(stoppedSoFar: [])
+            }
             return .failure("readback did not confirm the mute")
         case .none:
             // Unreadable is not proof of absence: keep the entry. The write
@@ -705,7 +710,7 @@ public struct LidCloseActionService {
             record.stopped.removeAll { dropped.contains($0.pid) }
             outcome.resumedPids = resumedDropped
             outcome.changed = true
-            journal.save(record)
+            if !journal.save(record) { outcome.journalSaveFailed = true }
         }
 
         // A FAILED enumeration is not "no matching apps": collapse them and the
@@ -823,7 +828,7 @@ public struct LidCloseActionService {
             guard identityProved(entry) else {
                 failed.append(entry.pid)
                 record.stopped.removeAll { $0.pid == entry.pid }
-                journal.save(record)
+                if !journal.save(record) { outcome.journalSaveFailed = true }
                 continue
             }
             // A REJECTED signal (EPERM on another user's process, a process
@@ -834,7 +839,7 @@ public struct LidCloseActionService {
             guard processes.stop(pid: entry.pid) else {
                 failed.append(entry.pid)
                 record.stopped.removeAll { $0.pid == entry.pid }
-                journal.save(record)
+                if !journal.save(record) { outcome.journalSaveFailed = true }
                 continue
             }
             // `kill(2)` returning 0 means "delivered", not "stopped", and the
@@ -936,7 +941,8 @@ public struct LidCloseActionService {
     /// The first stranded device that has COME BACK still muted, removed from
     /// the list. `nil` when none has.
     private mutating func firstReturnedStrandedDevice(
-        _ record: inout LidCloseActionJournal.Record
+        _ record: inout LidCloseActionJournal.Record,
+        into outcome: inout TickOutcome
     ) -> LidCloseActionJournal.AudioState? {
         for (index, stranded) in record.unverifiedAudio.enumerated() {
             guard let back = audio.readOutput(uid: stranded.deviceUID) else { continue }
@@ -947,7 +953,7 @@ public struct LidCloseActionService {
                 // finding, `Already-restored stranded devices never leave
                 // recovery`).
                 record.unverifiedAudio.remove(at: index)
-                journal.save(record)
+                if !journal.save(record) { outcome.journalSaveFailed = true }
                 return nil
             }
             record.unverifiedAudio.remove(at: index)
@@ -1048,7 +1054,7 @@ public struct LidCloseActionService {
         // switch being turned off is exactly when the operator expects the
         // sound back, and the apply path only re-adopts while the switch is on
         // (gate finding, `Disabling audio restoration skips stranded devices`).
-        if !decision.muteAudio, let stranded = firstReturnedStrandedDevice(&record) {
+        if !decision.muteAudio, let stranded = firstReturnedStrandedDevice(&record, into: &outcome) {
             if !record.audio.contains(where: { $0.deviceUID == stranded.deviceUID }) {
                 record.audio.append(stranded)
             }
@@ -1474,7 +1480,7 @@ public struct LidCloseActionService {
         // here, not only in `apply`. A session can end (or the master switch be
         // turned off) while the device is unplugged, and its return must still
         // be restorable — otherwise it stays muted indefinitely.
-        if let stranded = firstReturnedStrandedDevice(&record) {
+        if let stranded = firstReturnedStrandedDevice(&record, into: &outcome) {
             if !record.audio.contains(where: { $0.deviceUID == stranded.deviceUID }) {
                 record.audio.append(stranded)
             }
@@ -1562,7 +1568,7 @@ public struct LidCloseActionService {
         if readable != nil, prior.unreadablePasses != 0 {
             prior.unreadablePasses = 0
             replaceAudio(prior, in: &record)
-            journal.save(record)
+            if !journal.save(record) { outcome.journalSaveFailed = true }
         }
 
         guard let current = readable else {
@@ -1613,7 +1619,7 @@ public struct LidCloseActionService {
             // Silent before we arrived: leave it silent.
             removeAudio(prior.deviceUID, in: &record)
             outcome.changed = true
-            journal.save(record)
+            if !journal.save(record) { outcome.journalSaveFailed = true }
             writeAudit(outcome: "undone", reason: "undo", evaluation: outcome.evaluation,
                        audio: "leftMuted", audioError: nil, audioDeviceUID: prior.deviceUID,
                        stopped: [], failed: [], error: nil)
@@ -1625,7 +1631,7 @@ public struct LidCloseActionService {
         if current.isMuted == false {
             removeAudio(prior.deviceUID, in: &record)
             outcome.changed = true
-            journal.save(record)
+            if !journal.save(record) { outcome.journalSaveFailed = true }
             writeAudit(outcome: "undone", reason: "undo", evaluation: outcome.evaluation,
                        audio: "alreadyAudible", audioError: nil,
                        audioDeviceUID: prior.deviceUID, stopped: [], failed: [], error: nil)

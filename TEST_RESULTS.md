@@ -1792,3 +1792,29 @@ Non corrigé : la marge d'une seconde du tick session-seule. Même cause racine 
 les trois autres WARN d'ordre d'expiration, même lot propre requis.
 
 Suite : **720/720**, 0 échec, 0 warning, rc=0.
+
+### Tour 23 — le balayage complet des écritures de journal
+
+Le tour 22 a trouvé un site `journal.save` non vérifié. Au lieu d'en corriger un
+et d'attendre la ronde suivante, j'ai listé les **dix-neuf** sites du fichier et
+traité les **neuf** qui ne l'étaient pas :
+
+| Site | Pourquoi son silence coûte |
+|---|---|
+| `muteDefaultOutput`, lecture « toujours audible » | l'entrée reste pour un appareil qu'on n'a jamais coupé ; une annulation ultérieure le **couperait** au lieu de le rétablir |
+| `stopMatchingApps`, identité non prouvée | propriété périmée sur disque pour un processus jamais signalé |
+| `stopMatchingApps`, signal rejeté | même chose : une obligation pour un signal jamais livré |
+| `firstReturnedStrandedDevice` | l'obligation retirée en mémoire reste sur disque ; une passe ultérieure peut ré-adopter et **réactiver un appareil que l'opérateur avait coupé** |
+| `apply`, ré-adoption d'un appareil revenu | idem |
+| désélection, processus repris | propriété périmée sur un processus déjà rendu à l'opérateur |
+| `unmuteOne`, remise à zéro du compteur | le compteur ne redescend jamais, donc le seuil « disparu » se déclenche à tort |
+| `unmuteOne`, silencieux avant nous | entrée conservée pour un appareil qu'on n'a jamais touché |
+| `unmuteOne`, démutage vérifié | entrée conservée alors que le son est revenu : l'annulation suivante le recoupe |
+
+`grep` final : **zéro** `journal.save(record)` non vérifié dans le fichier.
+
+Deux sites sans `outcome` en portée ont dû changer de signature
+(`firstReturnedStrandedDevice` prend désormais `into:`) : c'est le bon sens de la
+dépendance — l'appelant sait quoi faire de l'échec, la fonction ne le devine pas.
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.
