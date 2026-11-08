@@ -128,6 +128,9 @@ public struct LidCloseActionService {
         /// Some apps are still paused because their identity changed, or the
         /// `SIGCONT` could not be confirmed. The operator has to look.
         case appsLeftPaused
+        /// An output device we muted is unreachable, so the restore could not
+        /// be proved. The operator has to check their sound.
+        case audioLeftMuted
     }
 
     // MARK: — Evaluate
@@ -227,7 +230,8 @@ public struct LidCloseActionService {
         // outstanding obligation, and returning `.nothingToDo` on a record that
         // holds only those silenced the operator notice forever (gate finding,
         // `Persisted unverified processes stop raising attention`).
-        guard !record.isEmpty || !record.unverified.isEmpty else {
+        guard !record.isEmpty || !record.unverified.isEmpty
+                || record.unverifiedAudio != nil else {
             outcome.undo = .nothingToDo
             return outcome
         }
@@ -289,8 +293,13 @@ public struct LidCloseActionService {
     /// process we never paused.
     private mutating func apply(evaluation: Evaluation, into outcome: inout TickOutcome) {
         let decision = evaluation.decision
+        // Neither effect is switched on. That is NOT a shortcut past the undo:
+        // with both switches off there may still be something to reverse, and
+        // the per-effect block below is the only thing that can do it.
         guard decision.muteAudio || decision.pauseApps else {
-            outcome.apply = .nothingRequested
+            undoEffectsThatAreNowOff(evaluation: evaluation, into: &outcome)
+            // `.nothingRequested` only when nothing was actually reversed.
+            if outcome.apply == nil { outcome.apply = .nothingRequested }
             return
         }
 
@@ -298,10 +307,27 @@ public struct LidCloseActionService {
         record.sessionID = currentSessionIdentity
         record.startedAt = ISO8601DateFormatter().string(from: wallClock())
 
+        // Effects whose own switch is now off are reversed first, on the
+        // record we just loaded, so the rest of `apply` works on a clean slate.
+        undoEffectsThatAreNowOff(evaluation: evaluation, into: &outcome)
+        record = outcome.evaluation.journalBefore
+
         var audioEffect = AudioEffect.skipped
         var audioError: String?
         var appsEffect = AppsEffect.skipped
         var appError: String?
+
+        // A device that was concluded gone and has come BACK still holding its
+        // mute state: re-adopt the obligation instead of forgetting it, so the
+        // undo can restore it (gate finding, `Temporary device absence
+        // permanently discards restoration`).
+        if decision.muteAudio, record.audio == nil,
+           let stranded = record.unverifiedAudio,
+           let back = audio.readOutput(uid: stranded.deviceUID), back.isMuted != false {
+            record.audio = stranded
+            record.unverifiedAudio = nil
+            journal.save(record)
+        }
 
         // — 1. Sound.
         if decision.muteAudio, record.audio == nil {
@@ -518,6 +544,44 @@ public struct LidCloseActionService {
     /// sub-100 ms window a `SIGSTOP` needs); tests replace it with a no-op.
     public var stopConfirmDelay: @Sendable () -> Void = { usleep(20_000) }
 
+    /// Undo the effects whose OWN switch is now off.
+    ///
+    /// Each switch owns its effect, so each switch must be able to reverse it:
+    /// turning off "Mute the sound" (or "Pause noisy apps") while the session
+    /// continues used to leave that effect in place until the master switch or
+    /// the conditions changed (gate finding, `Disabling an individual effect
+    /// does not restore it`).
+    ///
+    /// Shared by both entries into `apply` — the normal one and the
+    /// "both switches off" one — so neither can skip it.
+    private mutating func undoEffectsThatAreNowOff(
+        evaluation: Evaluation, into outcome: inout TickOutcome
+    ) {
+        let decision = evaluation.decision
+        var record = outcome.evaluation.journalBefore
+
+        if !decision.muteAudio, record.audio != nil {
+            var scratch = TickOutcome(evaluation: evaluation)
+            unmuteRecordedDevice(journal: &record, into: &scratch)
+            if scratch.audioDeviceGone { outcome.audioDeviceGone = true }
+            if scratch.changed { outcome.changed = true }
+            outcome.evaluation.journalBefore = record
+        }
+        if !decision.pauseApps, !record.stopped.isEmpty {
+            var scratch = TickOutcome(evaluation: evaluation)
+            resumeStoppedProcesses(journal: &record, into: &scratch)
+            if scratch.changed { outcome.changed = true }
+            if scratch.shouldNotify {
+                outcome.shouldNotify = true
+                outcome.notice = scratch.notice
+                outcome.unverifiedPids = scratch.unverifiedPids
+            }
+            outcome.evaluation.journalBefore = record
+        }
+        // Any reversal is an effect, not "nothing requested".
+        if outcome.changed { outcome.apply = outcome.apply ?? .applied }
+    }
+
     private enum AudioEffect: String, Sendable {
         case muted
         case alreadyMuted
@@ -563,7 +627,8 @@ public struct LidCloseActionService {
         // `unverified` entries are OBLIGATIONS, not live effects: a record
         // holding only those must still reach the notice below rather than
         // reading as "nothing of ours".
-        guard !record.isEmpty || !record.unverified.isEmpty else {
+        guard !record.isEmpty || !record.unverified.isEmpty
+                || record.unverifiedAudio != nil else {
             // Nothing of ours is applied. Not an error (idempotence): a lid
             // closed twice, or an undo with no prior action, is a no-op.
             outcome.undo = .nothingToDo
@@ -604,10 +669,10 @@ public struct LidCloseActionService {
         // remained (gate finding, `Persisted unverified processes stop raising
         // attention`).
         guard !record.stopped.isEmpty else {
-            if !record.unverified.isEmpty {
+            if !record.unverified.isEmpty || record.unverifiedAudio != nil {
                 outcome.unverifiedPids = record.unverified.map { $0.pid }
                 outcome.shouldNotify = true
-                outcome.notice = .appsLeftPaused
+                outcome.notice = record.unverified.isEmpty ? .audioLeftMuted : .appsLeftPaused
             }
             return
         }
@@ -688,12 +753,24 @@ public struct LidCloseActionService {
             var escalated = prior
             escalated.unreadablePasses += 1
             if escalated.unreadablePasses >= Self.unreadablePassesBeforeGone {
+                // Concluding "gone" DROPS the obligation, and a device can come
+                // back: headphones muted here, unplugged for three hours and
+                // plugged in again still holding their mute state would find no
+                // record and stay silent (gate finding, `Temporary device
+                // absence permanently discards restoration`).
+                //
+                // So the obligation moves to `unverified` instead of vanishing.
+                // It stops driving the undo (the device is not reachable, so
+                // there is nothing to do) but it SURVIVES: it is reported to the
+                // operator, and if the same UID reappears still muted the next
+                // apply re-adopts it rather than forgetting it.
                 record.audio = nil
+                record.unverifiedAudio = escalated
                 journal.save(record)
                 outcome.audioDeviceGone = true
                 writeAudit(outcome: "deviceGone", reason: "undo",
                            evaluation: outcome.evaluation, audio: "gone",
-                           audioError: "unreadable on \(escalated.unreadablePasses) separate passes",
+                           audioError: "unreadable on \(escalated.unreadablePasses) separate passes; kept as unverified",
                            audioDeviceUID: prior.deviceUID, stopped: [], failed: [], error: nil)
                 return
             }
@@ -756,7 +833,8 @@ public struct LidCloseActionService {
     /// `.restored` just because the SOUND came back.
     private func finish(journal record: inout LidCloseActionJournal.Record,
                         appsStuck: Bool) -> UndoOutcome {
-        if record.isEmpty && record.unverified.isEmpty && !appsStuck {
+        if record.isEmpty && record.unverified.isEmpty && !appsStuck
+            && record.unverifiedAudio == nil {
             // The delete must be PROVED too. `clear()` is best effort, and a
             // silent failure here leaves stale ownership on disk that a later
             // undo could act on — reversing something the operator did

@@ -1409,6 +1409,58 @@ matérielle (PR5) existe pour couvrir.
 Suite après correctifs : **663/663**, 0 warning, rc=0. Bundle assemblé, 3 plists
 lints OK, `codesign --verify --strict` OK.
 
+### Tours 2 et 3 de `ai-review-gate` — 8 WARN de plus, tous corrigés
+
+Le tour 2 a rendu 3 WARN, le tour 3 5 WARN, toujours **0 CRITICAL**. Tous réels,
+tous sur le chemin de récupération ou de mesure.
+
+**Tour 2**
+
+| Défaut | Correction | Contre-épreuve |
+|---|---|---|
+| Le journal groupé donnait la propriété de reprise AVANT le signal : un crash sur le processus 2/5 laissait 3,4,5 enregistrés comme nôtres. | Une écriture de journal PAR processus, juste avant son propre signal. | `journalAtCrash` lit `[1,2]` au lieu de `[1]` — le test capture le journal AU POINT DE CRASH (ma première version ne regardait que l'état final, que la version boguée atteint aussi). |
+| Une lecture immédiate unique jetait un arrêt en vol : `SIGSTOP` est asynchrone, le processus doit être ordonnancé pour atteindre `SSTOP`. | Confirmation relue avec réessai (5 lectures, 20 ms ; le délai est injectable donc aucun test ne dort). | Sans le réessai, `apply` lit `failed` et la liste est vide. |
+| Une lecture audio illisible traitée comme appareil RETIRÉ : entrée effacée, `deviceGone` annoncé, appareil muet sans rien pour réessayer. | Une seconde lecture avant de conclure à la disparition. | `deviceGone=true` et le son reste coupé. |
+
+**Tour 3**
+
+| Défaut | Correction | Contre-épreuve |
+|---|---|---|
+| `isMuted` était DÉRIVÉ de `canMute` : un `muted=true` lu avec succès était jeté dès que la propriété cessait d'être inscriptible, et une lecture en échec rendait `isMuted:false` — l'annulation voyait « audible » sur un appareil muet et effaçait le journal. | `isMuted` devient `Bool?` : lisible → ce qui a été lu, quelle que soit la capacité d'écriture ; illisible → `nil`, et `nil` n'est jamais une preuve. | Un drapeau illisible lit `.incomplete` au lieu d'une restauration vérifiée. |
+| Réutilisation de PID entre l'énumération et le signal : `SIGSTOP` sur le processus de remplacement, journal avec l'identité d'origine, reprise refusée → processus étranger suspendu pour toujours. | Identité re-prouvée immédiatement AVANT le signal. | `SIGSTOP` envoyé après recyclage, propriété enregistrée pour un processus jamais signalé. |
+| Deux lectures illisibles dans la MÊME passe effaçaient l'obligation. | Compteur `unreadablePasses` ; « disparu » n'est conclu qu'après 360 passes séparées (trois heures à 30 s). | Deux lectures instables effacent l'obligation. |
+| Une énumération CoreGraphics EN ÉCHEC était classée panneau inactif (`result[0]` ignoré) — un verdict définitif tiré d'une requête cassée. | Le `CGError` est vérifié et rend `unavailable`, donc `INCONCLUSIVE`. | Table de vérité des trois jetons. |
+
+Suite après ces huit correctifs : **671/671**, 0 warning, rc=0.
+
+### La leçon de ce lot
+
+Trois tours de relecture ont trouvé **16 WARN** sur un code dont la suite de
+tests était verte et dont j'avais relu le chemin d'annulation moi-même. Les
+défauts les plus graves étaient tous dans la même famille : **confondre « je
+n'ai pas pu observer » avec « je n'ai rien fait »**. Un `nil` de relecture, un
+`kill` accepté, un `CGError` non vérifié — chaque fois la même erreur de
+raisonnement, à trois endroits différents. C'est exactement ce que le principe
+« prouver qu'on peut le remettre » interdit, et c'est ce que la relecture a
+attrapé et pas moi.
+
+### Tour 4 — 4 WARN, dont deux vrais défauts de comportement
+
+| Défaut | Correction | Contre-épreuve |
+|---|---|---|
+| Couper UN SEUL interrupteur (« Couper le son ») ne restaurait rien : la passe d'application sautait simplement l'effet désactivé, donc le Mac restait muet jusqu'à ce que le master ou les conditions changent. | `undoEffectsThatAreNowOff`, partagé par les DEUX entrées de `apply` (la normale et celle où les deux interrupteurs sont coupés), inverse l'effet dont l'interrupteur vient de passer à off. Le `guard` d'entrée ne court-circuite plus l'annulation. | `testTurningOffTheMuteSwitchRestoresTheSound`, `testTurningOffThePauseSwitchResumesTheApps` — le son reste coupé et l'appli figée sans le correctif. |
+| Un appareil conclu « disparu » après 360 passes était OUBLIÉ : des écouteurs muets par le service, débranchés trois heures puis rebranchés en gardant leur muet, ne trouvaient plus aucune entrée. | L'obligation passe dans `unverifiedAudio` au lieu de disparaître : elle cesse de piloter l'annulation (rien à atteindre) mais survit, reste signalée à l'opérateur (`Notice.audioLeftMuted`), et une passe d'application qui revoit le même UID encore muet la RÉ-ADOPTE. | `testGenuinelyAbsentDeviceIsConcludedGoneAfterEscalation` vérifie le déplacement, `testReturningDeviceIsReAdopted` vérifie la reprise. |
+
+Les deux autres WARN du tour 4 sont des variantes du même raisonnement déjà
+corrigé (`nil` de lecture ≠ absence ; attente bornée ≠ preuve qu'un signal ne
+prendra jamais), consignées ici comme résidu assumé : la confirmation d'arrêt
+est bornée à 5 lectures, et un `SIGSTOP` qui prendrait au-delà de ce budget
+resterait enregistré comme « à vérifier » plutôt que repris à l'aveugle — le
+côté sûr, déjà testé.
+
+Suite après ce tour : **675/675**, 0 warning, rc=0. Bundle assemblé, plists
+lints, `codesign --verify --strict` OK.
+
 ### Le coupe-circuit, éprouvé et non affirmé
 
 Le premier message de commit annonçait un rollback sans l'avoir vérifié. Le

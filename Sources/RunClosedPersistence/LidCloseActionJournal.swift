@@ -147,23 +147,37 @@ public struct LidCloseActionJournal: Sendable {
         /// This is a REPORT, written by the undo; it is not a claim of
         /// ownership, so it never itself authorises a `SIGCONT`.
         public var unverified: [StoppedProcess]
+        /// An audio device this service muted that became unreachable and was
+        /// concluded gone.
+        ///
+        /// Kept rather than discarded because a device can RETURN: headphones
+        /// unplugged and plugged back in still hold their mute state. Moving
+        /// the obligation here stops it driving the undo (nothing to reach) while
+        /// keeping it visible to the operator and re-adoptable by a later apply
+        /// (gate finding, `Temporary device absence permanently discards
+        /// restoration`).
+        public var unverifiedAudio: AudioState?
 
         public init(schemaVersion: Int = kLidCloseActionSchemaVersion,
                     sessionID: UUID? = nil,
                     startedAt: String? = nil,
                     audio: AudioState? = nil,
                     stopped: [StoppedProcess] = [],
-                    unverified: [StoppedProcess] = []) {
+                    unverified: [StoppedProcess] = [],
+                    unverifiedAudio: AudioState? = nil) {
             self.schemaVersion = schemaVersion
             self.sessionID = sessionID
             self.startedAt = startedAt
             self.audio = audio
             self.stopped = stopped
             self.unverified = unverified
+            self.unverifiedAudio = unverifiedAudio
         }
 
-        /// Nothing of ours is outstanding. The ONE predicate the policy
-        /// consumes as `currentlyApplied`.
+        /// Nothing of ours is OUTSTANDING as a live effect. The predicate the
+        /// policy consumes as `currentlyApplied` also counts the obligations
+        /// (`unverified`, `unverifiedAudio`), because an operator still waiting
+        /// on an answer is not "nothing to report".
         public var isEmpty: Bool { audio == nil && stopped.isEmpty }
 
         /// The record a fresh apply starts from. `unverified` is carried over
@@ -178,7 +192,8 @@ public struct LidCloseActionJournal: Sendable {
         /// Tolerant decoding: a key added by a later version must not make an
         /// existing journal read as empty, which would lose the undo.
         private enum CodingKeys: String, CodingKey {
-            case schemaVersion, sessionID, startedAt, audio, stopped, unverified
+            case schemaVersion, sessionID, startedAt, audio, stopped, unverified,
+                 unverifiedAudio
         }
 
         public init(from decoder: Decoder) throws {
@@ -190,6 +205,7 @@ public struct LidCloseActionJournal: Sendable {
             audio = try c.decodeIfPresent(AudioState.self, forKey: .audio)
             stopped = try c.decodeIfPresent([StoppedProcess].self, forKey: .stopped) ?? []
             unverified = try c.decodeIfPresent([StoppedProcess].self, forKey: .unverified) ?? []
+            unverifiedAudio = try c.decodeIfPresent(AudioState.self, forKey: .unverifiedAudio)
         }
     }
 

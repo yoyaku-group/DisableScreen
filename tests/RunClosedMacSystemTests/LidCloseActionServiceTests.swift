@@ -838,8 +838,34 @@ final class LidCloseActionServiceTests: XCTestCase {
         }
         XCTAssertTrue(concluded?.audioDeviceGone ?? false,
                       "a device unreadable for \(LidCloseActionService.unreadablePassesBeforeGone) passes was never concluded gone")
-        XCTAssertEqual(concluded?.undo, .restored, "a vanished device is not an error")
-        XCTAssertTrue(rig.journal.load().isEmpty)
+        // Concluded gone, but NOT forgotten: the obligation moves to
+        // `unverifiedAudio`, so a device that returns still holding its mute
+        // state can be restored. That makes the undo `.unverifiedProcesses`
+        // (an outstanding obligation), not `.restored`.
+        XCTAssertEqual(concluded?.undo, .unverifiedProcesses,
+                       "a concluded-gone device must stay an outstanding obligation")
+        let rec = rig.journal.load()
+        XCTAssertNil(rec.audio)
+        XCTAssertEqual(rec.unverifiedAudio?.deviceUID, "BuiltInSpeakerDevice")
+        XCTAssertTrue(rec.isEmpty, "no live effect remains")
+    }
+
+    /// A device concluded gone and then PLUGGED BACK IN still muted is
+    /// re-adopted rather than forgotten (gate finding, `Temporary device
+    /// absence permanently discards restoration`).
+    func testReturningDeviceIsReAdopted() {
+        var rig = makeRig(muted: false)
+        rig.journal.save(.init(unverifiedAudio: .init(
+            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)))
+        // The device is back and still muted.
+        rig.audio.device?.isMuted = true
+
+        _ = stepEnclosed(&rig, settings())
+
+        XCTAssertNotNil(rig.journal.load().audio,
+                        "the returning device was not re-adopted")
+        _ = rig.service.undoAll()
+        XCTAssertEqual(rig.audio.device?.isMuted, false, "the sound was never restored")
     }
 
 
@@ -897,6 +923,49 @@ final class LidCloseActionServiceTests: XCTestCase {
         XCTAssertFalse(undo.audioDeviceGone, "two flaky reads were read as removal")
         XCTAssertNotNil(rig.journal.load().audio, "the obligation was erased")
         XCTAssertEqual(rig.journal.load().audio?.unreadablePasses, 1)
+    }
+
+
+    /// Turning OFF a single effect switch must UNDO that effect, without
+    /// waiting for the master switch or for the conditions to change. The apply
+    /// path used to skip the disabled effect and leave the Mac muted (gate
+    /// finding, `Disabling an individual effect does not restore it`).
+    func testTurningOffTheMuteSwitchRestoresTheSound() {
+        var rig = makeRig()
+        _ = stepEnclosed(&rig, settings(mute: true))
+        XCTAssertEqual(rig.audio.device?.isMuted, true)
+
+        // The operator unticks "Mute the sound" only; the session and the
+        // conditions are unchanged.
+        let out = stepEnclosed(&rig, settings(mute: false))
+
+        XCTAssertEqual(rig.audio.device?.isMuted, false, "the sound was left muted")
+        XCTAssertNil(rig.journal.load().audio, "the obligation should be gone")
+        XCTAssertEqual(out.evaluation.decision.action, .apply, "the master switch is still on")
+    }
+
+    /// Same for the app-pause switch: unticking it resumes what it paused.
+    func testTurningOffThePauseSwitchResumesTheApps() {
+        let rig0 = makeRig(apps: [(4711, "Slack", 1_700_000_000)])
+        var rig = rig0
+        _ = stepEnclosed(&rig, settings(mute: false, pause: true))
+        XCTAssertEqual(rig.processes.table[4711]?.stopped, true)
+
+        _ = stepEnclosed(&rig, settings(mute: false, pause: false))
+
+        XCTAssertEqual(rig.processes.table[4711]?.stopped, false, "the app was left frozen")
+        XCTAssertTrue(rig.journal.load().stopped.isEmpty)
+    }
+
+    /// The converse still holds: an effect that is ON keeps the switch's own
+    /// journal entry, so turning the switch off later has something to undo.
+    func testTurningASwitchOnStillJournalsItsEffect() {
+        var rig = makeRig()
+        _ = stepEnclosed(&rig, settings(mute: true))
+        XCTAssertNotNil(rig.journal.load().audio)
+        // A second apply with the same settings must not duplicate anything.
+        _ = stepEnclosed(&rig, settings(mute: true))
+        XCTAssertEqual(rig.audio.writes.count, 1)
     }
 
     // MARK: — Journal durability
