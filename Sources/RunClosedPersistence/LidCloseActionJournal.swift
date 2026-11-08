@@ -256,10 +256,14 @@ public struct LidCloseActionJournal: Sendable {
                 audio = []
                 if (try? c.contains(.audio)) == true { droppedAudioEntries += 1 }
             }
-            // Same for the obligation list: a malformed `unverifiedAudio` must
-            // not read as "nothing stranded".
+            // Same for the obligation list — but an ARRAY failure alone is not
+            // damage: the legacy SINGULAR form is supported, and counting it as
+            // corrupt made `lid-close status` exit 3 over a perfectly good
+            // journal written by the earlier build (gate finding, `Supported
+            // legacy audio records trigger false corruption reports`).
             if (try? c.contains(.unverifiedAudio)) == true,
-               (try? c.decode([AudioState].self, forKey: .unverifiedAudio)) == nil {
+               (try? c.decode([AudioState].self, forKey: .unverifiedAudio)) == nil,
+               (try? c.decode(AudioState.self, forKey: .unverifiedAudio)) == nil {
                 droppedAudioEntries += 1
             }
             // A damaged element is surfaced, never silently dropped.

@@ -636,12 +636,21 @@ public struct LidCloseActionService {
 
     /// The first stranded device that has COME BACK still muted, removed from
     /// the list. `nil` when none has.
-    private func firstReturnedStrandedDevice(
+    private mutating func firstReturnedStrandedDevice(
         _ record: inout LidCloseActionJournal.Record
     ) -> LidCloseActionJournal.AudioState? {
         for (index, stranded) in record.unverifiedAudio.enumerated() {
-            guard let back = audio.readOutput(uid: stranded.deviceUID),
-                  back.isMuted != false else { continue }
+            guard let back = audio.readOutput(uid: stranded.deviceUID) else { continue }
+            guard back.isMuted != false else {
+                // Back and ALREADY AUDIBLE: nothing of ours is left to restore,
+                // so the obligation must go. Keeping it raised operator
+                // attention forever over a device whose sound is fine (gate
+                // finding, `Already-restored stranded devices never leave
+                // recovery`).
+                record.unverifiedAudio.remove(at: index)
+                journal.save(record)
+                return nil
+            }
             record.unverifiedAudio.remove(at: index)
             return stranded
         }
@@ -947,10 +956,15 @@ public struct LidCloseActionService {
         // remained (gate finding, `Persisted unverified processes stop raising
         // attention`).
         guard !record.stopped.isEmpty else {
-            if !record.unverified.isEmpty || !record.unverifiedAudio.isEmpty {
+            // Process obligations only. A stranded AUDIO device is reported by
+            // the audio step, which runs AFTER this one: raising it here meant a
+            // device that the audio step then restored still produced a notice
+            // (gate finding, `Already-restored stranded devices never leave
+            // recovery`).
+            if !record.unverified.isEmpty {
                 outcome.unverifiedPids = record.unverified.map { $0.pid }
                 outcome.shouldNotify = true
-                outcome.notice = record.unverified.isEmpty ? .audioLeftMuted : .appsLeftPaused
+                outcome.notice = .appsLeftPaused
             }
             return
         }

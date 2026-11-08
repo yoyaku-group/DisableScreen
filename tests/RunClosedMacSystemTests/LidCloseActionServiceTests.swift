@@ -1545,6 +1545,22 @@ final class LidCloseActionServiceTests: XCTestCase {
         XCTAssertTrue(out.journalSaveFailed, "a failed save was not reported")
     }
 
+    /// A STRANDED device that comes back already AUDIBLE leaves the obligation
+    /// list: nothing is left to restore, so keeping it raised attention forever.
+    func testStrandedDeviceBackAndAudibleLeavesRecovery() {
+        var rig = makeRig(muted: false)
+        rig.journal.save(.init(unverifiedAudio: [.init(
+            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)]))
+        // Back, and audible: no restoration needed.
+        rig.audio.device?.isMuted = false
+
+        let out = rig.service.undoAll()
+
+        XCTAssertTrue(rig.journal.load().unverifiedAudio.isEmpty,
+                      "a restored device stayed in recovery forever")
+        XCTAssertFalse(out.shouldNotify, "attention was raised over a healthy device")
+    }
+
     // MARK: — Journal durability
 
     /// The journal is written BEFORE the effect: the file on disk carries the

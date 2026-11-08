@@ -143,6 +143,42 @@ final class LidCloseActionJournalTests: XCTestCase {
     }
 }
 
+/// Legacy-shape decoding.
+final class LidCloseActionLegacyDecodeTests: XCTestCase {
+
+    /// A journal written by the EARLIER build (singular `unverifiedAudio`) is
+    /// supported, not corrupt: reporting it as damaged made `lid-close status`
+    /// exit 3 over a perfectly good file while no entry was lost (gate finding,
+    /// `Supported legacy audio records trigger false corruption reports`).
+    func testLegacySingularAudioIsNotReportedAsCorrupt() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("runclosed-legacy-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("lid_close_actions.json")
+
+        // The shape the previous build wrote: one OBJECT, not an array.
+        let legacy = """
+        {"schemaVersion":1,
+         "audio":{"deviceUID":"BuiltInSpeakerDevice","wasMuted":false,"volume":0.5},
+         "stopped":[],"unverified":[],
+         "unverifiedAudio":{"deviceUID":"Headphones","wasMuted":false,"volume":0.7}}
+        """
+        try Data(legacy.utf8).write(to: url)
+
+        let journal = LidCloseActionJournal(url: url)
+        let rec = journal.load()
+
+        XCTAssertEqual(rec.audio.first?.deviceUID, "BuiltInSpeakerDevice")
+        XCTAssertEqual(rec.unverifiedAudio.first?.deviceUID, "Headphones")
+        XCTAssertFalse(rec.hasDroppedAudioEntries,
+                       "a supported legacy record was counted as damage")
+        XCTAssertFalse(journal.isCorrupt,
+                       "a supported legacy record was reported as corrupt")
+    }
+
+}
+
 /// The kill switch an operator reaches for in a hurry (ADR 026).
 ///
 /// `defaults write com.benjaminbelaga.RunClosed lidCloseActions -bool false`
