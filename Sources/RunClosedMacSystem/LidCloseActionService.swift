@@ -195,6 +195,7 @@ public struct LidCloseActionService {
         // step into `.undo` (which re-raises the notice) instead of falling to
         // "nothing of ours" and going quiet (caught by ai-review-gate).
         let outstanding = !record.isEmpty || !record.unverified.isEmpty
+            || record.unverifiedAudio != nil
         return Evaluation(
             input: input,
             decision: LidCloseActionPolicy.decide(input, currentlyApplied: outstanding),
@@ -703,8 +704,17 @@ public struct LidCloseActionService {
         var stillUnknown: [LidCloseActionJournal.StoppedProcess] = []
         for entry in record.unverified {
             guard identityProved(entry) else { stillUnknown.append(entry); continue }
-            guard processes.isStopped(pid: entry.pid) == true else {
-                // Proved alive: nothing of ours is holding it.
+            // Only a POSITIVE "stopped" is a reason to signal. An unreadable
+            // state is not proof the process is running, so the entry stays
+            // (gate finding, `Unreadable process state drops its recovery
+            // entry`).
+            switch processes.isStopped(pid: entry.pid) {
+            case .some(true):
+                break
+            case .some(false):
+                continue   // proved alive: nothing of ours is holding it
+            case .none:
+                stillUnknown.append(entry)
                 continue
             }
             processes.resume(pid: entry.pid)

@@ -1442,6 +1442,9 @@ func cmdLidClose(_ rest: [String]) -> Int32 {
             externalDisplayConnected: ClamshellReadback.externalDisplayConnected(),
             settings: settings)
         let journal = e.journalBefore
+        // A damaged journal is NOT a clean slate: report it and refuse to claim
+        // "applied: false" over a recovery that may still be owed.
+        let journalCorrupt = LidCloseActionJournal().isCorrupt
         let entries = LidCloseActionAuditLog().load()
         emitJSON([
             "schemaVersion": kSchemaVersion,
@@ -1481,6 +1484,7 @@ func cmdLidClose(_ rest: [String]) -> Int32 {
                 // reports success while audio restoration remains unresolved`).
                 "unverifiedAudioDeviceUID": journal.unverifiedAudio?.deviceUID as Any? ?? NSNull(),
                 "unverifiedAudioWasMuted": journal.unverifiedAudio?.wasMuted as Any? ?? NSNull(),
+                "readable": !journalCorrupt,
             ],
             "lastAction": entries.last.map { entry -> [String: Any] in
                 [
@@ -1494,6 +1498,7 @@ func cmdLidClose(_ rest: [String]) -> Int32 {
         // restore to complete. Reporting 0 over an unresolved obligation is the
         // "healthy" signal this lot exists to avoid.
         let unresolved = !journal.unverified.isEmpty || journal.unverifiedAudio != nil
+            || journalCorrupt
         return unresolved ? 3 : 0
 
     case "simulate":

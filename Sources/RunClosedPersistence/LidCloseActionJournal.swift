@@ -225,10 +225,36 @@ public struct LidCloseActionJournal: Sendable {
     /// the undo never depends on this file being the ONLY memory — the app and
     /// the backstop both run it at every opportunity while the file exists, and
     /// a stopped app is visible in `ps`.
-    public func load() -> Record {
-        guard let data = try? Data(contentsOf: url) else { return Record() }
-        guard let rec = try? JSONDecoder().decode(Record.self, from: data) else { return Record() }
+    public func load() -> Record { load(readingFailed: nil) }
+
+    /// Load, reporting whether the file existed but could not be READ.
+    ///
+    /// A missing file and an unreadable one both produce the empty record, so
+    /// every caller would read "nothing of ours to undo". For a MISSING file
+    /// that is the truth; for a truncated or temporarily unreadable one it is
+    /// the opposite of the truth — the obligation is still there on disk and
+    /// the operator is told all is well (gate finding, `Unreadable journal is
+    /// indistinguishable from no pending recovery`).
+    public func load(readingFailed: (() -> Void)?) -> Record {
+        let exists = FileManager.default.fileExists(atPath: url.path)
+        guard let data = try? Data(contentsOf: url) else {
+            if exists { readingFailed?() }
+            return Record()
+        }
+        guard let rec = try? JSONDecoder().decode(Record.self, from: data) else {
+            readingFailed?()
+            return Record()
+        }
         return rec
+    }
+
+    /// Whether the file exists but does not decode. Used by `lid-close status`
+    /// so a damaged journal is never presented as a clean slate.
+    public var isCorrupt: Bool {
+        guard let data = try? Data(contentsOf: url) else {
+            return FileManager.default.fileExists(atPath: url.path)
+        }
+        return (try? JSONDecoder().decode(Record.self, from: data)) == nil
     }
 
     /// Atomic write. `.atomic` writes a sibling temp file then renames it into

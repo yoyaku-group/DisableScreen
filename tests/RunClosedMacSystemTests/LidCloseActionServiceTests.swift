@@ -1068,6 +1068,64 @@ final class LidCloseActionServiceTests: XCTestCase {
         XCTAssertNotNil(rig.journal.load().audio, "the retry entry must survive")
     }
 
+
+    /// An audio-only obligation keeps driving recovery: when the session has
+    /// ended and only `unverifiedAudio` remains, the step must still enter the
+    /// undo path so a reconnecting device gets its sound back (gate finding,
+    /// `Audio-only unverified obligations stop driving recovery`).
+    func testAudioOnlyObligationStillDrivesTheStep() {
+        var rig = makeRig()
+        rig.journal.save(.init(unverifiedAudio: .init(
+            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)))
+        rig.audio.device?.isMuted = true
+
+        // No session, switch off, lid open: every APPLY reason is gone.
+        let out = rig.service.step(session: nil, lidClosed: false,
+                                   externalDisplayConnected: false,
+                                   settings: settings(enabled: false))
+
+        XCTAssertEqual(out.evaluation.decision.action, .undo,
+                       "an audio obligation fell through to 'nothing of ours'")
+        XCTAssertEqual(rig.audio.device?.isMuted, false, "the sound was not restored")
+    }
+
+    /// An unreadable `isStopped` is not proof the process is running: the
+    /// entry must stay (gate finding, `Unreadable process state drops its
+    /// recovery entry`).
+    func testUnreadableProcessStateKeepsTheEntry() {
+        var rig = makeRig()
+        rig.journal.save(.init(unverified: [
+            .init(pid: 4711, startSeconds: 1_700_000_000, startMicroseconds: 0,
+                  bootID: "A", path: "/x", appName: "Slack")]))
+        rig.processes.table[4711] = .init(pid: 4711, startSeconds: 1_700_000_000,
+                                          startMicroseconds: 0,
+                                          path: "/x", appName: "Slack", stopped: true)
+        rig.processes.stopReadbackUnreadable = true
+
+        _ = rig.service.undoAll()
+
+        XCTAssertEqual(rig.journal.load().unverified.map { $0.pid }, [4711],
+                       "an unreadable state destroyed the recovery entry")
+    }
+
+    /// A JOURNAL that exists but does not decode is not a clean slate
+    /// (gate finding, `Unreadable journal is indistinguishable from no pending
+    /// recovery`).
+    func testCorruptJournalIsNotACleanSlate() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("runclosed-corrupt-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("lid_close_actions.json")
+        try Data("{ truncated".utf8).write(to: url)
+
+        let journal = LidCloseActionJournal(url: url)
+        XCTAssertTrue(journal.isCorrupt, "a truncated journal read as healthy")
+        var flagged = false
+        _ = journal.load(readingFailed: { flagged = true })
+        XCTAssertTrue(flagged, "the read failure was silent")
+    }
+
     // MARK: — Journal durability
 
     /// The journal is written BEFORE the effect: the file on disk carries the
