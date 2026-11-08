@@ -606,6 +606,7 @@ public struct LidCloseActionService {
 
         var stopped: [LidCloseActionJournal.StoppedProcess] = []
         var failed: [Int32] = []
+        var unconfirmedPids: [Int32] = []
         for entry in pending {
             // JOURNAL THIS ONE, THEN SIGNAL IT — one at a time.
             //
@@ -706,6 +707,7 @@ public struct LidCloseActionService {
                 // operator must be told (gate finding, `Unreadable stop
                 // confirmation hides an actual suspension`).
                 failed.append(entry.pid)
+                unconfirmedPids.append(entry.pid)
                 outcome.changed = true
                 outcome.shouldNotify = true
                 outcome.notice = outcome.notice ?? .appsLeftPaused
@@ -718,6 +720,12 @@ public struct LidCloseActionService {
             // caller and the audit were both misled, and it is the opposite of
             // what the journal says (Lord round 1, point 3).
             guard !stopped.isEmpty else {
+                // Nothing CONFIRMED — but if any of those failures was merely
+                // UNREADABLE, the app may be suspended, so this is
+                // `.unconfirmed`, not `.failed`.
+                if !unconfirmedPids.isEmpty && unconfirmedPids.count == failed.count {
+                    return .success(.unconfirmed)
+                }
                 return .failure("could not stop \(failed.count) process(es): \(failed)")
             }
             return .success(.partial)
@@ -965,6 +973,11 @@ public struct LidCloseActionService {
         /// and the caller must not be told nothing happened (Lord round 1,
         /// point 3).
         case partial
+        /// The signals were ACCEPTED but the stopped state could not be read.
+        /// The app may well be suspended, so this is NOT `.failed` — that
+        /// promises nothing landed (gate finding, `Unconfirmed process stops are
+        /// classified as no effect`).
+        case unconfirmed
         case failed
         case skipped
     }
@@ -979,7 +992,7 @@ public struct LidCloseActionService {
         // be muted; reporting `.failed` ("nothing landed") contradicts
         // `changed == true` (gate finding, `An unconfirmed mute is classified
         // as no effect`).
-        let appsPartial = apps == .partial
+        let appsPartial = apps == .partial || apps == .unconfirmed
         let audioUnconfirmed = audio == .unconfirmed
         let audioAsked = audio != .skipped
         let appsAsked = apps != .skipped

@@ -699,7 +699,10 @@ final class LidCloseActionServiceTests: XCTestCase {
 
         let out = stepEnclosed(&rig, settings(mute: false, pause: true))
 
-        XCTAssertEqual(out.apply, .failed)
+        // `.partial`, not `.failed`: the signal was ACCEPTED, so the app may be
+        // suspended — `.failed` promises an untouched machine.
+        XCTAssertEqual(out.apply, .partial,
+                       "an unconfirmed stop read as nothing landed")
         XCTAssertEqual(rig.journal.load().stopped.map { $0.pid }, [4711],
                        "an unreadable readback dropped the only record of the stop")
     }
@@ -1703,6 +1706,22 @@ final class LidCloseActionServiceTests: XCTestCase {
         let out = stepEnclosed(&rig, settings())
 
         XCTAssertEqual(out.apply, .partial)
+        XCTAssertTrue(out.changed)
+    }
+
+
+    /// An UNREADABLE stop confirmation is not "nothing landed": the signal was
+    /// accepted, so the app may be suspended (gate finding, `Unconfirmed
+    /// process stops are classified as no effect`). `.failed` promises a
+    /// untouched machine.
+    func testUnconfirmedStopIsNotReportedAsFailed() {
+        var rig = makeRig(apps: [(4711, "Slack", 1_700_000_000)])
+        rig.processes.stopReadbackUnreadable = true
+
+        let out = stepEnclosed(&rig, settings(mute: false, pause: true))
+
+        XCTAssertNotEqual(out.apply, .failed,
+                          "an unconfirmed stop read as a untouched machine")
         XCTAssertTrue(out.changed)
     }
 
