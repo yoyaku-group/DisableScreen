@@ -96,6 +96,12 @@ public struct LibprocPauseBackend: ProcessPauseBackend {
         var out: [RunningProcess] = []
         for pid in Self.allPids() {
             guard let snap = Self.snapshot(pid: pid) else { continue }
+            // An app the OPERATOR already suspended is never adopted. Pausing
+            // it would journal it as ours, and the undo would then `SIGCONT`
+            // an app the operator had deliberately stopped — an effect they
+            // never asked for (caught by ai-review-gate). Only a process we
+            // can observe RUNNING is a candidate.
+            guard snap.status != Self.stoppedStatus else { continue }
             guard let path = Self.path(ofPid: pid) else { continue }
             guard let name = appNames.first(where: { Self.matches(path: path, appName: $0) })
             else { continue }

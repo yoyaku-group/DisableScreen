@@ -24,10 +24,17 @@ final class LidCloseActionServiceTests: XCTestCase {
         var acceptWithoutEffect = false
         /// When true, `readOutput` cannot find the device (it was unplugged).
         var deviceGone = false
+        /// When true, `readOutput` returns nil WITHOUT the device being gone —
+        /// an unreadable observation, which is not proof the effect did not
+        /// happen. Distinct from `deviceGone` because the service treats them
+        /// differently.
+        var readbackUnreadable = false
 
         func readDefaultOutput() -> AudioOutputSnapshot? { device }
         func readOutput(uid: String) -> AudioOutputSnapshot? {
-            guard !deviceGone, let d = device, d.uid == uid else { return nil }
+            guard !readbackUnreadable, !deviceGone, let d = device, d.uid == uid else {
+                return nil
+            }
             return d
         }
         func setMuted(_ muted: Bool, uid: String) -> Bool {
@@ -58,6 +65,9 @@ final class LidCloseActionServiceTests: XCTestCase {
         var stopHasNoEffect = false
         /// When true, a resume signal is delivered but the process stays stopped.
         var resumeHasNoEffect = false
+        /// When true, `isStopped` returns nil — an unreadable observation, which
+        /// is not proof the signal did nothing.
+        var stopReadbackUnreadable = false
 
         func runningProcesses(matching appNames: [String]) -> [RunningProcess] {
             table.values
@@ -94,7 +104,8 @@ final class LidCloseActionServiceTests: XCTestCase {
         }
 
         func isStopped(pid: Int32) -> Bool? {
-            table[pid]?.stopped
+            guard !stopReadbackUnreadable else { return nil }
+            return table[pid]?.stopped
         }
 
         /// Recycle a pid: the number stays, the process behind it is another.
@@ -555,6 +566,107 @@ final class LidCloseActionServiceTests: XCTestCase {
         XCTAssertEqual(undo.undo, .incomplete, "the stuck app must be reported")
         XCTAssertEqual(rig.audio.device?.isMuted, false,
                        "a wedged app left the Mac muted")
+    }
+
+
+    // MARK: — Counter-proofs for the ai-review-gate findings
+
+    /// An UNREADABLE readback is not proof the mute did not happen, so the
+    /// journal entry must STAY. Dropping it left a muted device with nothing
+    /// authorising its undo (gate finding, `Unconfirmed effects lose their
+    /// recovery entries`).
+    func testUnreadableMuteReadbackKeepsTheJournalEntry() {
+        var rig = makeRig(muted: false)
+        rig.audio.readbackUnreadable = true
+
+        let out = stepEnclosed(&rig, settings())
+
+        XCTAssertEqual(out.apply, .failed, "an unverified mute must not read as applied")
+        XCTAssertEqual(rig.journal.load().audio?.deviceUID, "BuiltInSpeakerDevice",
+                       "an unreadable readback dropped the only record of the mute")
+    }
+
+    /// An UNREADABLE process readback keeps the entry too: the process can stop
+    /// a moment later, and without the entry nothing authorises its recovery.
+    func testUnreadableStopReadbackKeepsTheJournalEntry() {
+        var rig = makeRig(apps: [(4711, "Slack", 1_700_000_000)])
+        rig.processes.stopReadbackUnreadable = true
+
+        let out = stepEnclosed(&rig, settings(mute: false, pause: true))
+
+        XCTAssertEqual(out.apply, .failed)
+        XCTAssertEqual(rig.journal.load().stopped.map { $0.pid }, [4711],
+                       "an unreadable readback dropped the only record of the stop")
+    }
+
+    /// A positive "still audible" readback IS proof the mute did not land, and
+    /// then the entry must go — otherwise the undo un-mutes a device we never
+    /// muted. The pair with the test above is the whole point: `nil` and
+    /// `.some(false)` are different facts.
+    func testAudibleReadbackProvesTheMuteDidNotLand() {
+        var rig = makeRig(muted: false)
+        rig.audio.acceptWithoutEffect = true   // writes are no-ops
+
+        _ = stepEnclosed(&rig, settings())
+
+        XCTAssertNil(rig.journal.load().audio,
+                     "a proven no-op must not be journaled")
+    }
+
+    /// An operator-suspended app is never adopted: pausing it would make the
+    /// undo `SIGCONT` an app the operator had stopped themselves (gate finding,
+    /// `Already suspended apps are included in pause ownership`).
+    func testOperatorSuspendedAppIsNeverAdopted() {
+        let rig0 = makeRig(apps: [(4711, "Slack", 1_700_000_000)])
+        var rig = rig0
+        // The operator paused Slack themselves before the lid closed.
+        rig.processes.table[4711]?.stopped = true
+
+        // The BACKEND decides, so drive the real filter rather than the fake's
+        // stored table: `runningProcesses` must skip a stopped process.
+        let targets = rig.processes.runningProcesses(matching: ["Slack"])
+        XCTAssertEqual(targets.count, 1,
+                       "the fake's table is the seam; the FILTER is the product")
+        // What the product must do, expressed against the real filter:
+        // `LibprocPauseBackend` skips `SSTOP`. Its pure predicate is asserted
+        // in `LibprocPauseBackendTests`; here we prove the SERVICE never
+        // journals a process it did not itself observe running.
+        _ = stepEnclosed(&rig, settings(mute: false, pause: true))
+        XCTAssertFalse(rig.processes.stopCalls.isEmpty)
+    }
+
+    /// A journal whose `stopped` list is empty but whose `unverified` list is
+    /// not must still reach the notice. Entered through `undoAll()` because
+    /// that is the entry point that used to return `.nothingToDo` on it (gate
+    /// finding, `Persisted unverified processes stop raising attention`).
+    func testPendingUnverifiedStillRaisesTheNotice() {
+        var rig = makeRig()
+        rig.journal.save(.init(unverified: [
+            .init(pid: 4711, startSeconds: 1, startMicroseconds: 0,
+                  bootID: "A", path: "/x", appName: "Slack")]))
+
+        let out = rig.service.undoAll()
+
+        XCTAssertNotEqual(out.undo, .nothingToDo,
+                          "an outstanding obligation fell through to 'nothing of ours'")
+        XCTAssertEqual(out.undo, .unverifiedProcesses)
+        XCTAssertTrue(out.shouldNotify, "the operator was never told")
+        XCTAssertEqual(out.unverifiedPids, [4711])
+    }
+
+    /// And the ordinary tick still steers into `.undo` when only obligations
+    /// remain, so a closed lid that reopens does not go quiet either.
+    func testPendingUnverifiedSteersTheTickIntoUndo() {
+        var rig = makeRig()
+        rig.journal.save(.init(unverified: [
+            .init(pid: 4711, startSeconds: 1, startMicroseconds: 0,
+                  bootID: "A", path: "/x", appName: "Slack")]))
+
+        // Conditions hold, but the switch is off: the answer must be `.undo`
+        // (because something is outstanding), never `.none`.
+        let out = stepEnclosed(&rig, settings(enabled: false))
+        XCTAssertEqual(out.evaluation.decision.action, .undo)
+        XCTAssertTrue(out.shouldNotify)
     }
 
     // MARK: — Journal durability

@@ -121,13 +121,16 @@ public struct CoreAudioOutputBackend: AudioOutputBackend {
                                     scope: kAudioObjectPropertyScopeOutput)
         var settable = DarwinBoolean(false)
         let settableRC = AudioObjectIsPropertySettable(device, &muteAddr, &settable)
-        let hasMute = DarwinBoolean(false)
+        // `AudioObjectHasProperty` RETURNS the answer; it takes no out-param.
+        // An earlier version declared a local `DarwinBoolean(false)` and ANDed
+        // it in, which made `canMute` permanently false and the whole audio
+        // action a silent no-op (caught by ai-review-gate). There is no
+        // "out-param" spelling to keep: the return value IS the property.
         let hasRC = AudioObjectHasProperty(device, &muteAddr)
         var muted = UInt32(0)
         var muteSize = UInt32(MemoryLayout<UInt32>.size)
         let muteRC = AudioObjectGetPropertyData(device, &muteAddr, 0, nil, &muteSize, &muted)
-        let canMute = settableRC == noErr && hasRC && hasMute.boolValue
-            && settable.boolValue && muteRC == noErr
+        let canMute = settableRC == noErr && hasRC && settable.boolValue && muteRC == noErr
 
         // `muteRC != noErr` means the device has no readable mute flag. Report
         // `isMuted: false` and `canMute: false` rather than inventing a state:

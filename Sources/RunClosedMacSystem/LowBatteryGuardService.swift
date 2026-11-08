@@ -659,11 +659,8 @@ public struct LowBatteryGuardService {
             latchStore.save(record)
             audit(outcome, evaluation: evaluation, recordBootID: recordBootIDBefore)
             // ADR 026: the lid-close actions are undone BEFORE the sleep, not
-            // after the wake-up that may never come. A Mac that goes down
-            // padded down with a frozen app would come back silent and
-            // unresponsive, with the backstop unable to help because the phone
-            // home it needs was never the problem.
-            undoLidCloseBeforeSleep(&outcome)
+            // after the wake-up that may never come. `attemptSleep` below is
+            // the single choke point that guarantees it on every sleep path.
             // Best effort, and NOT retried — deliberately (review round 18).
             // The protective action already happened: `disablesleep` is at 0,
             // so the Mac follows its normal power management and sleeps on
@@ -744,7 +741,16 @@ public struct LowBatteryGuardService {
         }
     }
 
+    /// The ONE sleep call, and therefore the ONE place the lid-close undo is
+    /// guaranteed to happen first — on the success path AND on the
+    /// best-effort path after a failed release.
+    ///
+    /// It used to sit only in the successful-release branch, so a failed
+    /// release that still slept the Mac went down with apps suspended and
+    /// audio muted (caught by ai-review-gate). Putting it here means no caller
+    /// can reach `sleepNow` without the undo, whichever branch led there.
     private mutating func attemptSleep(_ outcome: inout TickOutcome) {
+        undoLidCloseBeforeSleep()
         let r = sleeper.sleepNow()
         outcome.sleepAttempted = true
         outcome.sleepRC = r.rc
@@ -760,11 +766,28 @@ public struct LowBatteryGuardService {
     ///
     /// Uses the readings-free `undoAll()`, not `step()`: the conditions are
     /// irrelevant here, the journal is.
-    private mutating func undoLidCloseBeforeSleep(_ outcome: inout TickOutcome) {
-        guard var service = lidCloseActions else { return }
+    ///
+    /// Returns the undo's outcome so `attemptSleep` can carry it, and writes it
+    /// into an outcome when one is supplied. It runs on EVERY sleep path, so a
+    /// failure branch cannot skip it.
+    @discardableResult
+    private mutating func undoLidCloseBeforeSleep(
+        _ outcome: inout TickOutcome
+    ) -> LidCloseActionService.TickOutcome? {
+        guard var service = lidCloseActions else { return nil }
         let undo = service.undoAll()
         lidCloseActions = service
         if outcome.lidClose == nil { outcome.lidClose = undo }
+        return undo
+    }
+
+    /// The no-outcome spelling, for callers that only need the effect.
+    @discardableResult
+    private mutating func undoLidCloseBeforeSleep() -> LidCloseActionService.TickOutcome? {
+        guard var service = lidCloseActions else { return nil }
+        let undo = service.undoAll()
+        lidCloseActions = service
+        return undo
     }
 }
 

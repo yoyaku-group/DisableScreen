@@ -96,6 +96,8 @@ echo
 
 saw_lid_closed=0
 saw_panel_active=0
+saw_panel_inactive=0
+saw_panel_unreadable=0
 trap 'echo "interrupted"' INT
 while true; do
   l="$(lid)"; p="$(panel)"; c="$(conditions)"
@@ -103,17 +105,29 @@ while true; do
   echo "$line" | tee -a "$LOG"
   if [[ "$l" == "1" || "$l" == "Yes" || "$l" == "yes" ]]; then
     saw_lid_closed=1
-    [[ "$p" == *"ACTIVE"* ]] && saw_panel_active=1
+    # Match the EXACT tokens `panel()` emits. A substring test for "ACTIVE"
+    # also matches "NOT_IN_ACTIVE_LIST", which reported an absent panel as
+    # ACTIVE and inverted the verdict (caught by ai-review-gate).
+    case "$p" in
+      "builtin=ACTIVE "*) saw_panel_active=1 ;;
+      "builtin=NOT_IN_ACTIVE_LIST") saw_panel_inactive=1 ;;
+      *) saw_panel_unreadable=1 ;;
+    esac
   fi
   sleep "$INTERVAL" || break
 done
 
+# A verdict needs EVIDENCE. Silence about the panel is not proof that it was
+# off, so a run whose every closed-lid sample was unreadable is INCONCLUSIVE
+# rather than a definitive "no action warranted" (caught by ai-review-gate).
 if (( ! saw_lid_closed )); then
   verdict="INCONCLUSIVE — the run never saw the lid closed; nothing was measured"
 elif (( saw_panel_active )); then
   verdict="MEASURED — the built-in panel stayed ACTIVE with the lid closed. Brightness and keyboard backlight remain CANDIDATES, and a readback criterion is still required before any code is written"
-else
+elif (( saw_panel_inactive )); then
   verdict="MEASURED — the built-in panel was not active with the lid closed. No brightness or keyboard-backlight action is warranted, and ADR 026's NOT_TESTED stands as the decision"
+else
+  verdict="INCONCLUSIVE — the lid was seen closed but no usable panel reading was obtained (pyobjc missing or an unexpected display-list shape); install pyobjc or fix the probe and re-run"
 fi
 {
   echo "# Lid-close measurement — $MODEL macOS $OSVER ($STAMP)"

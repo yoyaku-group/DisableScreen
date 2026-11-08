@@ -182,9 +182,15 @@ public struct LidCloseActionService {
             lidClosed: lidClosed,
             externalDisplayConnected: externalDisplayConnected,
             settings: settings)
+        // `currentlyApplied` covers the OBLIGATIONS too, not just the live
+        // effects. A record whose `stopped` list is empty but whose `unverified`
+        // list is not still needs the operator, so it must keep steering the
+        // step into `.undo` (which re-raises the notice) instead of falling to
+        // "nothing of ours" and going quiet (caught by ai-review-gate).
+        let outstanding = !record.isEmpty || !record.unverified.isEmpty
         return Evaluation(
             input: input,
-            decision: LidCloseActionPolicy.decide(input, currentlyApplied: !record.isEmpty),
+            decision: LidCloseActionPolicy.decide(input, currentlyApplied: outstanding),
             journalBefore: record)
     }
 
@@ -217,7 +223,11 @@ public struct LidCloseActionService {
             decision: LidCloseActionPolicy.Decision(action: .undo, reason: .applied),
             journalBefore: record)
         var outcome = TickOutcome(evaluation: evaluation)
-        guard !record.isEmpty else {
+        // `unverified` counts: a process we could not prove is still an
+        // outstanding obligation, and returning `.nothingToDo` on a record that
+        // holds only those silenced the operator notice forever (gate finding,
+        // `Persisted unverified processes stop raising attention`).
+        guard !record.isEmpty || !record.unverified.isEmpty else {
             outcome.undo = .nothingToDo
             return outcome
         }
@@ -366,14 +376,23 @@ public struct LidCloseActionService {
         }
         audio.setMuted(true, uid: snapshot.uid)
         // Acceptance is not proof (ADR 009): read back before claiming it.
-        guard let after = audio.readOutput(uid: snapshot.uid), after.isMuted else {
-            // Nothing changed, so the entry goes: keeping it would un-mute a
-            // device we never muted.
+        //
+        // Three cases, not two. An UNREADABLE readback (`nil`) is not evidence
+        // that the effect did not happen, and dropping the entry on it would
+        // leave a device muted with nothing authorising the undo (caught by
+        // ai-review-gate). Only a POSITIVE reading of "still audible" proves
+        // nothing changed. So: unreadable keeps the entry and reports the
+        // effect as unconfirmed; audible-only drops it.
+        switch audio.readOutput(uid: snapshot.uid) {
+        case .some(let after) where after.isMuted:
+            return .success(.muted)
+        case .some:
             record.audio = nil
             journal.save(record)
             return .failure("readback did not confirm the mute")
+        case .none:
+            return .failure("the mute could not be verified (readback unreadable)")
         }
-        return .success(.muted)
     }
 
     /// `SIGSTOP` every process matching `names`, journaling the identity TRIPLE
@@ -402,14 +421,23 @@ public struct LidCloseActionService {
         for entry in pending {
             processes.stop(pid: entry.pid)
             // `kill(2)` returning 0 means "delivered", not "stopped".
-            if processes.isStopped(pid: entry.pid) == true {
+            //
+            // Three cases, not two: an UNREADABLE state (`nil`) is not proof
+            // that nothing happened, so the entry STAYS and the effect is
+            // reported unconfirmed. Dropping it would let the process stop a
+            // moment later with no entry authorising its recovery (caught by
+            // ai-review-gate). Only a positive "still running" proves the
+            // signal did nothing.
+            switch processes.isStopped(pid: entry.pid) {
+            case .some(true):
                 stopped.append(entry)
-            } else {
-                // Not proved stopped: the journal must not claim it, or the
-                // undo would `SIGCONT` a process we never paused — which would
-                // resume an app the operator had suspended themselves.
+            case .some(false):
+                // Proved not stopped: the journal must not claim it, or the
+                // undo would `SIGCONT` a process we never paused.
                 failed.append(entry.pid)
                 record.stopped.removeAll { $0.pid == entry.pid }
+            case .none:
+                failed.append(entry.pid)
             }
         }
         outcome.stoppedPids = stopped.map { $0.pid }
@@ -461,7 +489,10 @@ public struct LidCloseActionService {
     /// Screen and keyboard are not part of this lot.
     private mutating func undo(evaluation: Evaluation, into outcome: inout TickOutcome) {
         var record = evaluation.journalBefore
-        guard !record.isEmpty else {
+        // `unverified` entries are OBLIGATIONS, not live effects: a record
+        // holding only those must still reach the notice below rather than
+        // reading as "nothing of ours".
+        guard !record.isEmpty || !record.unverified.isEmpty else {
             // Nothing of ours is applied. Not an error (idempotence): a lid
             // closed twice, or an undo with no prior action, is a no-op.
             outcome.undo = .nothingToDo
@@ -496,7 +527,19 @@ public struct LidCloseActionService {
         journal record: inout LidCloseActionJournal.Record,
         into outcome: inout TickOutcome
     ) {
-        guard !record.stopped.isEmpty else { return }
+        // Nothing NEW to resume, but an obligation carried from an earlier pass
+        // still has to be reported. Returning here silenced the notice on the
+        // second pass, when `stopped` was already empty and only `unverified`
+        // remained (gate finding, `Persisted unverified processes stop raising
+        // attention`).
+        guard !record.stopped.isEmpty else {
+            if !record.unverified.isEmpty {
+                outcome.unverifiedPids = record.unverified.map { $0.pid }
+                outcome.shouldNotify = true
+                outcome.notice = .appsLeftPaused
+            }
+            return
+        }
         var remaining: [LidCloseActionJournal.StoppedProcess] = []
         var resumed: [Int32] = []
         var unverified: [LidCloseActionJournal.StoppedProcess] = []
@@ -520,14 +563,23 @@ public struct LidCloseActionService {
         record.stopped = remaining
         // "To verify" survives the episode: the operator has to be told about a
         // process we can no longer identify, and it must not be silently
-        // dropped by the next apply.
-        record.unverified.append(contentsOf: unverified)
+        // dropped by the next apply. De-duplicated by pid so a process moved
+        // here twice (recycled, then found again) is listed once.
+        for entry in unverified where !record.unverified.contains(where: { $0.pid == entry.pid }) {
+            record.unverified.append(entry)
+        }
         journal.save(record)
 
         outcome.resumedPids = resumed
-        outcome.unverifiedPids = unverified.map { $0.pid }
+        // The WHOLE outstanding list, not only what this pass happened to
+        // discover: the caller and the operator care about every process still
+        // waiting on them.
+        outcome.unverifiedPids = record.unverified.map { $0.pid }
         if !resumed.isEmpty { outcome.changed = true }
-        if !unverified.isEmpty || !remaining.isEmpty {
+        // Any outstanding obligation keeps raising the notice, including one
+        // carried over from an earlier pass — otherwise the second step through
+        // here goes silent while the operator is still owed an answer.
+        if !record.unverified.isEmpty || !remaining.isEmpty {
             outcome.shouldNotify = true
             outcome.notice = .appsLeftPaused
         }
@@ -609,10 +661,19 @@ public struct LidCloseActionService {
     private func finish(journal record: inout LidCloseActionJournal.Record,
                         appsStuck: Bool) -> UndoOutcome {
         if record.isEmpty && record.unverified.isEmpty && !appsStuck {
+            // The delete must be PROVED too. `clear()` is best effort, and a
+            // silent failure here leaves stale ownership on disk that a later
+            // undo could act on — reversing something the operator did
+            // themselves (caught by ai-review-gate). A record that is still
+            // present after the clear is an incomplete restore, not a
+            // successful one.
             journal.clear()
-            return .restored
+            return journal.load().isEmpty && journal.load().unverified.isEmpty
+                ? .restored : .incomplete
         }
-        journal.save(record)
+        // A save that does not land leaves the PREVIOUS record on disk, so the
+        // undo did not reach a state anyone can rely on.
+        guard journal.save(record) else { return .incomplete }
         if appsStuck { return .incomplete }
         return record.isEmpty ? .unverifiedProcesses : .incomplete
     }
