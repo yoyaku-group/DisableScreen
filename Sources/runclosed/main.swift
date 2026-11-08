@@ -1473,8 +1473,8 @@ func cmdLidClose(_ rest: [String]) -> Int32 {
                 "applied": !journal.isEmpty,
                 "sessionID": journal.sessionID?.uuidString as Any? ?? NSNull(),
                 "startedAt": journal.startedAt as Any? ?? NSNull(),
-                "audioDeviceUID": journal.audio?.deviceUID as Any? ?? NSNull(),
-                "audioWasMuted": journal.audio?.wasMuted as Any? ?? NSNull(),
+                "audioDeviceUIDs": journal.audio.map { $0.deviceUID },
+                "audioWasMuted": journal.audio.map { $0.wasMuted },
                 "stoppedPids": journal.stopped.map { Int($0.pid) },
                 "unverifiedPids": journal.unverified.map { Int($0.pid) },
                 // An audio obligation that is not a live effect: the device was

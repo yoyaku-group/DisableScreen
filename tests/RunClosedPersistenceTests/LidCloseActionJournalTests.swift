@@ -20,7 +20,7 @@ final class LidCloseActionJournalTests: XCTestCase {
         let record = LidCloseActionJournal.Record(
             sessionID: UUID(),
             startedAt: "2026-11-08T10:00:00Z",
-            audio: .init(deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.4),
+            audio: [.init(deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.4)],
             stopped: [.init(pid: 4711, startSeconds: 1_700_000_000, startMicroseconds: 123,
                             bootID: "A", path: "/Applications/Slack.app/Contents/MacOS/Slack",
                             appName: "Slack")])
@@ -54,7 +54,7 @@ final class LidCloseActionJournalTests: XCTestCase {
         """
         try Data(json.utf8).write(to: url)
         let rec = journal.load()
-        XCTAssertEqual(rec.audio?.deviceUID, "X")
+        XCTAssertEqual(rec.audio.first?.deviceUID, "X")
     }
 
     /// The record is written atomically: a partially-written file never reads
@@ -73,7 +73,7 @@ final class LidCloseActionJournalTests: XCTestCase {
 
     func testClearRemovesTheFile() {
         let (journal, url) = makeJournal()
-        journal.save(.init(audio: .init(deviceUID: "X", wasMuted: false, volume: nil)))
+        journal.save(.init(audio: [.init(deviceUID: "X", wasMuted: false, volume: nil)]))
         XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
         journal.clear()
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))

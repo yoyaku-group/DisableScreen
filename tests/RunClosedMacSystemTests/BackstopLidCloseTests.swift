@@ -299,7 +299,7 @@ final class BackstopLidCloseTests: XCTestCase {
         // The state a crashed app leaves: the journal names the effects, the
         // device is muted and the app is stopped, and there is NO session.
         rig.journal.save(.init(
-            audio: .init(deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5),
+            audio: [.init(deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)],
             stopped: [.init(pid: 4711, startSeconds: 1_700_000_000, startMicroseconds: 0,
                             bootID: "A", path: "/Applications/Slack.app/Contents/MacOS/Slack",
                             appName: "Slack")]))
@@ -320,8 +320,8 @@ final class BackstopLidCloseTests: XCTestCase {
     /// owning record, the fast path must NOT skip the undo.
     func testJournalAloneIsAReasonToWork() {
         var rig = makeRig(flag: nil, ownedBoot: nil)
-        rig.journal.save(.init(audio: .init(deviceUID: "BuiltInSpeakerDevice",
-                                            wasMuted: false, volume: 0.5)))
+        rig.journal.save(.init(audio: [.init(deviceUID: "BuiltInSpeakerDevice",
+                                            wasMuted: false, volume: 0.5)]))
         rig.audio.device?.isMuted = true
 
         let outcome = rig.service.run()

@@ -136,8 +136,13 @@ public struct LidCloseActionJournal: Sendable {
         public var sessionID: UUID?
         /// ISO-8601 instant the journal was opened.
         public var startedAt: String?
-        /// The audio effect, when we muted something.
-        public var audio: AudioState?
+        /// The audio effects: one entry per device we muted.
+        ///
+        /// A LIST, not a single slot, because the default output can CHANGE
+        /// during a session. Muting only the first device left a second output
+        /// (headphones plugged in mid-session) audible while the service
+        /// reported the action applied (Lord review round 4).
+        public var audio: [AudioState]
         /// The processes we stopped. Empty when the app-pause switch is off.
         public var stopped: [StoppedProcess]
         /// Processes whose identity could not be re-proved at undo time: they
@@ -164,7 +169,7 @@ public struct LidCloseActionJournal: Sendable {
         public init(schemaVersion: Int = kLidCloseActionSchemaVersion,
                     sessionID: UUID? = nil,
                     startedAt: String? = nil,
-                    audio: AudioState? = nil,
+                    audio: [AudioState] = [],
                     stopped: [StoppedProcess] = [],
                     unverified: [StoppedProcess] = [],
                     unverifiedAudio: [AudioState] = []) {
@@ -181,7 +186,7 @@ public struct LidCloseActionJournal: Sendable {
         /// policy consumes as `currentlyApplied` also counts the obligations
         /// (`unverified`, `unverifiedAudio`), because an operator still waiting
         /// on an answer is not "nothing to report".
-        public var isEmpty: Bool { audio == nil && stopped.isEmpty }
+        public var isEmpty: Bool { audio.isEmpty && stopped.isEmpty }
 
         /// The record a fresh apply starts from. `unverified` is carried over
         /// deliberately: a process we could not prove is still something the
@@ -211,7 +216,14 @@ public struct LidCloseActionJournal: Sendable {
                 ?? kLidCloseActionSchemaVersion
             sessionID = try c.decodeIfPresent(UUID.self, forKey: .sessionID)
             startedAt = try c.decodeIfPresent(String.self, forKey: .startedAt)
-            audio = try c.decodeIfPresent(AudioState.self, forKey: .audio)
+            // Tolerant of the SINGULAR form an earlier build wrote.
+            if let list = try? c.decode([AudioState].self, forKey: .audio) {
+                audio = list
+            } else if let one = try? c.decode(AudioState.self, forKey: .audio) {
+                audio = [one]
+            } else {
+                audio = []
+            }
             stopped = try c.decodeIfPresent([StoppedProcess].self, forKey: .stopped) ?? []
             unverified = try c.decodeIfPresent([StoppedProcess].self, forKey: .unverified) ?? []
             // Tolerant of the SINGULAR form an earlier build wrote: a file from

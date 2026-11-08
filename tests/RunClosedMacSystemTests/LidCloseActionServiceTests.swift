@@ -15,7 +15,12 @@ final class LidCloseActionServiceTests: XCTestCase {
     /// independently of whether it lands, so a test can prove the service reads
     /// back instead of trusting the return value.
     private final class FakeAudio: AudioOutputBackend, @unchecked Sendable {
+        /// The DEFAULT output.
         var device: AudioOutputSnapshot?
+        /// Other devices still reachable by UID (a plugged-out output that stays
+        /// connected, headphones the operator switched away from). On a real
+        /// Mac they persist; the fake must model that or the undo looks broken.
+        var others: [String: AudioOutputSnapshot] = [:]
         /// Every `setMuted` call, in order.
         var writes: [(muted: Bool, uid: String)] = []
         /// When true, a write is ACCEPTED but silently does nothing — the
@@ -39,7 +44,13 @@ final class LidCloseActionServiceTests: XCTestCase {
                 failNextReads -= 1
                 return nil
             }
-            guard !readbackUnreadable, !deviceGone, var d = device, d.uid == uid else {
+            guard !readbackUnreadable, !deviceGone else { return nil }
+            var d: AudioOutputSnapshot
+            if let defaultDevice = device, defaultDevice.uid == uid {
+                d = defaultDevice
+            } else if let other = others[uid] {
+                d = other
+            } else {
                 return nil
             }
             // Model a device whose mute FLAG cannot be read while the device
@@ -51,9 +62,14 @@ final class LidCloseActionServiceTests: XCTestCase {
         }
         func setMuted(_ muted: Bool, uid: String) -> Bool {
             writes.append((muted, uid))
-            guard !acceptWithoutEffect, var d = device, d.uid == uid else { return true }
-            d.isMuted = muted
-            device = d
+            guard !acceptWithoutEffect else { return true }
+            if var d = device, d.uid == uid {
+                d.isMuted = muted
+                device = d
+            } else if var other = others[uid] {
+                other.isMuted = muted
+                others[uid] = other
+            }
             return true
         }
         /// When true, the device's mute flag becomes UNREADABLE (the mutation
@@ -314,9 +330,9 @@ final class LidCloseActionServiceTests: XCTestCase {
         XCTAssertEqual(out.evaluation.decision.action, .apply)
         XCTAssertEqual(rig.audio.writes.map { $0.muted }, [true])
         let rec = rig.journal.load()
-        XCTAssertEqual(rec.audio?.deviceUID, "BuiltInSpeakerDevice")
-        XCTAssertEqual(rec.audio?.wasMuted, false)
-        XCTAssertEqual(rec.audio?.volume, 0.5)
+        XCTAssertEqual(rec.audio.first?.deviceUID, "BuiltInSpeakerDevice")
+        XCTAssertEqual(rec.audio.first?.wasMuted, false)
+        XCTAssertEqual(rec.audio.first?.volume, 0.5)
         XCTAssertFalse(rec.isEmpty)
     }
 
@@ -340,7 +356,7 @@ final class LidCloseActionServiceTests: XCTestCase {
 
         XCTAssertEqual(out.apply, .applied)
         XCTAssertTrue(rig.audio.writes.isEmpty, "we wrote to a device that was already muted")
-        XCTAssertTrue(rig.journal.load().audio == nil)
+        XCTAssertTrue(rig.journal.load().audio.isEmpty)
     }
 
     /// A device with no mute capability is never touched: an effect we cannot
@@ -384,7 +400,7 @@ final class LidCloseActionServiceTests: XCTestCase {
                        "one unreadable pass must not be read as removal")
         XCTAssertEqual(rig.audio.writes.map { $0.muted }, [true],
                        "only the mute write; nothing was un-muted")
-        XCTAssertEqual(rig.journal.load().audio?.unreadablePasses, 1,
+        XCTAssertEqual(rig.journal.load().audio.first?.unreadablePasses, 1,
                        "the obligation must be kept, with its failure count")
     }
 
@@ -663,7 +679,7 @@ final class LidCloseActionServiceTests: XCTestCase {
         let out = stepEnclosed(&rig, settings())
 
         XCTAssertEqual(out.apply, .failed, "an unverified mute must not read as applied")
-        XCTAssertEqual(rig.journal.load().audio?.deviceUID, "BuiltInSpeakerDevice",
+        XCTAssertEqual(rig.journal.load().audio.first?.deviceUID, "BuiltInSpeakerDevice",
                        "an unreadable readback dropped the only record of the mute")
     }
 
@@ -690,7 +706,7 @@ final class LidCloseActionServiceTests: XCTestCase {
 
         _ = stepEnclosed(&rig, settings())
 
-        XCTAssertNil(rig.journal.load().audio,
+        XCTAssertTrue(rig.journal.load().audio.isEmpty,
                      "a proven no-op must not be journaled")
     }
 
@@ -852,7 +868,7 @@ final class LidCloseActionServiceTests: XCTestCase {
         XCTAssertEqual(concluded?.undo, .unverifiedProcesses,
                        "a concluded-gone device must stay an outstanding obligation")
         let rec = rig.journal.load()
-        XCTAssertNil(rec.audio)
+        XCTAssertTrue(rec.audio.isEmpty)
         XCTAssertEqual(rec.unverifiedAudio.first?.deviceUID, "BuiltInSpeakerDevice")
         XCTAssertTrue(rec.isEmpty, "no live effect remains")
     }
@@ -929,7 +945,7 @@ final class LidCloseActionServiceTests: XCTestCase {
 
         XCTAssertFalse(undo.audioDeviceGone, "two flaky reads were read as removal")
         XCTAssertNotNil(rig.journal.load().audio, "the obligation was erased")
-        XCTAssertEqual(rig.journal.load().audio?.unreadablePasses, 1)
+        XCTAssertEqual(rig.journal.load().audio.first?.unreadablePasses, 1)
     }
 
 
@@ -947,7 +963,7 @@ final class LidCloseActionServiceTests: XCTestCase {
         let out = stepEnclosed(&rig, settings(mute: false))
 
         XCTAssertEqual(rig.audio.device?.isMuted, false, "the sound was left muted")
-        XCTAssertNil(rig.journal.load().audio, "the obligation should be gone")
+        XCTAssertTrue(rig.journal.load().audio.isEmpty, "the obligation should be gone")
         XCTAssertEqual(out.evaluation.decision.action, .apply, "the master switch is still on")
     }
 
@@ -1200,7 +1216,7 @@ final class LidCloseActionServiceTests: XCTestCase {
         // 300 unreadable passes.
         rig.audio.deviceGone = true
         for _ in 0..<300 { _ = rig.service.undoAll() }
-        XCTAssertEqual(rig.journal.load().audio?.unreadablePasses, 300)
+        XCTAssertEqual(rig.journal.load().audio.first?.unreadablePasses, 300)
 
         // The device is REACHABLE again but its mute flag stays unreadable, so
         // the restore cannot be verified and the entry (rightly) survives —
@@ -1208,7 +1224,7 @@ final class LidCloseActionServiceTests: XCTestCase {
         rig.audio.deviceGone = false
         rig.audio.muteFlagUnreadable = true
         _ = rig.service.undoAll()
-        XCTAssertEqual(rig.journal.load().audio?.unreadablePasses, 0,
+        XCTAssertEqual(rig.journal.load().audio.first?.unreadablePasses, 0,
                        "a healthy read did not reset the counter")
         rig.audio.muteFlagUnreadable = false
 
@@ -1228,8 +1244,8 @@ final class LidCloseActionServiceTests: XCTestCase {
     func testUnconfirmedMuteIsRetriedNotAssumed() {
         var rig = makeRig(muted: false)
         // The journal claims a mute of this device, but the device is audible.
-        rig.journal.save(.init(audio: .init(
-            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)))
+        rig.journal.save(.init(audio: [.init(
+            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)]))
 
         let out = stepEnclosed(&rig, settings())
 
@@ -1242,8 +1258,8 @@ final class LidCloseActionServiceTests: XCTestCase {
     /// than a silent Mac that is not silent.
     func testUnconfirmableMuteReportsFailure() {
         var rig = makeRig(muted: false)
-        rig.journal.save(.init(audio: .init(
-            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)))
+        rig.journal.save(.init(audio: [.init(
+            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)]))
         rig.audio.acceptWithoutEffect = true
 
         let out = stepEnclosed(&rig, settings())
@@ -1314,13 +1330,13 @@ final class LidCloseActionServiceTests: XCTestCase {
     func testRemovingAnAudioEntryMarksTheOutcomeChanged() {
         var rig = makeRig(muted: false)
         // Journaled, but the device reads AUDIBLE: the undo removes the entry.
-        rig.journal.save(.init(audio: .init(
-            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)))
+        rig.journal.save(.init(audio: [.init(
+            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)]))
 
         let out = stepEnclosed(&rig, settings(mute: false))
 
         XCTAssertTrue(out.changed, "an entry removal was not reported as a change")
-        XCTAssertTrue(rig.journal.load().audio == nil)
+        XCTAssertTrue(rig.journal.load().audio.isEmpty)
     }
 
 
@@ -1353,6 +1369,66 @@ final class LidCloseActionServiceTests: XCTestCase {
                       "a signal that was never delivered became an obligation")
     }
 
+
+    // MARK: — Lord review round 4
+
+    /// (a) The operator plugs HEADPHONES in mid-session: the new default output
+    /// must be muted too, and both devices recorded, so neither is left audible
+    /// and both can be restored.
+    func testNewDefaultOutputMidSessionIsAlsoMuted() {
+        var rig = makeRig(muted: false)
+        let cfg = settings()
+        _ = stepEnclosed(&rig, cfg)
+        XCTAssertEqual(rig.audio.device?.isMuted, true)
+        XCTAssertEqual(rig.journal.load().audio.map { $0.deviceUID }, ["BuiltInSpeakerDevice"])
+
+        rig.audio.device = AudioOutputSnapshot(uid: "Headphones", isMuted: false,
+                                               volume: 0.7, canMute: true)
+
+        let out = stepEnclosed(&rig, cfg)
+
+        XCTAssertEqual(out.apply, .applied)
+        XCTAssertEqual(rig.audio.device?.isMuted, true,
+                       "the new default output stayed audible")
+        XCTAssertEqual(Set(rig.journal.load().audio.map { $0.deviceUID }),
+                       ["BuiltInSpeakerDevice", "Headphones"],
+                       "the new output was not recorded, so it could never be restored")
+    }
+
+    /// And the undo restores BOTH, so nothing is left muted.
+    func testUndoRestoresEveryRecordedOutput() {
+        var rig = makeRig(muted: false)
+        let cfg = settings()
+        _ = stepEnclosed(&rig, cfg)
+        // The built-in output stays CONNECTED, it is just no longer the default.
+        rig.audio.others["BuiltInSpeakerDevice"] = rig.audio.device
+        rig.audio.device = AudioOutputSnapshot(uid: "Headphones", isMuted: false,
+                                               volume: 0.7, canMute: true)
+        _ = stepEnclosed(&rig, cfg)
+        XCTAssertEqual(rig.journal.load().audio.count, 2)
+
+        _ = rig.service.undoAll()
+
+        XCTAssertTrue(rig.journal.load().audio.isEmpty, "an output was left muted")
+    }
+
+    /// (b) Unticking an app in the menu must RESUME it, not leave it frozen for
+    /// the rest of the session.
+    func testAppRemovedFromTheSelectionIsResumed() {
+        let rig0 = makeRig(apps: [(4711, "Slack", 1_700_000_000)])
+        var rig = rig0
+        _ = stepEnclosed(&rig, settings(mute: false, pause: true, apps: ["Slack"]))
+        XCTAssertEqual(rig.processes.table[4711]?.stopped, true)
+
+        let out = stepEnclosed(&rig, settings(mute: false, pause: true, apps: ["Discord"]))
+
+        XCTAssertEqual(rig.processes.table[4711]?.stopped, false,
+                       "the de-selected app stayed frozen")
+        XCTAssertTrue(rig.journal.load().stopped.isEmpty,
+                      "its ownership entry was left behind")
+        XCTAssertTrue(out.resumedPids.contains(4711))
+    }
+
     // MARK: — Journal durability
 
     /// The journal is written BEFORE the effect: the file on disk carries the
@@ -1362,7 +1438,7 @@ final class LidCloseActionServiceTests: XCTestCase {
         _ = stepEnclosed(&rig, settings(mute: true, pause: true))
         // A fresh read from disk is what a restarted process would see.
         let onDisk = LidCloseActionJournal(url: rig.journal.url).load()
-        XCTAssertEqual(onDisk.audio?.deviceUID, "BuiltInSpeakerDevice")
+        XCTAssertEqual(onDisk.audio.first?.deviceUID, "BuiltInSpeakerDevice")
         XCTAssertEqual(onDisk.stopped.map { $0.pid }, [4711])
     }
 

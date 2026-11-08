@@ -326,14 +326,21 @@ public struct LidCloseActionService {
         // mute state: re-adopt the obligation instead of forgetting it, so the
         // undo can restore it (gate finding, `Temporary device absence
         // permanently discards restoration`).
-        if decision.muteAudio, record.audio == nil,
-           let stranded = firstReturnedStrandedDevice(&record) {
-            record.audio = stranded
+        if decision.muteAudio, let stranded = firstReturnedStrandedDevice(&record) {
+            if !record.audio.contains(where: { $0.deviceUID == stranded.deviceUID }) {
+                record.audio.append(stranded)
+            }
             journal.save(record)
         }
 
-        // — 1. Sound.
-        if decision.muteAudio, record.audio == nil {
+        // — 1. Sound. The CURRENT default output is muted whenever it is not
+        // already covered by a journal entry.
+        //
+        // Gating this on "the journal is empty" was wrong: if the operator plugs
+        // headphones in mid-session, the journal already holds the OLD device,
+        // so the new default output was never muted and stayed audible while the
+        // service reported the action applied (Lord review round 4).
+        if decision.muteAudio, !isCurrentDefaultOutputRecorded(record) {
             switch muteDefaultOutput(journal: &record) {
             case .success(let effect):
                 audioEffect = effect
@@ -393,8 +400,22 @@ public struct LidCloseActionService {
                    reason: decision.reason.rawValue,
                    evaluation: evaluation,
                    audio: audioEffect.rawValue, audioError: audioError,
-                   audioDeviceUID: record.audio?.deviceUID,
+                   audioDeviceUID: record.audio.first?.deviceUID,
                    stopped: outcome.stoppedPids, failed: [], error: appError)
+    }
+
+    /// Is the CURRENT default output already covered by a journal entry?
+    ///
+    /// `true` when we have already accounted for it (either we muted it, or it
+    /// was muted before we arrived); `false` when it is a NEW device the
+    /// operator just selected.
+    private func isCurrentDefaultOutputRecorded(_ record: LidCloseActionJournal.Record) -> Bool {
+        // Unknown default output is NOT "already handled": letting it read as
+        // covered made the mute path report `.applied` with no device at all
+        // (a no-op presented as success). `false` lets `muteDefaultOutput` run
+        // and fail honestly, which is what "no murable device" should say.
+        guard let snapshot = audio.readDefaultOutput() else { return false }
+        return record.audio.contains { $0.deviceUID == snapshot.uid }
     }
 
     /// Mute the default output, journaling its prior state first.
@@ -418,10 +439,14 @@ public struct LidCloseActionService {
         }
         guard !wasMuted else { return .success(.alreadyMuted) }
 
-        record.audio = LidCloseActionJournal.AudioState(
+        // APPEND, never assign: another device may already be recorded from
+        // earlier in the session, and overwriting it would lose its undo.
+        let entry = LidCloseActionJournal.AudioState(
             deviceUID: snapshot.uid, wasMuted: false, volume: snapshot.volume)
+        record.audio.removeAll { $0.deviceUID == snapshot.uid }
+        record.audio.append(entry)
         guard journal.save(record) else {
-            record.audio = nil
+            removeAudio(snapshot.uid, in: &record)
             return .journalFailed
         }
         audio.setMuted(true, uid: snapshot.uid)
@@ -438,7 +463,7 @@ public struct LidCloseActionService {
             return .success(.muted)
         case .some(false):
             // Proved still audible: nothing was written, so the entry goes.
-            record.audio = nil
+            removeAudio(snapshot.uid, in: &record)
             journal.save(record)
             return .failure("readback did not confirm the mute")
         case .none:
@@ -454,6 +479,28 @@ public struct LidCloseActionService {
         journal record: inout LidCloseActionJournal.Record,
         into outcome: inout TickOutcome
     ) -> EffectResult<AppsEffect> {
+        // An app the operator just UNTICKED is no longer in `names`, so nothing
+        // below would ever resume it — it would stay frozen for the rest of the
+        // session (Lord review round 4). Resume every journaled app that is no
+        // longer selected, when its identity is proved.
+        var resumedDropped: [Int32] = []
+        for entry in record.stopped where !names.contains(entry.appName) {
+            guard identityProved(entry) else { continue }
+            if processes.isStopped(pid: entry.pid) == true {
+                processes.resume(pid: entry.pid)
+            }
+            if processes.isStopped(pid: entry.pid) == false {
+                resumedDropped.append(entry.pid)
+            }
+        }
+        if !resumedDropped.isEmpty {
+            let dropped = Set(resumedDropped)
+            record.stopped.removeAll { dropped.contains($0.pid) }
+            outcome.resumedPids = resumedDropped
+            outcome.changed = true
+            journal.save(record)
+        }
+
         let targets = processes.runningProcesses(matching: names)
         let known = Set(record.stopped.map { $0.pid })
         let pending = targets
@@ -635,12 +682,13 @@ public struct LidCloseActionService {
         // switch being turned off is exactly when the operator expects the
         // sound back, and the apply path only re-adopts while the switch is on
         // (gate finding, `Disabling audio restoration skips stranded devices`).
-        if !decision.muteAudio, record.audio == nil,
-           let stranded = firstReturnedStrandedDevice(&record) {
-            record.audio = stranded
+        if !decision.muteAudio, let stranded = firstReturnedStrandedDevice(&record) {
+            if !record.audio.contains(where: { $0.deviceUID == stranded.deviceUID }) {
+                record.audio.append(stranded)
+            }
         }
 
-        if !decision.muteAudio, record.audio != nil {
+        if !decision.muteAudio, !record.audio.isEmpty {
             var scratch = TickOutcome(evaluation: evaluation)
             unmuteRecordedDevice(journal: &record, into: &scratch)
             if scratch.audioDeviceGone { outcome.audioDeviceGone = true }
@@ -650,7 +698,7 @@ public struct LidCloseActionService {
             // plain success would tell the operator the sound is back when it
             // is not (gate finding, `L'échec de restauration audio reste
             // silencieux`).
-            if record.audio != nil && !scratch.changed {
+            if !record.audio.isEmpty && !scratch.changed {
                 outcome.shouldNotify = true
                 outcome.notice = outcome.notice ?? .audioLeftMuted
                 outcome.audioRestoreFailed = true
@@ -693,7 +741,7 @@ public struct LidCloseActionService {
     private func confirmExistingMute(
         record: LidCloseActionJournal.Record
     ) -> AudioEffect {
-        guard let entry = record.audio else { return .alreadyMuted }
+        guard let entry = record.audio.first else { return .alreadyMuted }
         guard let snapshot = audio.readOutput(uid: entry.deviceUID),
               let muted = snapshot.isMuted else {
             return .failed
@@ -927,145 +975,135 @@ public struct LidCloseActionService {
         // A device concluded gone that has COME BACK still muted: re-adopt it
         // here, not only in `apply`. A session can end (or the master switch be
         // turned off) while the device is unplugged, and its return must still
-        // be restorable — otherwise it stays muted indefinitely (gate finding,
-        // `Returning audio devices are never restored during undo`).
-        if record.audio == nil, let stranded = firstReturnedStrandedDevice(&record) {
-            record.audio = stranded
+        // be restorable — otherwise it stays muted indefinitely.
+        if let stranded = firstReturnedStrandedDevice(&record) {
+            if !record.audio.contains(where: { $0.deviceUID == stranded.deviceUID }) {
+                record.audio.append(stranded)
+            }
             journal.save(record)
         }
-        guard let prior = record.audio else { return }
+        guard !record.audio.isEmpty else { return }
+
+        // EVERY recorded device, not just the first: the default output can
+        // change during a session, so there can be more than one device of ours
+        // to restore (Lord review round 4).
+        var failedThisPass: [String] = []
+        for prior in record.audio {
+            if case .retry = unmuteOne(prior, journal: &record, into: &outcome) {
+                failedThisPass.append(prior.deviceUID)
+            }
+        }
+        guard !failedThisPass.isEmpty else { return }
+        outcome.shouldNotify = true
+        outcome.notice = .audioLeftMuted
+        outcome.audioRestoreFailed = true
+    }
+
+    /// Restore ONE recorded device. Returns `.retry` when the entry must stay.
+    private mutating func unmuteOne(
+        _ priorStored: LidCloseActionJournal.AudioState,
+        journal record: inout LidCloseActionJournal.Record,
+        into outcome: inout TickOutcome
+    ) -> UnmuteResult {
+        var prior = priorStored
 
         // A SUCCESSFUL read resets the consecutive-unreadable counter.
         //
         // Without this the counter only ever grew: a cable that flapped 200
         // times one evening, then a perfectly healthy device for hours, would
         // still be sitting at 200 — and 160 unrelated failures later the
-        // threshold would conclude "gone" long after the continuity was broken.
-        // The threshold has to mean CONSECUTIVE passes (Lord review, round 3).
-        //
-        // The reset is applied to a FRESH local, never to `prior`: `prior` is a
-        // stale snapshot, so building `escalated` from it put the OLD count back
-        // and the threshold fired on a device that had just been read
-        // successfully (gate finding, `Unreadable counter reset is overwritten
-        // using the stale snapshot`).
+        // threshold would conclude "gone" long after continuity was broken. The
+        // threshold must mean CONSECUTIVE passes (Lord review, round 3).
         let readable = readOutputTwice(uid: prior.deviceUID)
         if readable != nil, prior.unreadablePasses != 0 {
-            var cleared = prior
-            cleared.unreadablePasses = 0
-            record.audio = cleared
+            prior.unreadablePasses = 0
+            replaceAudio(prior, in: &record)
             journal.save(record)
         }
 
         guard let current = readable else {
-            // Still unreadable after the retry. That is NOT proof the device
-            // was removed: clearing the entry here left a muted device with no
-            // retry left. So the obligation STAYS, and the conclusion "gone" is
-            // only drawn after the device stays unreadable across several
-            // SEPARATE passes — a flaky read must never strand it, and a single
-            // failure must never be read as removal (gate findings).
-            // Build from the RECORD's current entry, not the stale `prior`
-            // snapshot: the reset above may have just zeroed it (gate finding,
-            // `Unreadable counter reset is overwritten using the stale
-            // snapshot`).
-            var escalated = record.audio ?? prior
-            escalated.unreadablePasses += 1
-            if escalated.unreadablePasses >= Self.unreadablePassesBeforeGone {
-                // Concluding "gone" DROPS the obligation, and a device can come
-                // back: headphones muted here, unplugged for three hours and
-                // plugged in again still holding their mute state would find no
-                // record and stay silent (gate finding, `Temporary device
-                // absence permanently discards restoration`).
-                //
-                // So the obligation moves to `unverified` instead of vanishing.
-                // It stops driving the undo (the device is not reachable, so
-                // there is nothing to do) but it SURVIVES: it is reported to the
-                // operator, and if the same UID reappears still muted the next
-                // apply re-adopts it rather than forgetting it.
-                record.audio = nil
-                // APPEND, never replace: several outputs can be muted across a
-                // session, and overwriting lost the earlier device's record
-                // (gate finding).
-                if !record.unverifiedAudio.contains(where: { $0.deviceUID == escalated.deviceUID }) {
-                    record.unverifiedAudio.append(escalated)
+            // Still unreadable after the retry. NOT proof of removal: the entry
+            // stays and counts up, and "gone" is only concluded after several
+            // SEPARATE passes.
+            prior.unreadablePasses += 1
+            if prior.unreadablePasses >= Self.unreadablePassesBeforeGone {
+                // Concluding "gone" must not FORGET the device: it can come
+                // back. The obligation moves to `unverifiedAudio` instead.
+                removeAudio(prior.deviceUID, in: &record)
+                if !record.unverifiedAudio.contains(where: { $0.deviceUID == prior.deviceUID }) {
+                    record.unverifiedAudio.append(prior)
                 }
                 journal.save(record)
                 outcome.audioDeviceGone = true
                 writeAudit(outcome: "deviceGone", reason: "undo",
                            evaluation: outcome.evaluation, audio: "gone",
-                           audioError: "unreadable on \(escalated.unreadablePasses) separate passes; kept as unverified",
+                           audioError: "unreadable on \(prior.unreadablePasses) separate passes; kept as unverified",
                            audioDeviceUID: prior.deviceUID, stopped: [], failed: [], error: nil)
-                return
+                return .done
             }
-            record.audio = escalated
+            replaceAudio(prior, in: &record)
             journal.save(record)
-            // An unconfirmed restore must ASK FOR ATTENTION: the backstop's
-            // reporting hangs off `shouldNotify`, so silence here meant a Mac
-            // that could quit or sleep still muted with nobody told (gate
-            // finding, `Unreadable audio restoration does not request
-            // attention`).
-            outcome.shouldNotify = true
-            outcome.notice = .audioLeftMuted
-            outcome.audioRestoreFailed = true
             writeAudit(outcome: "partial", reason: "undo", evaluation: outcome.evaluation,
                        audio: "readUnavailable",
                        audioError: "the device could not be read; the restore is unconfirmed",
                        audioDeviceUID: prior.deviceUID, stopped: [], failed: [], error: nil)
-            return
+            return .retry
         }
+
         guard !prior.wasMuted else {
             // Silent before we arrived: leave it silent.
-            record.audio = nil
+            removeAudio(prior.deviceUID, in: &record)
             outcome.changed = true
             journal.save(record)
             writeAudit(outcome: "undone", reason: "undo", evaluation: outcome.evaluation,
                        audio: "leftMuted", audioError: nil, audioDeviceUID: prior.deviceUID,
                        stopped: [], failed: [], error: nil)
-            return
+            return .done
         }
-        // Still muted is what we asked for; anything else means someone else
-        // touched it in the meantime, in which case we do not write either.
-        // Only a POSITIVE "audible" proves someone else already did our job.
-        // An unreadable flag is not that proof, so we fall through and write.
+
+        // Only a POSITIVE "audible" proves someone else already did our job. An
+        // unreadable flag is not that proof, so we fall through and write.
         if current.isMuted == false {
-            record.audio = nil
-            // The record CHANGED (an entry was removed), so the caller must
-            // re-save and report a failure. Without `changed` the checked save
-            // in `undoEffectsThatAreNowOff` was skipped and a failed write left
-            // stale ownership on disk — which a later undo could act on by
-            // un-muting a device the operator had muted themselves (gate
-            // finding, `Disabling effects can leave stale audio ownership on
-            // disk`).
+            removeAudio(prior.deviceUID, in: &record)
             outcome.changed = true
             journal.save(record)
             writeAudit(outcome: "undone", reason: "undo", evaluation: outcome.evaluation,
                        audio: "alreadyAudible", audioError: nil,
                        audioDeviceUID: prior.deviceUID, stopped: [], failed: [], error: nil)
-            return
+            return .done
         }
+
         audio.setMuted(false, uid: prior.deviceUID)
         // Readback, not acceptance: only a device that reads audible is
         // restored (ADR 009).
         guard audio.readOutput(uid: prior.deviceUID)?.isMuted == false else {
-            // The entry stays for a retry, AND the operator is told: the
-            // backstop's attention reporting hangs off `shouldNotify`, so a
-            // silent failure meant a Mac left muted with nobody asked to look
-            // (gate finding, `Failed audio restoration does not request operator
-            // attention`).
-            outcome.shouldNotify = true
-            outcome.notice = .audioLeftMuted
-            outcome.audioRestoreFailed = true
             writeAudit(outcome: "partial", reason: "undo", evaluation: outcome.evaluation,
                        audio: "unmuteFailed",
                        audioError: "readback did not confirm the unmute",
                        audioDeviceUID: prior.deviceUID, stopped: [], failed: [], error: nil)
-            return
+            return .retry
         }
-        record.audio = nil
+        removeAudio(prior.deviceUID, in: &record)
         journal.save(record)
         outcome.changed = true
         writeAudit(outcome: "undone", reason: "undo", evaluation: outcome.evaluation,
                    audio: "unmuted", audioError: nil, audioDeviceUID: prior.deviceUID,
                    stopped: [], failed: [], error: nil)
+        return .done
+    }
+
+    private enum UnmuteResult { case done, retry }
+
+    private func replaceAudio(_ state: LidCloseActionJournal.AudioState,
+                              in record: inout LidCloseActionJournal.Record) {
+        guard let i = record.audio.firstIndex(where: { $0.deviceUID == state.deviceUID })
+        else { return }
+        record.audio[i] = state
+    }
+
+    private func removeAudio(_ uid: String,
+                             in record: inout LidCloseActionJournal.Record) {
+        record.audio.removeAll { $0.deviceUID == uid }
     }
 
     /// Clear the journal once nothing of ours is outstanding.
