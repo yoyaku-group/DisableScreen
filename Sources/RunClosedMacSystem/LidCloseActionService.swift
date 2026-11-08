@@ -450,7 +450,16 @@ public struct LidCloseActionService {
         let known = Set(record.stopped.map { $0.pid })
         let pending = targets
             .map { $0.journalEntry(bootID: bootID) }
-            .filter { !known.contains($0.pid) }
+            .filter { entry in
+                guard known.contains(entry.pid) else { return true }
+                // Already journaled, but that is not proof it is STILL stopped:
+                // something else may have resumed it while the lid stayed
+                // closed. Re-check and re-stop it, or the service keeps
+                // reporting the pause as applied over a running app (gate
+                // finding, `Recorded processes are never checked for continued
+                // suspension`).
+                return processes.isStopped(pid: entry.pid) != true
+            }
         guard !pending.isEmpty else { return .success(.stopped) }
 
         var stopped: [LidCloseActionJournal.StoppedProcess] = []
@@ -988,6 +997,7 @@ public struct LidCloseActionService {
         guard !prior.wasMuted else {
             // Silent before we arrived: leave it silent.
             record.audio = nil
+            outcome.changed = true
             journal.save(record)
             writeAudit(outcome: "undone", reason: "undo", evaluation: outcome.evaluation,
                        audio: "leftMuted", audioError: nil, audioDeviceUID: prior.deviceUID,
@@ -1000,6 +1010,14 @@ public struct LidCloseActionService {
         // An unreadable flag is not that proof, so we fall through and write.
         if current.isMuted == false {
             record.audio = nil
+            // The record CHANGED (an entry was removed), so the caller must
+            // re-save and report a failure. Without `changed` the checked save
+            // in `undoEffectsThatAreNowOff` was skipped and a failed write left
+            // stale ownership on disk — which a later undo could act on by
+            // un-muting a device the operator had muted themselves (gate
+            // finding, `Disabling effects can leave stale audio ownership on
+            // disk`).
+            outcome.changed = true
             journal.save(record)
             writeAudit(outcome: "undone", reason: "undo", evaluation: outcome.evaluation,
                        audio: "alreadyAudible", audioError: nil,

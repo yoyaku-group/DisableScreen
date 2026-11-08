@@ -1284,6 +1284,42 @@ final class LidCloseActionServiceTests: XCTestCase {
                        "the app that DID stop must stay journaled")
     }
 
+
+    /// A journaled process that something else RESUMED while the lid stayed
+    /// closed must be re-stopped, not reported as applied (gate finding,
+    /// `Recorded processes are never checked for continued suspension`).
+    func testResumedProcessIsStoppedAgain() {
+        var rig = makeRig(apps: [(4711, "Slack", 1_700_000_000)])
+        let s = settings(mute: false, pause: true)
+        _ = stepEnclosed(&rig, s)
+        XCTAssertEqual(rig.processes.table[4711]?.stopped, true)
+
+        // Something resumes the app behind our back.
+        rig.processes.table[4711]?.stopped = false
+
+        let out = stepEnclosed(&rig, s)
+
+        XCTAssertEqual(rig.processes.table[4711]?.stopped, true,
+                       "a resumed app was reported as paused")
+        XCTAssertEqual(out.apply, .applied)
+    }
+
+    /// Removing an audio entry must mark the outcome CHANGED, so the caller's
+    /// checked save runs and a failed write is reported instead of leaving
+    /// stale ownership on disk (gate finding, `Disabling effects can leave
+    /// stale audio ownership on disk`).
+    func testRemovingAnAudioEntryMarksTheOutcomeChanged() {
+        var rig = makeRig(muted: false)
+        // Journaled, but the device reads AUDIBLE: the undo removes the entry.
+        rig.journal.save(.init(audio: .init(
+            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)))
+
+        let out = stepEnclosed(&rig, settings(mute: false))
+
+        XCTAssertTrue(out.changed, "an entry removal was not reported as a change")
+        XCTAssertTrue(rig.journal.load().audio == nil)
+    }
+
     // MARK: — Journal durability
 
     /// The journal is written BEFORE the effect: the file on disk carries the
