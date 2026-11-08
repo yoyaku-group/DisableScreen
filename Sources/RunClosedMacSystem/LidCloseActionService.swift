@@ -347,8 +347,10 @@ public struct LidCloseActionService {
             case .failure(let error):
                 audioError = error
                 audioEffect = .failed
-            case .journalFailed:
+            case .journalFailed(let stoppedSoFar):
                 outcome.journalSaveFailed = true
+                outcome.stoppedPids = stoppedSoFar
+                if !stoppedSoFar.isEmpty { outcome.changed = true }
                 audioEffect = .failed
                 audioError = "the journal could not be written"
             }
@@ -373,9 +375,15 @@ public struct LidCloseActionService {
             case .failure(let error):
                 appError = error
                 appsEffect = .failed
-            case .journalFailed:
+            case .journalFailed(let stoppedSoFar):
+                // Processes ALREADY stopped must not be hidden by the failed
+                // write: they are frozen on the machine, so the caller needs
+                // their pids and the "something changed" signal (gate finding,
+                // `Un échec de journal masque les processus déjà suspendus`).
                 outcome.journalSaveFailed = true
-                appsEffect = .failed
+                outcome.stoppedPids = stoppedSoFar
+                if !stoppedSoFar.isEmpty { outcome.changed = true }
+                appsEffect = stoppedSoFar.isEmpty ? .failed : .partial
                 appError = "the journal could not be written"
             }
         }
@@ -447,7 +455,7 @@ public struct LidCloseActionService {
         record.audio.append(entry)
         guard journal.save(record) else {
             removeAudio(snapshot.uid, in: &record)
-            return .journalFailed
+            return .journalFailed(stoppedSoFar: [])
         }
         audio.setMuted(true, uid: snapshot.uid)
         // Acceptance is not proof (ADR 009): read back before claiming it.
@@ -500,6 +508,13 @@ public struct LidCloseActionService {
             }
             if processes.isStopped(pid: entry.pid) == false {
                 resumedDropped.append(entry.pid)
+            } else {
+                // The resume did not take. The app is no longer a target, so
+                // nothing else will ever revisit it: say so rather than
+                // reporting a clean success over a frozen app (gate finding,
+                // `Échec de reprise d'une application désélectionnée non
+                // signalé`).
+                droppedUnproved = true
             }
         }
         if droppedUnproved {
@@ -546,7 +561,7 @@ public struct LidCloseActionService {
             record.stopped.append(entry)
             guard journal.save(record) else {
                 record.stopped.removeAll { $0.pid == entry.pid }
-                return .journalFailed
+                return .journalFailed(stoppedSoFar: stopped.map { $0.pid })
             }
             // RE-PROVE the identity immediately before signalling. The
             // snapshot `runningProcesses` returned may be stale: the app can
@@ -827,7 +842,9 @@ public struct LidCloseActionService {
     private enum EffectResult<T> {
         case success(T)
         case failure(String)
-        case journalFailed
+        /// The journal could not record the effect. Carries what had ALREADY
+        /// landed, so a partial result is never reported as nothing happened.
+        case journalFailed(stoppedSoFar: [Int32] = [])
     }
 
     // MARK: — Undo

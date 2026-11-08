@@ -1480,6 +1480,71 @@ final class LidCloseActionServiceTests: XCTestCase {
         XCTAssertEqual(out.notice, .appsLeftPaused)
     }
 
+
+    /// A de-selected app whose SIGCONT does not take must RAISE attention: it is
+    /// excluded from the target set, so nothing else revisits it (gate finding,
+    /// `Échec de reprise d'une application désélectionnée non signalé`).
+    func testFailedResumeOfDeselectedAppRaisesAttention() {
+        var rig = makeRig(apps: [(4711, "Slack", 1_700_000_000)])
+        _ = stepEnclosed(&rig, settings(mute: false, pause: true, apps: ["Slack"]))
+        XCTAssertEqual(rig.processes.table[4711]?.stopped, true)
+
+        // The resume will be delivered but will not take.
+        rig.processes.resumeHasNoEffect = true
+        let out = stepEnclosed(&rig, settings(mute: false, pause: true, apps: ["Discord"]))
+
+        XCTAssertTrue(out.shouldNotify,
+                      "a frozen de-selected app went silent")
+        XCTAssertEqual(out.notice, .appsLeftPaused)
+    }
+
+    /// A failed journal write must not hide the processes ALREADY stopped: they
+    /// are frozen on the machine, so the caller needs their pids (gate finding,
+    /// `Un échec de journal masque les processus déjà suspendus`).
+    ///
+    /// Driven by a journal whose directory is made read-only, which is the real
+    /// failure mode (a full or unwritable Application Support).
+    func testJournalFailureStillReportsAlreadyStoppedPids() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("runclosed-ro-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                                   ofItemAtPath: dir.path)
+            try? FileManager.default.removeItem(at: dir)
+        }
+
+        let audio = FakeAudio()
+        audio.device = AudioOutputSnapshot(uid: "BuiltInSpeakerDevice", isMuted: false,
+                                           volume: 0.5, canMute: true)
+        let processes = FakeProcesses()
+        for app in [(Int32(1), "Slack", UInt64(100)), (Int32(2), "Discord", UInt64(100))] {
+            processes.table[app.0] = .init(pid: app.0, startSeconds: app.2,
+                                           startMicroseconds: 0,
+                                           path: "/Applications/\(app.1).app/Contents/MacOS/\(app.1)",
+                                           appName: app.1)
+        }
+        let journal = LidCloseActionJournal(url: dir.appendingPathComponent("j.json"))
+        var service = LidCloseActionService(
+            journal: journal,
+            auditLog: LidCloseActionAuditLog(url: dir.appendingPathComponent("a.jsonl")),
+            audio: audio, processes: processes, bootID: "A",
+            wallClock: { Date(timeIntervalSince1970: 1_700_000_000) })
+        service.stopConfirmDelay = {}
+
+        // Make the directory unwritable: every save fails.
+        try FileManager.default.setAttributes([.posixPermissions: 0o500],
+                                              ofItemAtPath: dir.path)
+
+        let out = service.step(session: KeepAwakeSession(startedAt: Date(), bootID: "A"),
+                               lidClosed: true, externalDisplayConnected: false,
+                               settings: LidCloseActionSettings(enabled: true, muteAudio: false,
+                                                                pauseApps: true,
+                                                                pausedApps: ["Slack", "Discord"]))
+
+        XCTAssertTrue(out.journalSaveFailed, "a failed save was not reported")
+    }
+
     // MARK: — Journal durability
 
     /// The journal is written BEFORE the effect: the file on disk carries the

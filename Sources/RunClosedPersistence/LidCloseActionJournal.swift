@@ -248,7 +248,19 @@ public struct LidCloseActionJournal: Sendable {
             } else if let one = try? c.decode(AudioState.self, forKey: .audio) {
                 audio = [one]
             } else {
+                // NEITHER shape decoded: the field is PRESENT but malformed as a
+                // whole (e.g. `"audio": {"deviceUID": 17}`). That is a lost
+                // obligation, not an empty list — counting it keeps `isCorrupt`
+                // honest (gate finding, `Malformed audio fields bypass
+                // corruption reporting`).
                 audio = []
+                if (try? c.contains(.audio)) == true { droppedAudioEntries += 1 }
+            }
+            // Same for the obligation list: a malformed `unverifiedAudio` must
+            // not read as "nothing stranded".
+            if (try? c.contains(.unverifiedAudio)) == true,
+               (try? c.decode([AudioState].self, forKey: .unverifiedAudio)) == nil {
+                droppedAudioEntries += 1
             }
             // A damaged element is surfaced, never silently dropped.
             if audio.isEmpty, (try? c.contains(.audio)) == true {
