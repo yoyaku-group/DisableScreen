@@ -95,6 +95,17 @@ public struct LowBatteryGuardService {
     /// faster than the drain, and a machine that overheated must be released
     /// before the battery step gets to read the flag.
     public var thermalService: ThermalGuardService?
+    /// Optional lid-close actions (ADR 026). `nil` = ADR 022/023/025 behaviour
+    /// unchanged. When present it runs LAST in the same section: it is the one
+    /// step whose job is to UNDO what it did, so it must run after the steps
+    /// that can end a session or release the flag — a release must not leave
+    /// the Mac muted with an app frozen.
+    ///
+    /// It also takes no lock of its own (same contract as the thermal step).
+    public var lidCloseActions: LidCloseActionService?
+    /// The lid-close readings and settings, resolved per tick so a change made
+    /// in the menu bar takes effect on the next tick without a restart.
+    public var lidCloseReadings: (@Sendable () -> LidCloseActionService.Readings)?
 
     public init(
         lidService: LidMutationService,
@@ -104,7 +115,9 @@ public struct LowBatteryGuardService {
         lock: LidWriteLock = LidWriteLock(),
         auditLog: LowBatteryAuditLog = LowBatteryAuditLog(),
         sessionService: SessionService? = nil,
-        thermalService: ThermalGuardService? = nil
+        thermalService: ThermalGuardService? = nil,
+        lidCloseActions: LidCloseActionService? = nil,
+        lidCloseReadings: (@Sendable () -> LidCloseActionService.Readings)? = nil
     ) {
         self.lidService = lidService
         self.latchStore = latchStore
@@ -114,6 +127,8 @@ public struct LowBatteryGuardService {
         self.auditLog = auditLog
         self.sessionService = sessionService
         self.thermalService = thermalService
+        self.lidCloseActions = lidCloseActions
+        self.lidCloseReadings = lidCloseReadings
     }
 
     public struct Evaluation: Equatable, Sendable {
@@ -164,6 +179,9 @@ public struct LowBatteryGuardService {
         /// machine with no thermal layer, which keeps ADR 022/023 behaviour
         /// byte for byte.
         public var thermal: ThermalGuardService.TickOutcome?
+        /// The lid-close actions' result (ADR 026), when one is wired. `nil`
+        /// on a machine with no lid-close layer.
+        public var lidClose: LidCloseActionService.TickOutcome?
         /// Whether the BATTERY step ran in this tick.
         ///
         /// `false` for `thermalTick()` — the tick the app runs with the battery
@@ -238,6 +256,7 @@ public struct LowBatteryGuardService {
         if case .ended(let end)? = sessionStep?.expiry {
             outcome.sessionEndedNaturally = end.stopsKeepingAwake
         }
+        outcome.lidClose = runLidCloseStep()
         return outcome
     }
 
@@ -271,6 +290,40 @@ public struct LowBatteryGuardService {
         // through the thermal notice, not a second "session ended" one.
         outcome.sessionEndedNaturally = false
         outcome.batteryStepRan = false
+        outcome.lidClose = runLidCloseStep()
+        return outcome
+    }
+
+    /// The lid-close step (ADR 026): apply while the three conditions hold,
+    /// undo as soon as they stop.
+    ///
+    /// Runs LAST in the section, and for a reason that is the whole safety
+    /// design of the lot: it is the step whose job is to UNDO, so it must see
+    /// the session record the other steps just acted on. A tick that released
+    /// the flag must undo the sound, not leave the Mac muted.
+    ///
+    /// Takes no lock (the caller holds `LidWriteLock`). Returns `nil` when no
+    /// lid-close layer is wired, which keeps ADR 022/023/025 behaviour
+    /// unchanged.
+    public mutating func runLidCloseStep() -> LidCloseActionService.TickOutcome? {
+        guard var service = lidCloseActions, let readings = lidCloseReadings else { return nil }
+        // Read the session fresh: the thermal or session step above may have
+        // just finished it, and a finished session is exactly the moment the
+        // undo has to happen.
+        var r = readings()
+        r.session = sessionService?.load() ?? r.session
+        let outcome = service.step(readings: r)
+        lidCloseActions = service
+        return outcome
+    }
+
+    /// The unconditional undo (ADR 026), for a caller about to make the Mac
+    /// sleep or quit. It does not consult the conditions: if anything is
+    /// journaled, it is reversed.
+    public mutating func runLidCloseUndo() -> LidCloseActionService.TickOutcome? {
+        guard var service = lidCloseActions else { return nil }
+        let outcome = service.undoAll()
+        lidCloseActions = service
         return outcome
     }
 
@@ -560,6 +613,10 @@ public struct LowBatteryGuardService {
         if let m = outcome.mutation, m != .released, m == .rearmed || outcome.shouldNotify {
             audit(outcome, evaluation: evaluation, recordBootID: recordBootIDBefore)
         }
+        // ADR 026 — LAST, after every step that could end the session or
+        // release the flag: this step's job is to keep the sound and the apps
+        // in step with the session the steps above just changed.
+        outcome.lidClose = runLidCloseStep()
         return outcome
     }
 
@@ -601,6 +658,12 @@ public struct LowBatteryGuardService {
             // for sleep: the Mac may go down right after `sleepnow`.
             latchStore.save(record)
             audit(outcome, evaluation: evaluation, recordBootID: recordBootIDBefore)
+            // ADR 026: the lid-close actions are undone BEFORE the sleep, not
+            // after the wake-up that may never come. A Mac that goes down
+            // padded down with a frozen app would come back silent and
+            // unresponsive, with the backstop unable to help because the phone
+            // home it needs was never the problem.
+            undoLidCloseBeforeSleep(&outcome)
             // Best effort, and NOT retried — deliberately (review round 18).
             // The protective action already happened: `disablesleep` is at 0,
             // so the Mac follows its normal power management and sleeps on
@@ -656,9 +719,9 @@ public struct LowBatteryGuardService {
     /// (it shows no notification, so consuming the app's latch would silence a
     /// warning nobody ever saw). It also suppresses the notification for the
     /// protective caller for the same reason (review round 10).
-    private func attemptSleepOnceAfterFailure(_ outcome: inout TickOutcome,
-                                              record: inout LowBatteryLatchStore.Record,
-                                              protective: Bool) {
+    private mutating func attemptSleepOnceAfterFailure(_ outcome: inout TickOutcome,
+                                                      record: inout LowBatteryLatchStore.Record,
+                                                      protective: Bool) {
         if protective {
             guard !record.latch.protectiveSleepTried else { return }
         } else {
@@ -681,11 +744,27 @@ public struct LowBatteryGuardService {
         }
     }
 
-    private func attemptSleep(_ outcome: inout TickOutcome) {
+    private mutating func attemptSleep(_ outcome: inout TickOutcome) {
         let r = sleeper.sleepNow()
         outcome.sleepAttempted = true
         outcome.sleepRC = r.rc
         outcome.sleepOutput = r.output
+    }
+
+    /// Undo the lid-close actions before the Mac sleeps (ADR 026).
+    ///
+    /// The order the plan names is "at the end of a session, BEFORE the release
+    /// or the sleep". This is the sleep half: a machine that goes down muted
+    /// with Slack frozen comes back in exactly that state, and if the app
+    /// never wakes the backstop cannot be relied on to fix it.
+    ///
+    /// Uses the readings-free `undoAll()`, not `step()`: the conditions are
+    /// irrelevant here, the journal is.
+    private mutating func undoLidCloseBeforeSleep(_ outcome: inout TickOutcome) {
+        guard var service = lidCloseActions else { return }
+        let undo = service.undoAll()
+        lidCloseActions = service
+        if outcome.lidClose == nil { outcome.lidClose = undo }
     }
 }
 

@@ -64,6 +64,10 @@ public struct ThermalGuardService {
     /// ADR 023 session layer. A thermal release ENDS the session; `nil` means
     /// there is none, and the release is the same either way.
     public var sessionService: SessionService?
+    /// ADR 026 lid-close actions. A thermal release must UNDO them before the
+    /// Mac sleeps: otherwise it goes down muted with an app frozen and comes
+    /// back that way, with nobody left to notice. `nil` = no lid-close layer.
+    public var lidCloseActions: LidCloseActionService?
 
     public init(
         lidService: LidMutationService,
@@ -74,7 +78,8 @@ public struct ThermalGuardService {
         monotonic: @escaping @Sendable () -> Double,
         sleeper: any SystemSleeper,
         auditLog: ThermalAuditLog = ThermalAuditLog(),
-        sessionService: SessionService? = nil
+        sessionService: SessionService? = nil,
+        lidCloseActions: LidCloseActionService? = nil
     ) {
         self.lidService = lidService
         self.latchStore = latchStore
@@ -85,11 +90,14 @@ public struct ThermalGuardService {
         self.sleeper = sleeper
         self.auditLog = auditLog
         self.sessionService = sessionService
+        self.lidCloseActions = lidCloseActions
     }
 
     /// Live wiring: real thermal state, real clamshell bit, real display
     /// inventory, real `pmset`, real session layer.
-    public static func live(bootID: String, sessionService: SessionService?) -> ThermalGuardService {
+    public static func live(bootID: String,
+                            sessionService: SessionService?,
+                            lidCloseActions: LidCloseActionService? = nil) -> ThermalGuardService {
         let lidStore = OwnedLidAssertion(currentBootID: bootID)
         return ThermalGuardService(
             lidService: LidMutationService(
@@ -103,7 +111,8 @@ public struct ThermalGuardService {
             externalDisplayProvider: { ClamshellReadback.externalDisplayConnected() },
             monotonic: { MonotonicReadback.seconds() },
             sleeper: PMSetSleeper(),
-            sessionService: sessionService)
+            sessionService: sessionService,
+            lidCloseActions: lidCloseActions)
     }
 
     public struct Evaluation: Equatable, Sendable {
@@ -137,6 +146,9 @@ public struct ThermalGuardService {
         /// The session was ended by the thermal release (ADR 025: heat ENDS a
         /// session, it does not pause it).
         public var sessionEndedByHeat: Bool = false
+        /// What the lid-close undo did before this release's sleep (ADR 026).
+        /// `nil` when no lid-close layer is wired or nothing was applied.
+        public var lidCloseUndo: LidCloseActionService.TickOutcome?
         /// The latch could not be persisted this tick.
         ///
         /// Reported rather than swallowed because of what it costs: the
@@ -280,6 +292,13 @@ public struct ThermalGuardService {
             // right after `sleepnow`, and a latch written afterwards would be
             // lost with it (journal before change, ADR 009/022).
             persistLatch(record, into: &outcome)
+            // ADR 026: undo the lid-close actions BEFORE the sleep. A Mac that
+            // goes down muted with a frozen app comes back in that state, and
+            // the operator has no reason to connect it to a heat event.
+            if var actions = lidCloseActions {
+                outcome.lidCloseUndo = actions.undoAll()
+                lidCloseActions = actions
+            }
             // Best effort, and NOT retried: the protective action already
             // happened, so the Mac follows its normal power management and
             // sleeps/throttles on its own. Retrying would mean calling

@@ -1242,3 +1242,123 @@ exécutées.
 - Le relâchement réel du flag et le `pmset sleepnow` pour cause de chaleur.
 - Le rendu du popup (« Session terminée — chaleur ») et du titre de barre
   (`ended: heat`) sur la build installée.
+
+## L4 — actions à la fermeture du capot (ADR 026)
+
+### Suite complète
+
+```
+$ arch -arm64 swift build && arch -arm64 swift test
+RunClosedCoreTests           194 passed
+RunClosedPersistenceTests     79 passed
+RunClosedMacSystemTests      327 passed
+RunClosedHelperSupportTests   40 passed
+RunClosedAppTests             11 passed
+                             ---
+                             662 passed, 0 failures, 0 warnings
+```
+
+63 tests nouveaux pour ce lot : 19 de politique pure
+(`LidCloseActionPolicyTests`), 33 de service sur fakes
+(`LidCloseActionServiceTests`), 11 de persistance
+(`LidCloseActionJournalTests`), 11 de backstop (`BackstopLidCloseTests`).
+Aucun test ne touche la sortie audio réelle ni ne signale un vrai processus :
+les fakes sont la seule voie, et le brief l'exige.
+
+### Ce que les tests prouvent, cas par cas
+
+| Cas du brief | Test |
+|---|---|
+| les trois conditions, chacune manquante ⇒ aucune action | `testEachConditionIsNecessary`, `testNoCombinationActsWithoutAllThreeConditions` (144 combinaisons) |
+| une session sans fin compte comme une session | `testIndefiniteSessionCountsAsActive`, `testBackstopAppliesTheActionsWhenTheConditionsHold` |
+| écran externe branché ⇒ aucune action, même capot fermé | `testExternalDisplayNeverActs`, `testNoActionWithAnExternalDisplayAttached` |
+| état inconnu de l'écran ⇒ traité comme branché | `testUnknownDisplayCountsAsAttached`, `testUnknownDisplayIsTreatedAsAttached` |
+| coupure du son puis annulation rend exactement l'état d'avant | `testMuteThenUndoRestoresThePriorState` |
+| l'utilisateur change de sortie audio ⇒ l'annulation ne touche pas la nouvelle | `testUserSwitchingOutputIsNotTouched` |
+| `SIGSTOP` puis identité changée ⇒ `SIGCONT` refusé, app « à vérifier » | `testRecycledPidIsNeverResumed`, `testBackstopRefusesARecycledPid` |
+| arrêt puis reprise deux fois de suite ⇒ idempotent | `testStopAndResumeTwiceIsIdempotent`, `testApplyTwiceIsIdempotent` |
+| fin de session annule dans le bon ordre | `testSessionEndingUndoesInTheSameTick`, `testUndoOrderIsAppsThenSound` |
+| le backstop annule aussi (même politique, pas une copie) | `testBackstopUndoesACrashedSessionsActions`, `testJournalAloneIsAReasonToWork` |
+| aucune action quand le réglage est désactivé (défaut) | `testSwitchedOffByDefaultDoesNothing`, `testNoActionWhenTheSwitchIsOff`, `testBackstopDoesNotApplyWithTheSwitchOff` |
+
+Deux défauts réels ont été trouvés par ces tests pendant l'écriture, tous deux
+corrigés :
+
+1. `runLidCloseStep` lisait les lectures **live** au lieu de les remplir depuis
+   la closure du backstop, donc un test de backstop ne pouvait pas exercer la
+   lecture qu'il injectait — et un backstop sur une machine dont l'app est
+   plantée aurait lu le mauvais état.
+2. `guard plan.battery else { return report }` sautait le pas d'annulation sur
+   une machine **sans record de propriété** — exactement le cas « app plantée »
+   que ce pas existe pour couvrir. Trouvé par `testJournalAloneIsAReasonToWork`,
+   qui lit `nothingToDo` au lieu d'un run complété.
+
+Contre-épreuve : les deux tests nommés échouent sans leur correctif.
+
+### Bundle et signature
+
+```
+$ bash scripts/build-runclosed-app.sh
+OK: build/RunClosed.app
+
+$ plutil -lint build/RunClosed.app/Contents/Info.plist \
+    build/RunClosed.app/Contents/Library/LaunchAgents/*.plist \
+    build/RunClosed.app/Contents/Library/LaunchDaemons/*.plist
+... OK (×3)
+
+$ codesign --verify --strict build/RunClosed.app
+OK
+```
+
+### CLI sur la machine réelle — lecture seule, aucune mutation
+
+```
+$ runclosed-cli lid-close status --json
+  settings.enabled: false          ← le défaut du brief
+  conditions.lidClosed: false
+  conditions.externalDisplayConnected: false
+  decision.reason: "switchedOff"
+  journal.applied: false
+  exit 0
+```
+
+```
+$ runclosed-cli lid-close simulate
+  decision: apply / applied                 (défauts du simulate : conditions réunies)
+$ runclosed-cli lid-close simulate --enabled on --lid closed --external-display no
+  decision: apply / applied
+$ runclosed-cli lid-close simulate --enabled on --lid closed --external-display yes
+  decision: none / externalDisplay          ← Mac en dock : jamais touché
+$ runclosed-cli lid-close simulate --enabled on --lid closed --external-display unknown
+  decision: none / displayUnknown           ← inconnu compte comme branché
+$ runclosed-cli lid-close simulate --enabled on --lid open
+  decision: none / lidOpen
+$ runclosed-cli lid-close simulate --enabled on --session off
+  decision: none / noSession
+$ runclosed-cli lid-close simulate --enabled on --already-applied --lid open
+  decision: undo / lidOpen                  ← la direction d'annulation
+$ runclosed-cli lid-close nonsense        → exit 64
+$ runclosed-cli lid-close simulate --bogus → exit 64
+```
+
+Aucune mutation : le drapeau de mute de la sortie audio par défaut
+(`kAudioDevicePropertyMute`) vaut **0** avant **et** après la série
+ci-dessus — vérifié par une sonde CoreAudio directe, lecture seule. Aucun
+`SIGSTOP` n'a été envoyé à une vraie app (Slack/Discord/WhatsApp de Ben) : le
+journal est vide et `journal.applied` vaut `false`. Les commandes interdites sur
+la machine réelle (`session start`, `recover --backstop`, `backstop register`,
+`lid-stay-awake on|off`) n'ont pas été exécutées.
+
+### Non testé (matériel — PR5, Ben présent)
+
+- La coupure et le rétablissement réels de la sortie audio par défaut, et la
+  confirmation par relecture sur du vrai matériel.
+- Le `SIGSTOP` / `SIGCONT` réels sur Slack, Discord et WhatsApp (interdit
+  pendant le développement, et fait uniquement sur des processus factices ici).
+- La notification clamshell réelle à la fermeture du capot et sa rafale
+  d'anti-rebond (2 s), partagée avec ADR 025.
+- **La mesure « l'écran intégré reste-t-il actif capot fermé »** — c'est elle
+  qui décidera si la luminosité et le rétroéclairage clavier entrent un jour
+  dans le lot, et avec quel critère de relecture. Tant qu'elle n'est pas faite,
+  ces deux actions restent NOT_TESTED et non codées.
+- Le rendu du sous-menu clic droit sur la build installée.

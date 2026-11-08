@@ -171,6 +171,13 @@ public struct RecoveryBackstopService {
         /// restarts every minute, so the ten-minute release cannot fire. A
         /// protective action that cannot happen is a failure, not a detail.
         public var thermalLatchSaveFailed = false
+        /// The lid-close step's result (ADR 026). `nil` when the step did not
+        /// run (kill switch off, or no layer wired).
+        public var lidClose: LidCloseActionService.TickOutcome?
+        /// Whether the lid-close step ran at all — the tri-state contract the
+        /// battery and session steps use, so a minute that never reached the
+        /// step cannot be read as "nothing to undo".
+        public var lidCloseStepRan = false
 
         public init(plan: RecoveryPolicy.Plan) {
             self.plan = plan
@@ -244,6 +251,14 @@ public struct RecoveryBackstopService {
     /// an operator who turned the thermal guard off must not get a
     /// `disablesleep 0` plus `pmset sleepnow` from launchd a minute later.
     public let thermalGuardEnabled: @Sendable () -> Bool
+    /// The lid-close action journal (ADR 026).
+    ///
+    /// Read here for the FAST PATH, which must take the lock when a journal is
+    /// pending even if no session and no ownership record survived — that is
+    /// precisely the crashed-app case this whole step exists for. It is the
+    /// SAME file the guard's lid-close service writes, so a journal left by a
+    /// crashed session is seen by this predicate and undone inside the section.
+    public let lidCloseJournal: LidCloseActionJournal
     public var wallClock: @Sendable () -> Date
 
     public init(
@@ -259,6 +274,7 @@ public struct RecoveryBackstopService {
         thermalGuardEnabled: @escaping @Sendable () -> Bool = {
             ThermalGuardSettings.isEnabled()
         },
+        lidCloseJournal: LidCloseActionJournal = LidCloseActionJournal(),
         wallClock: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.sessionService = sessionService
@@ -269,6 +285,7 @@ public struct RecoveryBackstopService {
         self.appIsAlive = appIsAlive
         self.batteryGuardEnabled = batteryGuardEnabled
         self.thermalGuardEnabled = thermalGuardEnabled
+        self.lidCloseJournal = lidCloseJournal
         self.wallClock = wallClock
     }
 
@@ -279,6 +296,10 @@ public struct RecoveryBackstopService {
     /// app tick or a CLI command in flight is respected instead of raced.
     public static func live(bootID: String) -> RecoveryBackstopService {
         let session = SessionService.live(bootID: bootID)
+        // ADR 026: ONE lid-close service, shared by the guard tick and the
+        // thermal service, so a release path and the tick's own undo cannot
+        // journal two different episodes.
+        let lidClose = LidCloseActionService.live(bootID: bootID)
         let guardService = LowBatteryGuardService(
             lidService: LidMutationService(
                 bootID: bootID,
@@ -297,7 +318,16 @@ public struct RecoveryBackstopService {
             // end time must be protected from heat even if the app crashed —
             // the argument that justified the battery step here.
             thermalService: ThermalGuardService.live(bootID: bootID,
-                                                     sessionService: session))
+                                                     sessionService: session,
+                                                     lidCloseActions: lidClose),
+            // ADR 026: the SAME lid-close policy the app runs, so a Mac whose
+            // app crashed does not stay muted with an app frozen. A release
+            // path and the tick's undo share one `lidClose` service.
+            lidCloseActions: lidClose,
+            // The session is NOT part of this closure: `SessionService` is not
+            // `Sendable`, and the guard step re-reads the session itself right
+            // before it runs the step (the step above may have just ended it).
+            lidCloseReadings: { LidCloseActionService.Readings.lidEnvironment() })
         return RecoveryBackstopService(
             sessionService: session,
             guardService: guardService,
@@ -328,7 +358,8 @@ public struct RecoveryBackstopService {
             battery: nil,
             latch: guardService.latchStore.load().latch,
             batteryGuardEnabled: batteryGuardEnabled(),
-            thermalGuardEnabled: thermalGuardEnabled())
+            thermalGuardEnabled: thermalGuardEnabled(),
+            lidCloseJournalPending: !lidCloseJournal.load().isEmpty)
         let plan = RecoveryPolicy.plan(facts)
         let outcome: Outcome
         if !plan.needsWork {
@@ -469,6 +500,13 @@ public struct RecoveryBackstopService {
                         sleepRC: thermal.sleepRC))
                     report.audited = true
                 }
+                // ADR 026: a heat release governs the run, but the lid-close
+                // step still has to run on THIS minute rather than wait for the
+                // next one. The thermal path already undid the effects before
+                // its sleep, so what is left here is the session record it just
+                // ended: the tick's policy would otherwise see "no session" and
+                // leave the journal waiting another 60 s.
+                runLidCloseStep(&report, recordBootID: recordBootID)
                 return report
             }
         }
@@ -508,7 +546,14 @@ public struct RecoveryBackstopService {
         // It runs even when the session step failed: the two are independent
         // protections, and a failed release is exactly the moment the battery
         // rule matters most. The exit code aggregates both.
-        guard plan.battery else { return report }
+        //
+        // The lid-close step runs on BOTH exits of this section (ADR 026): a
+        // machine with no ownership record still has a journal to undo, and
+        // returning here without it would strand a mute forever.
+        guard plan.battery else {
+            runLidCloseStep(&report, recordBootID: recordBootID)
+            return report
+        }
         // Set BEFORE the battery step: from here on, a `nil` `auditedFailureKey`
         // in this report is a measurement ("no repeating failure right now"),
         // not an absence of measurement.
@@ -566,7 +611,58 @@ public struct RecoveryBackstopService {
             // Out of the episode: the next rearmWithheld run reports again.
             break
         }
+        // ADR 026 — last, in the same section: keep the sound and the apps in
+        // step with the session the steps above just changed.
+        runLidCloseStep(&report, recordBootID: recordBootID)
         return report
+    }
+
+    /// The lid-close step, shared by the two exits of the locked section (the
+    /// ordinary tail and the thermal-governed early return) so neither can be
+    /// left out.
+    ///
+    /// It runs its UNDO unconditionally and its APPLY only under the operator's
+    /// switch — both decisions belong to `LidCloseActionPolicy`, which is the
+    /// SAME code the app's tick runs. This method only reads the live state and
+    /// records what happened.
+    private mutating func runLidCloseStep(_ report: inout Report, recordBootID: String) {
+        // The operator's master switch is honoured through the SETTINGS, not by
+        // skipping the step: with the switch off the policy answers `.undo`
+        // whenever the journal is not empty, which is exactly what a crashed
+        // session needs. Skipping the step would strand a mute forever.
+        //
+        // The readings come from the guard's own closure when it has one (the
+        // test seam), with the SESSION filled in here: `step()` is a `mutating`
+        // method on the service, so it cannot run inside that closure, and the
+        // session is the one fact the steps above may have just changed.
+        var readings = guardService.lidCloseReadings?()
+            ?? LidCloseActionService.Readings.lidEnvironment()
+        readings.session = sessionService.load()
+        guard var service = guardService.lidCloseActions else { return }
+        let outcome = service.step(readings: readings)
+        guardService.lidCloseActions = service
+        report.lidClose = outcome
+        report.lidCloseStepRan = true
+        // A no-op minute writes nothing: the audit is once per ACTION, not once
+        // per 60 s.
+        guard outcome.changed || outcome.undo != nil || outcome.apply != nil else { return }
+        audit(.init(
+            ts: timestamp(),
+            bootID: sessionService.continuous.bootID,
+            step: "lidCloseActions",
+            outcome: outcome.apply?.rawValue ?? outcome.undo?.rawValue ?? "none",
+            reason: outcome.evaluation.decision.reason.rawValue,
+            detail: outcome.shouldNotify ? "operator attention needed" : nil,
+            recordBootID: recordBootID.isEmpty ? nil : recordBootID,
+            error: outcome.journalSaveFailed ? "the action journal could not be written" : nil))
+        report.audited = true
+        // A process left stopped is the one outcome a human must see: the
+        // backstop shows no notification, so the CLI surfaces it from here.
+        if outcome.shouldNotify, let notice = outcome.notice {
+            FileHandle.standardError.write(Data(
+                ("[RunClosed] recover --backstop: lid-close actions need attention "
+                 + "(\(notice.rawValue)): pids \(outcome.unverifiedPids)\n").utf8))
+        }
     }
 
     /// The JSON body `recover --backstop` prints, plus the exit code.
@@ -614,6 +710,20 @@ public struct RecoveryBackstopService {
             if let step = report.session {
                 obj["sessionExpiry"] = String(describing: step.expiry)
                 obj["sessionReconciled"] = step.reconciled.map { String(describing: $0) } as Any? ?? NSNull()
+            }
+            // ADR 026 — present only when the step ran, so a machine that never
+            // used the feature keeps the ADR 024/025 report byte for byte.
+            if report.lidCloseStepRan, let lidClose = report.lidClose {
+                obj["lidCloseStepRan"] = true
+                obj["lidCloseReason"] = lidClose.evaluation.decision.reason.rawValue
+                obj["lidCloseApply"] = lidClose.apply?.rawValue as Any? ?? NSNull()
+                obj["lidCloseUndo"] = lidClose.undo?.rawValue as Any? ?? NSNull()
+                obj["lidCloseStoppedPids"] = lidClose.stoppedPids
+                obj["lidCloseResumedPids"] = lidClose.resumedPids
+                obj["lidCloseUnverifiedPids"] = lidClose.unverifiedPids
+                obj["lidCloseNeedsAttention"] = lidClose.shouldNotify
+            } else if report.lidCloseStepRan {
+                obj["lidCloseStepRan"] = true
             }
             obj["batteryReason"] = report.batteryReason?.rawValue as Any? ?? NSNull()
             obj["batteryMutation"] = report.batteryMutation?.rawValue as Any? ?? NSNull()

@@ -187,6 +187,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 store: OwnedLidAssertion(currentBootID: bootID),
                 priorProvider: { PowerReadback.lidStayAwake() })
             _ = lidService.restoreIfOwned()
+            // ADR 026: the quit is one of the four points where the lid-close
+            // actions are undone. Inside the lock like every other lid writer,
+            // and BEFORE the session record goes: the undo is unconditional
+            // here — the journal is the authority, not the conditions.
+            var lidClose = LidCloseActionService.live(bootID: bootID)
+            let lidCloseUndo = lidClose.undoAll()
+            if lidCloseUndo.changed || lidCloseUndo.shouldNotify {
+                FileHandle.standardError.write(Data(
+                    ("[RunClosed] quit: lid-close actions undone "
+                     + "(\(lidCloseUndo.undo?.rawValue ?? "none"), "
+                     + "resumed=\(lidCloseUndo.resumedPids), "
+                     + "unverified=\(lidCloseUndo.unverifiedPids))\n").utf8))
+            }
             // ADR 023: the session ends with the flag it was backing — a
             // record left behind would be a deadline nothing enforces. Go
             // through the SAME finish path as End and expiry, so the pending
@@ -509,6 +522,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refresh.target = self
         menu.addItem(refresh)
         menu.addItem(.separator())
+        menu.addItem(lidCloseActionsMenuItem())
+        menu.addItem(.separator())
         let settings = NSMenuItem(title: L10n.t("Open macOS Display Settings"), action: #selector(openDisplaysSettings(_:)), keyEquivalent: "")
         settings.target = self
         menu.addItem(settings)
@@ -519,6 +534,87 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
         statusItem.button?.performClick(nil)
         statusItem.menu = nil   // restore popup behavior for left-click
+    }
+
+    /// The lid-close actions of the right-click menu (ADR 026).
+    ///
+    /// One submenu with three switches, read from the store at MENU-BUILD time
+    /// so it always shows the persisted state:
+    ///
+    /// - the master switch, OFF by default;
+    /// - "Mute the sound", gated by nothing but the master switch;
+    /// - "Pause noisy apps", its OWN switch, because freezing a process is far
+    ///   more intrusive than muting a device (ADR 026).
+    ///
+    /// A checkbox that cannot be written is reported instead of redrawn: the
+    /// operator must not be left with a tick that will read back unticked.
+    private func lidCloseActionsMenuItem() -> NSMenuItem {
+        let settings = LidCloseActionSettingsStore.load()
+        let root = NSMenuItem(title: L10n.t("When the lid closes"), action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+
+        let master = NSMenuItem(title: L10n.t("Enable lid-close actions"),
+                                action: #selector(toggleLidCloseActions(_:)), keyEquivalent: "")
+        master.target = self
+        master.state = settings.enabled ? .on : .off
+        sub.addItem(master)
+
+        sub.addItem(.separator())
+
+        let mute = NSMenuItem(title: L10n.t("Mute the sound"),
+                              action: #selector(toggleLidCloseMute(_:)), keyEquivalent: "")
+        mute.target = self
+        mute.state = settings.muteAudio ? .on : .off
+        mute.isEnabled = settings.enabled
+        sub.addItem(mute)
+
+        let pause = NSMenuItem(title: L10n.t("Pause noisy apps"),
+                               action: #selector(toggleLidClosePauseApps(_:)), keyEquivalent: "")
+        pause.target = self
+        pause.state = settings.pauseApps ? .on : .off
+        pause.isEnabled = settings.enabled
+        sub.addItem(pause)
+
+        // Which apps, and the disclaimer the operator needs before ticking the
+        // box: a paused app stops answering its own network keepalives.
+        let names = settings.pausedApps.isEmpty
+            ? L10n.t("No app selected")
+            : settings.pausedApps.joined(separator: ", ")
+        let list = NSMenuItem(title: L10n.t("Apps: %@", names), action: nil, keyEquivalent: "")
+        list.isEnabled = false
+        sub.addItem(list)
+
+        root.submenu = sub
+        return root
+    }
+
+    /// Write the settings and immediately re-run the guard tick so the effect
+    /// follows the click instead of waiting up to 30 s.
+    private func updateLidCloseSettings(_ mutate: (inout LidCloseActionSettings) -> Void) {
+        var settings = LidCloseActionSettingsStore.load()
+        mutate(&settings)
+        guard LidCloseActionSettingsStore.save(settings) else {
+            notify(L10n.t("Could not save the setting"),
+                   L10n.t("The lid-close setting could not be written, so it was not changed."))
+            return
+        }
+        // Re-run the guard tick NOW rather than waiting up to 30 s: turning the
+        // master switch off must undo immediately, and turning it on must apply
+        // as soon as the conditions allow. The tick takes `LidWriteLock`, so
+        // this is the same serialized path a timer fire uses.
+        runLowBatteryTick()
+    }
+
+    @objc private func toggleLidCloseActions(_ sender: NSMenuItem) {
+        updateLidCloseSettings { $0.enabled.toggle() }
+    }
+
+    @objc private func toggleLidCloseMute(_ sender: NSMenuItem) {
+        updateLidCloseSettings { $0.muteAudio.toggle() }
+    }
+
+    @objc private func toggleLidClosePauseApps(_ sender: NSMenuItem) {
+        updateLidCloseSettings { $0.pauseApps.toggle() }
     }
 
     @objc private func refreshClicked(_ sender: Any?) {
@@ -1036,6 +1132,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let bootID = clock.bootID
         guardQueue.async { [weak self, bootID] in
             let session = SessionService.live(bootID: bootID)
+            // ADR 026: ONE lid-close service, shared by the guard tick and the
+            // thermal step, so a release and the tick's own undo cannot journal
+            // two different episodes.
+            let lidClose = LidCloseActionService.live(bootID: bootID)
             var service = LowBatteryGuardService(
                 lidService: LidMutationService(
                     bootID: bootID,
@@ -1051,8 +1151,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // ADR 025: heat runs FIRST in that same section and takes no
                 // lock of its own.
                 thermalService: thermalEnabled
-                    ? ThermalGuardService.live(bootID: bootID, sessionService: session)
-                    : nil)
+                    ? ThermalGuardService.live(bootID: bootID, sessionService: session,
+                                               lidCloseActions: lidClose)
+                    : nil,
+                // ADR 026: LAST in that section, and it runs whatever the two
+                // switches say — the policy decides, and with the master switch
+                // off its only possible answer is `.undo` for a non-empty
+                // journal. Skipping the step would strand a mute.
+                lidCloseActions: lidClose,
+                lidCloseReadings: { LidCloseActionService.Readings.lidEnvironment() })
             if !batteryEnabled {
                 // The battery kill switch must not switch the thermal rule off
                 // with it — nor the deadlines. One section, thermal then
