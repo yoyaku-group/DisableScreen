@@ -657,7 +657,12 @@ public struct LidCloseActionService {
                 // and the operator is told something needs checking.
                 failed.append(entry.pid)
                 record.stopped.removeAll { $0.pid == entry.pid }
-                if !record.unverified.contains(where: { $0.pid == entry.pid }) {
+                // Replace by FULL IDENTITY, not by pid: a recycled pid may
+                // already have an entry here for the OLD process, and refusing
+                // to add the new one left the newly suspended app with no
+                // recovery record at all (gate finding, `PID reuse can discard a
+                // new process's recovery entry`).
+                if !record.unverified.contains(where: { $0.identity == entry.identity }) {
                     record.unverified.append(entry)
                 }
                 // Tell the operator NOW. Normal apply ticks do not revisit

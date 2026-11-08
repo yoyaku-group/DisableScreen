@@ -201,6 +201,23 @@ public struct RecoveryBackstopService {
             // covered. Reporting it as ok would feed a "fresh" heartbeat to the
             // CLI on the strength of protection that cannot fire.
             if thermalLatchSaveFailed { return .backendFailure }
+            // ADR 026: an incomplete lid-close recovery is a failure of this
+            // minute, not a healthy one. Without this the backstop returned 0
+            // and recorded a successful run while an app was still suspended or
+            // the journal could not be persisted — and a 0 is exactly what the
+            // CLI trusts when it lifts the ADR 023 session refusal (gate
+            // finding, `Une récupération incomplète retourne un code de
+            // succès`).
+            if lidCloseStepRan, let lidClose, lidClose.journalSaveFailed {
+                return .backendFailure
+            }
+            if lidCloseStepRan, let lidClose,
+               lidClose.undo == .incomplete || lidClose.undo == .unverifiedProcesses {
+                return .refused
+            }
+            if lidCloseStepRan, let lidClose, lidClose.audioRestoreFailed {
+                return .refused
+            }
             // The battery step maps its own outcome. Previously only a nil
             // mutation with an error yielded 5, so a critical-battery release
             // that FAILED reported success — a protective action that did not
