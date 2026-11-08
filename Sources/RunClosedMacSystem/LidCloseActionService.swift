@@ -1037,20 +1037,6 @@ public struct LidCloseActionService {
                 outcome.notice = outcome.notice ?? .audioLeftMuted
                 outcome.audioRestoreFailed = true
             }
-            // CARRY the failure report, not just `changed`. A PARTIAL restore
-            // (one device back, one not) set both on `scratch`, and dropping
-            // them here — while the fallback below only fires when nothing
-            // changed — left the operator with no notice over a device still
-            // muted (gate finding, `Partial audio restoration suppresses the
-            // failure notice`).
-
-            // CARRY the failure report, not just `changed`. A PARTIAL restore
-            // (one device back, one not) set both on `scratch`, and dropping
-            // them here — while the fallback below only fires when nothing
-            // changed — left the operator with no notice over a device still
-            // muted (gate finding, `Partial audio restoration suppresses the
-            // failure notice`).
-
             // A restore that did NOT land must be visible: the entry is kept
             // for a retry (correct), but reporting `.nothingRequested` or a
             // plain success would tell the operator the sound is back when it
@@ -1061,6 +1047,15 @@ public struct LidCloseActionService {
                 outcome.notice = outcome.notice ?? .audioLeftMuted
                 outcome.audioRestoreFailed = true
             }
+            // And the PERSISTENCE failure, on the same rule as the process
+            // branch below: `unmuteOne` advances `unreadablePasses` in memory
+            // and its save can fail with nothing else moved on the machine, so
+            // the final save is skipped and the caller was told the journal was
+            // fine while the counter never advanced — a device that really is
+            // gone retried forever (gate finding, `Audio recovery persistence
+            // failures disappear when disabling effects`). This is the twin of
+            // the process carry; both existed, only one was copied.
+            if scratch.journalSaveFailed { outcome.journalSaveFailed = true }
             outcome.evaluation.journalBefore = record
         }
         // Turning the audio switch off must STILL report a device that is

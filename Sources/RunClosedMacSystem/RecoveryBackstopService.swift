@@ -732,7 +732,19 @@ public struct RecoveryBackstopService {
         // re-evaluating would mute and suspend again — undoing the protective
         // restore across the sleep (gate finding, `Backstop bypasses the
         // protective undo-only decision`).
-        if report.sleepAttempted {
+        //
+        // `sleepAttempted` alone is NOT enough. When the protective sleep budget
+        // is already spent (`protectiveSleepTried`), `attemptSleepOnceAfterFailure`
+        // returns WITHOUT sleeping, so a release that FAILED still restored the
+        // effects with `sleepAttempted == false` — and this branch then ran the
+        // ordinary policy over an active session with the lid still closed,
+        // muting and suspending right after the restore (gate finding,
+        // `Consumed sleep budget allows protective undo to be reversed`). Any
+        // protective release this minute — verified OR failed — is undo-only,
+        // the same rule `lockedTick` now applies.
+        let batteryRestored = report.batteryMutation == .released
+            || report.batteryMutation == .releaseFailed
+        if report.sleepAttempted || batteryRestored {
             // A truncated journal loads as empty, so `undoAll` reports
             // `nothingToDo` and the obligations it could not see are invisible.
             // This branch does not run `runLidCloseStep`, so the corruption

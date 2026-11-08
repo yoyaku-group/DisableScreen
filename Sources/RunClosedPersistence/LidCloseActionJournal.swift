@@ -289,7 +289,14 @@ public struct LidCloseActionJournal: Sendable {
         /// down with it.
         static func saturatingAdd(_ a: Int, _ b: Int) -> Int {
             let (sum, overflow) = a.addingReportingOverflow(b)
-            return overflow ? Int.max : sum
+            // CLAMPED AT ZERO on the way out, too. A persisted `-1` survived the
+            // addition and CANCELLED a real damage count: one malformed entry
+            // plus `-1` read as zero, so `hasDroppedEntries` and `isCorrupt`
+            // both said "healthy" over a lost restoration obligation — and the
+            // next save wrote that zero back, erasing the signal durably (gate
+            // finding, `Un compteur négatif masque les entrées perdues`).
+            if overflow { return b > 0 ? Int.max : Int.min }
+            return max(0, sum)
         }
 
         public init(from decoder: Decoder) throws {

@@ -1219,11 +1219,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let bootID = clock.bootID
         guardQueue.async { [weak self, bootID] in
             var service = SessionService.live(bootID: bootID)
-            let step = LidWriteLock().withLock { service.step() }
+            // ADR 026 must survive BOTH kill switches being off. The lid-close
+            // step used to live only inside the battery/thermal tick, so an
+            // operator who applied the effects and then disabled both guards
+            // never got the undo — the Mac stayed muted with apps frozen until
+            // something else happened to recover them (gate finding, `Settings
+            // changes bypass recovery when both guards are disabled`). The
+            // step is its own feature with its own switch; it runs in the same
+            // lock section, after the session step, exactly as it does in the
+            // full tick.
+            let lock = LidWriteLock()
+            let (step, lidClose) = lock.withLock {
+                () -> (SessionService.StepOutcome, LidCloseActionService.TickOutcome) in
+                let s = service.step()
+                var lidCloseService = LidCloseActionService.live(bootID: bootID)
+                let out = lidCloseService.step(
+                    readings: LidCloseActionService.Readings.lidEnvironment())
+                return (s, out)
+            }
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.guardTickInFlight = false
                 self.handleSessionStep(expiry: step.expiry, reconciled: step.reconciled)
+                if lidClose.changed {
+                    self.refreshLidCache()
+                }
+                if lidClose.shouldNotify, let notice = lidClose.notice {
+                    FileHandle.standardError.write(Data(
+                        ("[RunClosed] lid-close (session-only tick): "
+                         + "\(notice.rawValue)\n").utf8))
+                }
             }
         }
     }

@@ -1600,6 +1600,27 @@ Le tour 13 a rendu **3 WARN, 0 CRITICAL**, tous réels.
 
 Suite : **720/720**, 0 échec, 0 warning, rc=0 (ces trois correctifs n'ajoutent aucun test : ils durcissent des chemins déjà couverts).
 
+### Tour 14 — quatre WARN, et un changement de méthode
+
+Le tour 14 a rendu **4 WARN, 0 CRITICAL**. Tous réels, et tous des jumeaux de
+correctifs précédents. Après quatre tours consécutifs où la relecture trouvait
+« la même règle, appliquée à un site mais pas à côté », j'ai arrêté de corriger
+site par site et j'ai balayé mécaniquement chaque motif :
+
+| Défaut | Correction | Balayage |
+|---|---|---|
+| L'échec de persistance audio n'était pas reporté depuis `scratch` (le jumeau exact du report des processus, corrigé au tour 12). | Report ajouté. | `grep 'scratch.journalSaveFailed'` → les deux branches le portent maintenant. |
+| Le backstop batterie ne supprimait la réapplication que sur `sleepAttempted` ; budget de sommeil épuisé ⇒ relâchement échoué, effets restaurés, puis re-mutés. | `batteryRestored` ajouté, comme dans `lockedTick` au tour 13. | `grep 'sleepAttempted'` sur les deux services → les trois sites de décision sont alignés. |
+| Passer les DEUX gardes à off faisait sauter `runSessionOnlyTick` **avant** de construire le service d'actions capot : les effets appliqués n'étaient jamais annulés, et les activer ne les appliquait jamais. | Le pas d'actions capot tourne aussi dans le tick « session seule », dans la même section verrouillée. | Le chemin existe désormais quel que soit l'état des deux coupe-circuits. |
+| Un compteur de dommage négatif (`-1`) annulait un vrai compte : `1 + (-1) = 0`, donc `isCorrupt` disait « sain » sur une obligation perdue, et la sauvegarde suivante gravait ce zéro. | `saturatingAdd` borne aussi à zéro. | — |
+
+Trois de ces quatre points sont des correctifs de correctifs, pour la quatrième
+fois. C'est la vraie leçon du lot : **un défaut trouvé à un site doit déclencher
+une recherche de son jumeau, pas un patch local.** Les tours 7 à 14 ont coûté
+huit passes là où trois auraient suffi si j'avais balayé au premier.
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.
+
 ### Le coupe-circuit, éprouvé et non affirmé
 
 Le premier message de commit annonçait un rollback sans l'avoir vérifié. Le
