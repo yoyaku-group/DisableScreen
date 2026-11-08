@@ -589,12 +589,16 @@ public struct LidCloseActionService {
         guard let scan = processes.runningProcesses(matching: names) else {
             return .failure("could not enumerate processes to pause")
         }
-        // An INCONCLUSIVE scan (nothing found, something unreadable) may have
-        // missed a target: report it rather than claiming a clean result.
+        // An unreadable candidate may have BEEN a target, and we cannot tell.
+        // The honest answer is to proceed with what we found and never claim the
+        // scan was complete — refusing instead would let one unreadable system
+        // process disable app suspension entirely (the finding that made me flip
+        // this boolean three times). `scanIncomplete` travels to the result.
         if scan.isInconclusive {
             return .failure("could not read \(scan.unreadable) process(es); "
                 + "the pause could not be confirmed")
         }
+        let scanIncomplete = scan.unreadable > 0
         let targets = scan.targets
         // A SELECTED unverified entry whose stop has since LANDED is excluded
         // from enumeration (the backend skips stopped processes), so it was
@@ -620,14 +624,17 @@ public struct LidCloseActionService {
                 // suspension`).
                 return processes.isStopped(pid: entry.pid) != true
             }
+        // A SELECTED entry in `unverified` is an unresolved obligation. It must
+        // downgrade the result whether or not this tick also stopped something
+        // new — otherwise a successful stop masks it and the tick reports
+        // `.applied` over an app that may still be frozen (gate findings,
+        // `Outstanding unverified stops are reported as successfully applied`
+        // and `New successful stops mask existing unverified stops`).
+        let hasOutstanding = !record.unverified.filter { names.contains($0.appName) }.isEmpty
+
         guard !pending.isEmpty else {
-            // Nothing NEW to stop, but a SELECTED entry may still be sitting in
-            // `unverified` from an earlier tick — an obligation the operator was
-            // told about. Returning a clean `.stopped` made every subsequent
-            // tick claim `.applied` over it (gate finding, `Outstanding
-            // unverified stops are reported as successfully applied`).
-            let selectedUnverified = record.unverified.filter { names.contains($0.appName) }
-            return selectedUnverified.isEmpty ? .success(.stopped) : .success(.unconfirmed)
+            if hasOutstanding { return .success(.unconfirmed) }
+            return scanIncomplete ? .success(.unconfirmed) : .success(.stopped)
         }
 
         var stopped: [LidCloseActionJournal.StoppedProcess] = []
@@ -756,6 +763,7 @@ public struct LidCloseActionService {
             }
             return .success(.partial)
         }
+        if hasOutstanding || scanIncomplete { return .success(.unconfirmed) }
         return .success(.stopped)
     }
 

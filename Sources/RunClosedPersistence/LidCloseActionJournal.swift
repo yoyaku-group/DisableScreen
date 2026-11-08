@@ -266,6 +266,7 @@ public struct LidCloseActionJournal: Sendable {
                 droppedAudioEntries += audio.filter { $0.missingPriorState }.count
             } else if let one = try? c.decode(AudioState.self, forKey: .audio) {
                 audio = [one]
+                if one.missingPriorState { droppedAudioEntries += 1 }
             } else {
                 // NEITHER shape decoded: the field is PRESENT but malformed as a
                 // whole (e.g. `"audio": {"deviceUID": 17}`). That is a lost
@@ -283,8 +284,10 @@ public struct LidCloseActionJournal: Sendable {
             if let loose = try? c.decode([LooseAudioState].self, forKey: .unverifiedAudio) {
                 unverifiedAudio = loose.compactMap { $0.state }
                 droppedAudioEntries += loose.filter { $0.state == nil }.count
+                droppedAudioEntries += unverifiedAudio.filter { $0.missingPriorState }.count
             } else if let one = try? c.decode(AudioState.self, forKey: .unverifiedAudio) {
                 unverifiedAudio = [one]
+                if one.missingPriorState { droppedAudioEntries += 1 }
             } else {
                 unverifiedAudio = []
                 if (try? c.contains(.unverifiedAudio)) == true { droppedAudioEntries += 1 }
