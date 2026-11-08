@@ -1395,11 +1395,214 @@ func cmdLoginItem(_ rest: [String]) -> Int32 {
     }
 }
 
+// ── ADR 026 — lid-close actions ─────────────────────────────────────────────
+
+let lidCloseUsage = """
+usage: runclosed lid-close status [--json]        (read-only)
+       runclosed lid-close simulate [--session on|off|paused]
+                 [--lid closed|open|unknown] [--external-display yes|no|unknown]
+                 [--enabled on|off] [--mute on|off] [--pause-apps on|off]
+
+`simulate` is a pure decision on injected values: it never reads the audio
+device, never signals a process, and never writes the journal.
+"""
+
+/// Build the read-only service the CLI uses. The audio and process backends are
+/// the LIVE ones, but `status` only reads: `evaluate` and `journal.load` mutate
+/// nothing. There is deliberately no CLI command that mutes or pauses — the
+/// actions belong to the session tick, and a stray command could leave a Mac
+/// mute with no session to end it.
+func makeLidCloseService() -> LidCloseActionService {
+    LidCloseActionService(
+        journal: LidCloseActionJournal(),
+        auditLog: LidCloseActionAuditLog(),
+        audio: CoreAudioOutputBackend(),
+        processes: LibprocPauseBackend(bootID: clock.bootID),
+        bootID: clock.bootID)
+}
+
+func cmdLidClose(_ rest: [String]) -> Int32 {
+    guard let sub = rest.first else {
+        FileHandler.err(lidCloseUsage)
+        return 64
+    }
+    switch sub {
+    case "status":
+        let args = Array(rest.dropFirst())
+        guard args.isEmpty || args == ["--json"] else {
+            FileHandler.err(lidCloseUsage)
+            return 64
+        }
+        let session = SessionStore().load()
+        let settings = LidCloseActionSettingsStore.load()
+        let svc = makeLidCloseService()
+        let e = svc.evaluate(
+            sessionActive: LidCloseActionPolicy.sessionIsActive(session),
+            lidClosed: ClamshellReadback.lidClosed(),
+            externalDisplayConnected: ClamshellReadback.externalDisplayConnected(),
+            settings: settings)
+        let journal = e.journalBefore
+        // A damaged journal is NOT a clean slate: report it and refuse to claim
+        // "applied: false" over a recovery that may still be owed.
+        let journalCorrupt = LidCloseActionJournal().isCorrupt
+        let entries = LidCloseActionAuditLog().load()
+        emitJSON([
+            "schemaVersion": kSchemaVersion,
+            "bootID": clock.bootID,
+            "mode": "status (read-only)",
+            "settings": [
+                "enabled": settings.enabled,
+                "muteAudio": settings.muteAudio,
+                "pauseApps": settings.pauseApps,
+                "pausedApps": settings.pausedApps,
+            ],
+            "conditions": [
+                "sessionActive": LidCloseActionPolicy.sessionIsActive(session),
+                "sessionPaused": session?.isPaused as Any? ?? false,
+                "lidClosed": e.input.lidClosed as Any? ?? NSNull(),
+                "externalDisplayConnected": e.input.externalDisplayConnected as Any? ?? NSNull(),
+            ],
+            "decision": [
+                "action": e.decision.action.rawValue,
+                "reason": e.decision.reason.rawValue,
+                "muteAudio": e.decision.muteAudio,
+                "pauseApps": e.decision.pauseApps,
+                "appNames": e.decision.appNames,
+            ],
+            "journal": [
+                "applied": !journal.isEmpty,
+                "sessionID": journal.sessionID?.uuidString as Any? ?? NSNull(),
+                "startedAt": journal.startedAt as Any? ?? NSNull(),
+                "audioDeviceUIDs": journal.audio.map { $0.deviceUID },
+                "audioWasMuted": journal.audio.map { $0.wasMuted },
+                "stoppedPids": journal.stopped.map { Int($0.pid) },
+                "unverifiedPids": journal.unverified.map { Int($0.pid) },
+                // An audio obligation that is not a live effect: the device was
+                // muted by RunClosed, became unreachable and has not come back.
+                // Without this the operator sees `applied: false` and could not
+                // tell that a restore is still owed (gate finding, `Status
+                // reports success while audio restoration remains unresolved`).
+                "unverifiedAudioDeviceUIDs": journal.unverifiedAudio.map { $0.deviceUID },
+                "unverifiedAudioWasMuted": journal.unverifiedAudio.map { $0.wasMuted },
+                "readable": !journalCorrupt,
+            ],
+            "lastAction": entries.last.map { entry -> [String: Any] in
+                [
+                    "ts": entry.ts,
+                    "outcome": entry.outcome,
+                    "reason": entry.reason,
+                ]
+            } as Any? ?? NSNull(),
+        ])
+        // Exit 3 when ANYTHING is still owed: a process to verify, or an audio
+        // restore to complete. Reporting 0 over an unresolved obligation is the
+        // "healthy" signal this lot exists to avoid.
+        let unresolved = !journal.unverified.isEmpty || !journal.unverifiedAudio.isEmpty
+            || journalCorrupt
+        return unresolved ? 3 : 0
+
+    case "simulate":
+        let args = Array(rest.dropFirst())
+        var sessionActive = true
+        var lidClosed: Bool? = true
+        var external: Bool? = false
+        var settings = LidCloseActionSettings(enabled: true)
+        var applied = false
+        var i = 0
+        func onOff(_ s: String) -> Bool? {
+            switch s {
+            case "on", "yes", "true": return true
+            case "off", "no", "false": return false
+            default: return nil
+            }
+        }
+        while i < args.count {
+            switch args[i] {
+            case "--session":
+                i += 1
+                guard i < args.count else { FileHandler.err(lidCloseUsage); return 64 }
+                switch args[i] {
+                case "on": sessionActive = true
+                case "off": sessionActive = false
+                case "paused": sessionActive = false
+                default: FileHandler.err(lidCloseUsage); return 64
+                }
+            case "--lid":
+                i += 1
+                guard i < args.count else { FileHandler.err(lidCloseUsage); return 64 }
+                switch args[i] {
+                case "closed": lidClosed = true
+                case "open": lidClosed = false
+                case "unknown": lidClosed = nil
+                default: FileHandler.err(lidCloseUsage); return 64
+                }
+            case "--external-display":
+                i += 1
+                guard i < args.count else { FileHandler.err(lidCloseUsage); return 64 }
+                switch args[i] {
+                case "yes", "connected", "true": external = true
+                case "no", "none", "false": external = false
+                case "unknown": external = nil
+                default: FileHandler.err(lidCloseUsage); return 64
+                }
+            case "--enabled", "--mute", "--pause-apps":
+                let key = args[i]
+                i += 1
+                guard i < args.count, let v = onOff(args[i]) else {
+                    FileHandler.err(lidCloseUsage)
+                    return 64
+                }
+                switch key {
+                case "--enabled": settings.enabled = v
+                case "--mute": settings.muteAudio = v
+                default: settings.pauseApps = v
+                }
+            case "--already-applied":
+                applied = true
+            default:
+                FileHandler.err(lidCloseUsage)
+                return 64
+            }
+            i += 1
+        }
+        let input = LidCloseActionPolicy.Input(
+            sessionActive: sessionActive, lidClosed: lidClosed,
+            externalDisplayConnected: external, settings: settings)
+        let decision = LidCloseActionPolicy.decide(input, currentlyApplied: applied)
+        emitJSON([
+            "schemaVersion": kSchemaVersion,
+            "mode": "simulate (dry-run, pure decision, nothing mutated)",
+            "input": [
+                "sessionActive": sessionActive,
+                "lidClosed": lidClosed as Any? ?? NSNull(),
+                "externalDisplayConnected": external as Any? ?? NSNull(),
+                "enabled": settings.enabled,
+                "muteAudio": settings.muteAudio,
+                "pauseApps": settings.pauseApps,
+            ],
+            "conditionsHold": LidCloseActionPolicy.conditionsHold(input),
+            "currentlyApplied": applied,
+            "decision": [
+                "action": decision.action.rawValue,
+                "reason": decision.reason.rawValue,
+                "muteAudio": decision.muteAudio,
+                "pauseApps": decision.pauseApps,
+                "appNames": decision.appNames,
+            ],
+        ])
+        return 0
+
+    default:
+        FileHandler.err(lidCloseUsage)
+        return 64
+    }
+}
+
 
 // ── dispatch ─────────────────────────────────────────────────────────────────
 let args = Array(CommandLine.arguments.dropFirst())
 guard let sub = args.first else {
-    FileHandler.err("usage: runclosed <status|displays|doctor|run|restore|disable|enable|lid-stay-awake|login-item|helper|low-battery|thermal|session|recover|backstop> [...]")
+    FileHandler.err("usage: runclosed <status|displays|doctor|run|restore|disable|enable|lid-stay-awake|login-item|helper|low-battery|thermal|lid-close|session|recover|backstop> [...]")
     exit(64)
 }
 let rest = Array(args.dropFirst())
@@ -1419,6 +1622,7 @@ case "session":  exit(cmdSession(rest))
 case "recover":  exit(cmdRecover(rest))
 case "backstop": exit(cmdBackstop(rest))
 case "thermal":  exit(cmdThermal(rest))
+case "lid-close": exit(cmdLidClose(rest))
 case "restore":
     // restore --owned = re-enable every display we previously disabled (B3).
     // restore --lid = closed-lid keep-awake restore (G3 stub, unchanged).

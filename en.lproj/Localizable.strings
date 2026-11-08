@@ -78,3 +78,16 @@
 "Mac getting hot" = "Mac getting hot";
 "The lid is closed with no display attached, so nothing is cooling the Mac. If this lasts %@ minutes RunClosed turns lid stay-awake off and lets it sleep." = "The lid is closed with no display attached, so nothing is cooling the Mac. If this lasts %@ minutes RunClosed turns lid stay-awake off and lets it sleep.";
 "The lid is closed with no display attached and the Mac is getting hot, but lid stay-awake is not RunClosed's, so it cannot turn it off. Open the lid, plug in a display, or turn the switch off then on so RunClosed owns it." = "The lid is closed with no display attached and the Mac is getting hot, but lid stay-awake is not RunClosed's, so it cannot turn it off. Open the lid, plug in a display, or turn the switch off then on so RunClosed owns it.";
+
+/* Lid-close actions (ADR 026) */
+"When the lid closes" = "When the lid closes";
+"Enable lid-close actions" = "Enable lid-close actions";
+"Mute the sound" = "Mute the sound";
+"Pause noisy apps" = "Pause noisy apps";
+"Apps: %@" = "Apps: %@";
+"No app selected" = "No app selected";
+"Could not save the setting" = "Could not save the setting";
+"The lid-close setting could not be written, so it was not changed." = "The lid-close setting could not be written, so it was not changed.";
+"Apps left paused — check them" = "Apps left paused — check them";
+"Some apps could not be resumed safely because their process no longer matches the one RunClosed paused (a recycled process id). They were left paused and are listed as “to verify”. Check them with `runclosed-cli lid-close status`." = "Some apps could not be resumed safely because their process no longer matches the one RunClosed paused (a recycled process id). They were left paused and are listed as “to verify”. Check them with `runclosed-cli lid-close status`.";
+"Actions on lid close" = "Actions on lid close";

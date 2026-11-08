@@ -95,6 +95,17 @@ public struct LowBatteryGuardService {
     /// faster than the drain, and a machine that overheated must be released
     /// before the battery step gets to read the flag.
     public var thermalService: ThermalGuardService?
+    /// Optional lid-close actions (ADR 026). `nil` = ADR 022/023/025 behaviour
+    /// unchanged. When present it runs LAST in the same section: it is the one
+    /// step whose job is to UNDO what it did, so it must run after the steps
+    /// that can end a session or release the flag — a release must not leave
+    /// the Mac muted with an app frozen.
+    ///
+    /// It also takes no lock of its own (same contract as the thermal step).
+    public var lidCloseActions: LidCloseActionService?
+    /// The lid-close readings and settings, resolved per tick so a change made
+    /// in the menu bar takes effect on the next tick without a restart.
+    public var lidCloseReadings: (@Sendable () -> LidCloseActionService.Readings)?
 
     public init(
         lidService: LidMutationService,
@@ -104,7 +115,9 @@ public struct LowBatteryGuardService {
         lock: LidWriteLock = LidWriteLock(),
         auditLog: LowBatteryAuditLog = LowBatteryAuditLog(),
         sessionService: SessionService? = nil,
-        thermalService: ThermalGuardService? = nil
+        thermalService: ThermalGuardService? = nil,
+        lidCloseActions: LidCloseActionService? = nil,
+        lidCloseReadings: (@Sendable () -> LidCloseActionService.Readings)? = nil
     ) {
         self.lidService = lidService
         self.latchStore = latchStore
@@ -114,6 +127,8 @@ public struct LowBatteryGuardService {
         self.auditLog = auditLog
         self.sessionService = sessionService
         self.thermalService = thermalService
+        self.lidCloseActions = lidCloseActions
+        self.lidCloseReadings = lidCloseReadings
     }
 
     public struct Evaluation: Equatable, Sendable {
@@ -164,6 +179,12 @@ public struct LowBatteryGuardService {
         /// machine with no thermal layer, which keeps ADR 022/023 behaviour
         /// byte for byte.
         public var thermal: ThermalGuardService.TickOutcome?
+        /// The lid-close actions' result (ADR 026), when one is wired. `nil`
+        /// on a machine with no lid-close layer.
+        public var lidClose: LidCloseActionService.TickOutcome?
+        /// The lid-close journal could not be read, so its obligations could not
+        /// be recovered this tick.
+        public var lidCloseJournalCorrupt = false
         /// Whether the BATTERY step ran in this tick.
         ///
         /// `false` for `thermalTick()` — the tick the app runs with the battery
@@ -238,6 +259,7 @@ public struct LowBatteryGuardService {
         if case .ended(let end)? = sessionStep?.expiry {
             outcome.sessionEndedNaturally = end.stopsKeepingAwake
         }
+        outcome.lidClose = runLidCloseStep()
         return outcome
     }
 
@@ -271,6 +293,81 @@ public struct LowBatteryGuardService {
         // through the thermal notice, not a second "session ended" one.
         outcome.sessionEndedNaturally = false
         outcome.batteryStepRan = false
+        // The SAME rule as the battery tick: a protective thermal outcome
+        // already undid the effects, so running the ordinary step here
+        // re-applies them. This entry point (`thermalTick`, used when the
+        // battery guard is switched off) was missed by the previous fix (gate
+        // finding, `Thermal-only tick bypasses protective undo suppression`).
+        //
+        // `releaseFailed` belongs to that set, and that is not obvious: the
+        // thermal service undoes BEFORE writing the flag, so a write that then
+        // fails leaves the effects RESTORED and the session still active. The
+        // ordinary step would see an active session with the lid still closed
+        // and mute and suspend all over again — reversing the restore it was
+        // handed (gate finding, `Réapplication après un échec de libération
+        // thermique`). Any thermal outcome that ran an undo means "undo only".
+        let thermalRestored = thermal.lidCloseUndo != nil || thermal.lidCloseJournalCorrupt
+        if thermal.mutation == .releaseRefused || thermal.mutation == .releaseFailed,
+           thermalRestored {
+            // MERGE, never replace: the thermal undo may have resumed a process
+            // this second pass cannot see (the journal is already cleared), and
+            // replacing dropped its pid and `changed` signal from the report
+            // (gate finding, `Le second undo efface le résultat de récupération
+            // thermique`).
+            if let undo = thermal.lidCloseUndo { outcome.lidClose = undo }
+            if let second = runLidCloseUndo() {
+                outcome.lidClose = outcome.lidClose.map { $0.merging(second) } ?? second
+            }
+        } else if thermal.mutation == .released, let undo = thermal.lidCloseUndo {
+            // The release slept, so the thermal undo IS the result of this
+            // tick's recovery; still merge a late pass rather than replace it.
+            outcome.lidClose = undo
+            if let second = runLidCloseUndo() {
+                outcome.lidClose = undo.merging(second)
+            }
+        } else {
+            outcome.lidClose = runLidCloseStep()
+        }
+        return outcome
+    }
+
+    /// The lid-close step (ADR 026): apply while the three conditions hold,
+    /// undo as soon as they stop.
+    ///
+    /// Runs LAST in the section, and for a reason that is the whole safety
+    /// design of the lot: it is the step whose job is to UNDO, so it must see
+    /// the session record the other steps just acted on. A tick that released
+    /// the flag must undo the sound, not leave the Mac muted.
+    ///
+    /// Takes no lock (the caller holds `LidWriteLock`). Returns `nil` when no
+    /// lid-close layer is wired, which keeps ADR 022/023/025 behaviour
+    /// unchanged.
+    public mutating func runLidCloseStep() -> LidCloseActionService.TickOutcome? {
+        guard var service = lidCloseActions, let readings = lidCloseReadings else { return nil }
+        // Read the session fresh: the thermal or session step above may have
+        // just finished it, and a finished session is exactly the moment the
+        // undo has to happen.
+        var r = readings()
+        // The service's answer WINS, including nil: a session it just closed
+        // must not be resurrected from a readings closure that was captured
+        // before the close, or the step would APPLY effects for a session that
+        // no longer exists instead of undoing them (gate finding, `Une session
+        // supprimée peut être remplacée par une lecture périmée`).
+        if let sessionService {
+            r.session = sessionService.load()
+        }
+        let outcome = service.step(readings: r)
+        lidCloseActions = service
+        return outcome
+    }
+
+    /// The unconditional undo (ADR 026), for a caller about to make the Mac
+    /// sleep or quit. It does not consult the conditions: if anything is
+    /// journaled, it is reversed.
+    public mutating func runLidCloseUndo() -> LidCloseActionService.TickOutcome? {
+        guard var service = lidCloseActions else { return nil }
+        let outcome = service.undoAll()
+        lidCloseActions = service
         return outcome
     }
 
@@ -337,6 +434,15 @@ public struct LowBatteryGuardService {
         public var mutationError: String?
         public var sleepAttempted = false
         public var sleepRC: Int32?
+        /// The lid-close undo this step performed before sleeping (ADR 026).
+        ///
+        /// Carried out of here so the ADR 024 backstop can put it in its report.
+        /// Without it the backstop kept only its OWN second undo — which finds a
+        /// cleared journal and answers `nothingToDo` — so the processes this
+        /// step really resumed were absent from the JSON, and a minute that had
+        /// finished a recovery could still read as a failure (gate finding, `Le
+        /// résultat du second undo est perdu`).
+        public var lidClose: LidCloseActionService.TickOutcome?
 
         public init(decision: LowBatteryPolicy.Decision, chargePercent: Int?,
                     minutesRemaining: Int?) {
@@ -403,6 +509,10 @@ public struct LowBatteryGuardService {
             outcome.mutationError = tick.mutationError
             outcome.sleepAttempted = tick.sleepAttempted
             outcome.sleepRC = tick.sleepRC
+            // `performRelease` filled this in on the battery path (the
+            // protective sleep runs the undo first). Carrying it out of the
+            // guard is what lets the backstop report a resume it performed.
+            outcome.lidClose = tick.lidClose
         }
         // The backstop shows NO notification, so it must not consume the
         // operator's warnings on the app's behalf. `LowBatteryPolicy` sets
@@ -560,6 +670,61 @@ public struct LowBatteryGuardService {
         if let m = outcome.mutation, m != .released, m == .rearmed || outcome.shouldNotify {
             audit(outcome, evaluation: evaluation, recordBootID: recordBootIDBefore)
         }
+        // ADR 026 — LAST, after every step that could end the session or
+        // release the flag: this step's job is to keep the sound and the apps
+        // in step with the session the steps above just changed.
+        //
+        // But NEVER re-APPLY in a tick that just tried to sleep the Mac: the
+        // release may have failed and left the session active, and applying
+        // again would UNDO the protective restore that `attemptSleep` performed
+        // moments earlier (gate finding, `The final policy step can reapply
+        // effects after protective sleep`). A sleep attempt means "undo only".
+        // A thermal REFUSAL is still a protective outcome: the release was
+        // blocked because the undo was incomplete, so running the ordinary step
+        // afterwards re-applies exactly what it just restored (gate finding,
+        // `Réapplication des effets après un veto thermique`). Undo only.
+        // `releaseFAILED` belongs here for exactly the same reason, and leaving
+        // it out was the twin of the bug `thermalTick` already fixed: the
+        // thermal service undoes BEFORE writing the flag, so a write that fails
+        // leaves the effects restored and the session active, and the ordinary
+        // step below would mute and suspend all over again. The no-sleep case is
+        // the one that reaches this line (with a sleep, `sleepAttempted` already
+        // covers it).
+        let thermalVetoed = outcome.thermal.map { thermal in
+            (thermal.mutation == .releaseRefused || thermal.mutation == .releaseFailed)
+                && (thermal.lidCloseUndo != nil || thermal.lidCloseJournalCorrupt)
+        } ?? false
+        // A PROTECTIVE BATTERY RELEASE also undid the effects before it tried to
+        // write, so re-applying here reverses its restore. `sleepAttempted`
+        // covers the usual case, but NOT the one where the sleep retry budget is
+        // already spent: `attemptSleepOnceAfterFailure` returns without sleeping,
+        // `sleepAttempted` stays false, and this line then muted the audio and
+        // suspended the apps immediately after they had been restored (gate
+        // finding, `Protective undo suppression misses an already-consumed sleep
+        // attempt`). Any tick that performed a protective release — verified OR
+        // failed — is undo-only, whether or not it managed to sleep.
+        let batteryRestored = outcome.mutation == .released
+            || outcome.mutation == .releaseFailed
+        if outcome.sleepAttempted || thermalVetoed || batteryRestored {
+            // A TRUNCATED journal means `undoAll` read an empty record and could
+            // not see the obligations it was meant to recover. This branch
+            // returns without running `runLidCloseStep`, so the corruption check
+            // there never fires — report it here (gate finding, `La branche
+            // après veille omet le contrôle de corruption`).
+            if lidCloseActions?.journal.isCorrupt == true {
+                outcome.lidCloseJournalCorrupt = true
+            }
+            // The protective undo ALREADY ran inside `attemptSleep` and left a
+            // real result (resumed pids, `changed`). Running `undoAll` again
+            // here reads the now-cleared journal and returns `nothingToDo`,
+            // OVERWRITING that result — so callers lost the resumed pids and the
+            // changed signal and never refreshed (gate finding, `Final undo
+            // overwrites the protective undo's result`). Keep what happened.
+            // `nil` means no lid-close layer was wired, which needs no marker;
+            // otherwise the protective undo's own result stays as the outcome.
+        } else {
+            outcome.lidClose = runLidCloseStep()
+        }
         return outcome
     }
 
@@ -584,6 +749,16 @@ public struct LowBatteryGuardService {
                                          protective: Bool = false) {
         let initiator: LidMutationService.Initiator =
             evaluation.decision.reason == .emergencyStaleOwnership ? .lowBatteryEmergency : .automatic
+        // ADR 026: undo the lid-close effects BEFORE the release mutation.
+        // `setEnabled(false)` re-enables normal sleep and the Mac can suspend
+        // before `attemptSleep` is ever reached, leaving the sound muted and
+        // apps suspended across the sleep (gate finding, `Undo occurs after the
+        // sleep-enabling release`). `attemptSleep` still undoes as a backstop.
+        if var actions = lidCloseActions {
+            let undo = actions.undoAll()
+            if outcome.lidClose == nil { outcome.lidClose = undo }
+            lidCloseActions = actions
+        }
         let result = lidService.setEnabled(false, initiator: initiator)
         switch result {
         case .success(let op) where op.state == .verified:
@@ -601,6 +776,9 @@ public struct LowBatteryGuardService {
             // for sleep: the Mac may go down right after `sleepnow`.
             latchStore.save(record)
             audit(outcome, evaluation: evaluation, recordBootID: recordBootIDBefore)
+            // ADR 026: the lid-close actions are undone BEFORE the sleep, not
+            // after the wake-up that may never come. `attemptSleep` below is
+            // the single choke point that guarantees it on every sleep path.
             // Best effort, and NOT retried — deliberately (review round 18).
             // The protective action already happened: `disablesleep` is at 0,
             // so the Mac follows its normal power management and sleeps on
@@ -656,9 +834,9 @@ public struct LowBatteryGuardService {
     /// (it shows no notification, so consuming the app's latch would silence a
     /// warning nobody ever saw). It also suppresses the notification for the
     /// protective caller for the same reason (review round 10).
-    private func attemptSleepOnceAfterFailure(_ outcome: inout TickOutcome,
-                                              record: inout LowBatteryLatchStore.Record,
-                                              protective: Bool) {
+    private mutating func attemptSleepOnceAfterFailure(_ outcome: inout TickOutcome,
+                                                      record: inout LowBatteryLatchStore.Record,
+                                                      protective: Bool) {
         if protective {
             guard !record.latch.protectiveSleepTried else { return }
         } else {
@@ -681,11 +859,72 @@ public struct LowBatteryGuardService {
         }
     }
 
-    private func attemptSleep(_ outcome: inout TickOutcome) {
+    /// The ONE sleep call, and therefore the ONE place the lid-close undo is
+    /// guaranteed to happen first — on the success path AND on the
+    /// best-effort path after a failed release.
+    ///
+    /// It used to sit only in the successful-release branch, so a failed
+    /// release that still slept the Mac went down with apps suspended and
+    /// audio muted (caught by ai-review-gate). Putting it here means no caller
+    /// can reach `sleepNow` without the undo, whichever branch led there.
+    private mutating func attemptSleep(_ outcome: inout TickOutcome) {
+        // Carry the undo's attention report into THIS outcome: the Mac may
+        // sleep before any other tick can raise it, so discarding it loses the
+        // one moment the operator could have been told (gate finding, `Sleep
+        // path discards the undo's attention report`).
+        if let undo = undoLidCloseBeforeSleep(&outcome) {
+            // The merge itself (pids, `changed`, notice, persistence failure)
+            // already happened inside the helper via `TickOutcome.merging`.
+            // What is left for the CALLER is promoting the inner attention
+            // request to the outer outcome: the Mac may sleep before another
+            // tick can raise it, so dropping it loses the one moment the
+            // operator could have been told.
+            if undo.shouldNotify { outcome.shouldNotify = true }
+        }
         let r = sleeper.sleepNow()
         outcome.sleepAttempted = true
         outcome.sleepRC = r.rc
         outcome.sleepOutput = r.output
+    }
+
+    /// Undo the lid-close actions before the Mac sleeps (ADR 026).
+    ///
+    /// The order the plan names is "at the end of a session, BEFORE the release
+    /// or the sleep". This is the sleep half: a machine that goes down muted
+    /// with Slack frozen comes back in exactly that state, and if the app
+    /// never wakes the backstop cannot be relied on to fix it.
+    ///
+    /// Uses the readings-free `undoAll()`, not `step()`: the conditions are
+    /// irrelevant here, the journal is.
+    ///
+    /// Returns the undo's outcome so `attemptSleep` can carry it, and writes it
+    /// into an outcome when one is supplied. It runs on EVERY sleep path, so a
+    /// failure branch cannot skip it.
+    @discardableResult
+    private mutating func undoLidCloseBeforeSleep(
+        _ outcome: inout TickOutcome
+    ) -> LidCloseActionService.TickOutcome? {
+        guard var service = lidCloseActions else { return nil }
+        let undo = service.undoAll()
+        lidCloseActions = service
+        // MERGE, not "keep the first": a second undo can RESUME a process the
+        // first left unconfirmed, so assigning only when nil lost the newly
+        // resumed pid and the `changed` signal (gate finding, `Second protective
+        // undo is not merged into the reported outcome`).
+        // The rule and every field it must carry live on `TickOutcome.merging`:
+        // this was written by hand here, then copied into the thermal path,
+        // and the copy was still losing fields two rounds later.
+        outcome.lidClose = outcome.lidClose.map { $0.merging(undo) } ?? undo
+        return undo
+    }
+
+    /// The no-outcome spelling, for callers that only need the effect.
+    @discardableResult
+    private mutating func undoLidCloseBeforeSleep() -> LidCloseActionService.TickOutcome? {
+        guard var service = lidCloseActions else { return nil }
+        let undo = service.undoAll()
+        lidCloseActions = service
+        return undo
     }
 }
 

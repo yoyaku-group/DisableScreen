@@ -51,6 +51,11 @@ public enum RecoveryPolicy {
         /// operator who turned the thermal guard off would still get a
         /// `disablesleep 0` plus `pmset sleepnow` from launchd a minute later.
         public var thermalGuardEnabled: Bool
+        /// Whether the lid-close action journal has anything outstanding
+        /// (ADR 026). A journal that is not empty means the Mac may be muted
+        /// with an app frozen, and the backstop is the last line that can undo
+        /// it — so it is a reason to take the lock even when nothing else is.
+        public var lidCloseJournalPending: Bool
 
         public init(
             recordBootID: String,
@@ -67,7 +72,14 @@ public enum RecoveryPolicy {
             // never consulted, and launchd releases the flag one minute after
             // they said no. The compiler now forces each site to state which
             // switch it honours.
-            thermalGuardEnabled: Bool
+            thermalGuardEnabled: Bool,
+            // Defaulted to `false`, and the asymmetry with the two switches
+            // above is deliberate: this one describes the WORLD (the journal is
+            // empty on a machine that never used the feature), not a policy
+            // decision. A site that forgets it gets the pre-ADR-026 fast path,
+            // which is wrong only for a machine that left a journal behind —
+            // and that machine's own app writes it before ever reaching launchd.
+            lidCloseJournalPending: Bool = false
         ) {
             self.recordBootID = recordBootID
             self.recordOwnedEnabled = recordOwnedEnabled
@@ -78,6 +90,7 @@ public enum RecoveryPolicy {
             self.latch = latch
             self.batteryGuardEnabled = batteryGuardEnabled
             self.thermalGuardEnabled = thermalGuardEnabled
+            self.lidCloseJournalPending = lidCloseJournalPending
         }
     }
 
@@ -136,9 +149,17 @@ public enum RecoveryPolicy {
         /// `thermalSkipReason` can name WHY the step was skipped instead of
         /// reporting a bare `false`.
         public var thermalGuardEnabled: Bool
+        /// The lid-close step runs (ADR 026): a session is live, or the action
+        /// journal has something outstanding.
+        ///
+        /// Gated on those two FILE FACTS and not on the operator switch: with
+        /// the switch off the policy still answers `.undo` for a non-empty
+        /// journal, which is exactly the crashed-session case this backstop
+        /// exists for. The switch gates the APPLY inside the step.
+        public var lidClose: Bool
 
         /// `false` = exit 0 without a `pmset` call and without the lock.
-        public var needsWork: Bool { session || battery || thermal }
+        public var needsWork: Bool { session || battery || thermal || lidClose }
 
         /// Why the thermal step is not running, when it is not.
         ///
@@ -194,7 +215,11 @@ public enum RecoveryPolicy {
             // boot. Two separate kill switches, though — the thermal one does
             // not switch the battery one off, and vice versa.
             thermal: claimsFlag && facts.thermalGuardEnabled,
-            thermalGuardEnabled: facts.thermalGuardEnabled)
+            thermalGuardEnabled: facts.thermalGuardEnabled,
+            // A live session is when the actions are APPLIED (and therefore
+            // when they must be undone), and a non-empty journal is when they
+            // are still applied from an earlier session whose app is gone.
+            lidClose: session != nil || facts.lidCloseJournalPending)
     }
 
     /// The battery step's decision, mapped onto what a protective-only caller

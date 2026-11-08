@@ -123,21 +123,28 @@ public enum ThermalPolicy {
         /// same reason the battery latch carries `failedReleaseSleepTried`.
         /// Cleared when the machine cools, so a new episode always reports.
         public var reportedFailure: String?
+        /// How many times a thermal release was refused because the ADR 026
+        /// lid-close undo was incomplete. Bounded so a permanently damaged
+        /// journal cannot keep an overheating Mac awake forever — heat is the
+        /// safety case and must win eventually. Reset with the episode.
+        public var lidCloseVetoes: Int
 
         public init(warnedSerious: Bool = false, warnedCritical: Bool = false,
                     seriousSince: Double? = nil, seriousSinceBootID: String? = nil,
-                    releasedForHeat: Bool = false, reportedFailure: String? = nil) {
+                    releasedForHeat: Bool = false, reportedFailure: String? = nil,
+                    lidCloseVetoes: Int = 0) {
             self.warnedSerious = warnedSerious
             self.warnedCritical = warnedCritical
             self.seriousSince = seriousSince
             self.seriousSinceBootID = seriousSinceBootID
             self.releasedForHeat = releasedForHeat
             self.reportedFailure = reportedFailure
+            self.lidCloseVetoes = lidCloseVetoes
         }
 
         private enum CodingKeys: String, CodingKey {
             case warnedSerious, warnedCritical, seriousSince, seriousSinceBootID, releasedForHeat,
-                 reportedFailure
+                 reportedFailure, lidCloseVetoes
         }
 
         /// Tolerant decoding, like the battery latch: a key added by a later
@@ -151,6 +158,7 @@ public enum ThermalPolicy {
             seriousSinceBootID = try c.decodeIfPresent(String.self, forKey: .seriousSinceBootID)
             releasedForHeat = try c.decodeIfPresent(Bool.self, forKey: .releasedForHeat) ?? false
             reportedFailure = try c.decodeIfPresent(String.self, forKey: .reportedFailure)
+            lidCloseVetoes = try c.decodeIfPresent(Int.self, forKey: .lidCloseVetoes) ?? 0
         }
 
         /// Write-from-outcome (B3): set only after a readback-verified release.

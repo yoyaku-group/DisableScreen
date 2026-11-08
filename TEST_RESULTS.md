@@ -1242,3 +1242,703 @@ exécutées.
 - Le relâchement réel du flag et le `pmset sleepnow` pour cause de chaleur.
 - Le rendu du popup (« Session terminée — chaleur ») et du titre de barre
   (`ended: heat`) sur la build installée.
+
+## L4 — actions à la fermeture du capot (ADR 026)
+
+### Suite complète
+
+```
+$ arch -arm64 swift build && arch -arm64 swift test
+RunClosedCoreTests           194 passed
+RunClosedPersistenceTests     89 passed
+RunClosedMacSystemTests      386 passed
+RunClosedHelperSupportTests   40 passed
+RunClosedAppTests             11 passed
+                             ---
+                             720 passed, 0 failures, 0 warnings, rc=0
+```
+
+The earlier runs in this section reported 657, then 663, then 671 — each one
+true of the commit it ran on. The final figure is **720**, measured on the head
+that closes the lot (rounds 7 to 12 included), and it is the only number that
+describes the code being merged.
+
+143 tests nouveaux pour ce lot, mesurés de 577 (L3) à 720 : politique pure
+(`LidCloseActionPolicyTests`), service sur fakes (`LidCloseActionServiceTests`,
+dont les deux contre-épreuves de la ronde 7), persistance
+(`LidCloseActionJournalTests` + `LidCloseActionSettingsKillSwitchTests`),
+backstop (`BackstopLidCloseTests`) et le script de mesure. Le détail par tour de
+relecture est dans les sections ci-dessous ; le chiffre qui compte est celui de
+la suite au head fusionné.
+Aucun test ne touche la sortie audio réelle ni ne signale un vrai processus :
+les fakes sont la seule voie, et le brief l'exige.
+
+### Ce que les tests prouvent, cas par cas
+
+| Cas du brief | Test |
+|---|---|
+| les trois conditions, chacune manquante ⇒ aucune action | `testEachConditionIsNecessary`, `testNoCombinationActsWithoutAllThreeConditions` (144 combinaisons) |
+| une session sans fin compte comme une session | `testIndefiniteSessionCountsAsActive`, `testBackstopAppliesTheActionsWhenTheConditionsHold` |
+| écran externe branché ⇒ aucune action, même capot fermé | `testExternalDisplayNeverActs`, `testNoActionWithAnExternalDisplayAttached` |
+| état inconnu de l'écran ⇒ traité comme branché | `testUnknownDisplayCountsAsAttached`, `testUnknownDisplayIsTreatedAsAttached` |
+| coupure du son puis annulation rend exactement l'état d'avant | `testMuteThenUndoRestoresThePriorState` |
+| l'utilisateur change de sortie audio ⇒ l'annulation ne touche pas la nouvelle | `testUserSwitchingOutputIsNotTouched` |
+| `SIGSTOP` puis identité changée ⇒ `SIGCONT` refusé, app « à vérifier » | `testRecycledPidIsNeverResumed`, `testBackstopRefusesARecycledPid` |
+| arrêt puis reprise deux fois de suite ⇒ idempotent | `testStopAndResumeTwiceIsIdempotent`, `testApplyTwiceIsIdempotent` |
+| fin de session annule dans le bon ordre | `testSessionEndingUndoesInTheSameTick`, `testUndoOrderIsAppsThenSound` |
+| le backstop annule aussi (même politique, pas une copie) | `testBackstopUndoesACrashedSessionsActions`, `testJournalAloneIsAReasonToWork` |
+| aucune action quand le réglage est désactivé (défaut) | `testSwitchedOffByDefaultDoesNothing`, `testNoActionWhenTheSwitchIsOff`, `testBackstopDoesNotApplyWithTheSwitchOff` |
+
+Trois défauts réels ont été trouvés par ces tests, tous corrigés :
+
+1. `runLidCloseStep` lisait les lectures **live** au lieu de les remplir depuis
+   la closure du backstop, donc un test de backstop ne pouvait pas exercer la
+   lecture qu'il injectait — et un backstop sur une machine dont l'app est
+   plantée aurait lu le mauvais état.
+2. `guard plan.battery else { return report }` sautait le pas d'annulation sur
+   une machine **sans record de propriété** — exactement le cas « app plantée »
+   que ce pas existe pour couvrir. Trouvé par `testJournalAloneIsAReasonToWork`,
+   qui lit `nothingToDo` au lieu d'un run complété.
+3. `undo()` abandonnait l'annulation dès qu'une appli ne reprenait pas, laissant
+   le Mac muet en plus de l'appli figée — détail ci-dessous.
+
+Contre-épreuve : les trois tests nommés échouent sans leur correctif.
+
+### Troisième défaut trouvé en relecture (corrigé)
+
+`undo()` interrompait l'annulation dès qu'un `SIGCONT` n'avait pas pris : une
+appli figée laissait alors le Mac **muet en plus**. L'ordre est apps puis son,
+pas apps OU son — l'échec d'un effet n'est pas une raison de sauter l'autre, et
+c'est exactement l'échec en cascade que le principe « prouver qu'on peut le
+remettre » existe pour éviter. `finish(journal:appsStuck:)` porte maintenant le
+fait qu'un processus reste dans `stopped`, et rend `.incomplete` (donc
+réessayable) au lieu d'un `.restored` parce que le SON est revenu.
+
+Contre-épreuve : `testAWedgeAppDoesNotBlockTheSoundRestore` lit
+`isMuted == true` sans le correctif.
+
+### Bundle et signature
+
+```
+$ bash scripts/build-runclosed-app.sh
+OK: build/RunClosed.app
+
+$ plutil -lint build/RunClosed.app/Contents/Info.plist \
+    build/RunClosed.app/Contents/Library/LaunchAgents/*.plist \
+    build/RunClosed.app/Contents/Library/LaunchDaemons/*.plist
+... OK (×3)
+
+$ codesign --verify --strict build/RunClosed.app
+OK
+```
+
+### CLI sur la machine réelle — lecture seule, aucune mutation
+
+```
+$ runclosed-cli lid-close status --json
+  settings.enabled: false          ← le défaut du brief
+  conditions.lidClosed: false
+  conditions.externalDisplayConnected: false
+  decision.reason: "switchedOff"
+  journal.applied: false
+  exit 0
+```
+
+```
+$ runclosed-cli lid-close simulate
+  decision: apply / applied                 (défauts du simulate : conditions réunies)
+$ runclosed-cli lid-close simulate --enabled on --lid closed --external-display no
+  decision: apply / applied
+$ runclosed-cli lid-close simulate --enabled on --lid closed --external-display yes
+  decision: none / externalDisplay          ← Mac en dock : jamais touché
+$ runclosed-cli lid-close simulate --enabled on --lid closed --external-display unknown
+  decision: none / displayUnknown           ← inconnu compte comme branché
+$ runclosed-cli lid-close simulate --enabled on --lid open
+  decision: none / lidOpen
+$ runclosed-cli lid-close simulate --enabled on --session off
+  decision: none / noSession
+$ runclosed-cli lid-close simulate --enabled on --already-applied --lid open
+  decision: undo / lidOpen                  ← la direction d'annulation
+$ runclosed-cli lid-close nonsense        → exit 64
+$ runclosed-cli lid-close simulate --bogus → exit 64
+```
+
+Aucune mutation : le drapeau de mute de la sortie audio par défaut
+(`kAudioDevicePropertyMute`) vaut **0** avant **et** après la série
+ci-dessus — vérifié par une sonde CoreAudio directe, lecture seule. Aucun
+`SIGSTOP` n'a été envoyé à une vraie app (Slack/Discord/WhatsApp de Ben) : le
+journal est vide et `journal.applied` vaut `false`. Les commandes interdites sur
+la machine réelle (`session start`, `recover --backstop`, `backstop register`,
+`lid-stay-awake on|off`) n'ont pas été exécutées.
+
+### Non testé (matériel — PR5, Ben présent)
+
+- La coupure et le rétablissement réels de la sortie audio par défaut, et la
+  confirmation par relecture sur du vrai matériel.
+- Le `SIGSTOP` / `SIGCONT` réels sur Slack, Discord et WhatsApp (interdit
+  pendant le développement, et fait uniquement sur des processus factices ici).
+- La notification clamshell réelle à la fermeture du capot et sa rafale
+  d'anti-rebond (2 s), partagée avec ADR 025.
+- **La mesure « l'écran intégré reste-t-il actif capot fermé »** — c'est elle
+  qui décidera si la luminosité et le rétroéclairage clavier entrent un jour
+  dans le lot, et avec quel critère de relecture. Tant qu'elle n'est pas faite,
+  ces deux actions restent NOT_TESTED et non codées.
+- Le rendu du sous-menu clic droit sur la build installée.
+
+### Relecture `ai-review-gate` — 8 WARN, tous corrigés (2026-11-08)
+
+La porte a fini par tourner (moteur Codex, après échec du moteur Claude) et a
+rendu **8 WARN, 0 CRITICAL**. Plusieurs étaient de vrais défauts que mes tests
+n'avaient pas vus. Les huit sont corrigés, chacun avec contre-épreuve.
+
+| # | Fichier | Défaut | Contre-épreuve |
+|---|---|---|---|
+| 1 | `AudioOutputControl` | **La fonction audio ne coupait JAMAIS rien.** `AudioObjectHasProperty` retourne sa réponse ; il ne prend pas de paramètre de sortie. Le code déclarait un `DarwinBoolean(false)` local et l'ANDait dans `canMute`, donc `canMute` était toujours faux et tout appareil était refusé. | `testUnreadableMuteReadbackKeepsTheJournalEntry` + sonde live : le prédicat corrigé lit `canMute=true` sur la sortie intégrée, l'ancienne forme ne pouvait pas |
+| 2 | `LidCloseActionService` | Une relecture ILLISIBLE (`nil`) était traitée comme « rien ne s'est passé » et supprimait l'entrée du journal — donc un appareil muet sans rien qui autorise son rétablissement. | `testUnreadableMuteReadbackKeepsTheJournalEntry`, `testUnreadableStopReadbackKeepsTheJournalEntry`, et son pendant `testAudibleReadbackProvesTheMuteDidNotLand` |
+| 3 | `LidCloseActionService` | Un processus `unverified` persisté devenait silencieux : `undo()`/`undoAll()` gardaient sur `isEmpty` (qui exclut `unverified` par conception), donc un journal ne portant que des obligations répondait `nothingToDo`. | `testPendingUnverifiedStillRaisesTheNotice`, `testPendingUnverifiedSteersTheTickIntoUndo` |
+| 4 | `LidCloseActionService` | `finish` ignorait le résultat de `journal.save`/`journal.clear`, donc un échec disque rendait `.restored` avec une propriété périmée sur disque. | Vérifié par lecture du code + `finish` rend `.incomplete` sur échec |
+| 5 | `LowBatteryGuardService` | L'annulation ne vivait que dans la branche de relâchement RÉUSSI, donc un relâchement ÉCHOUÉ qui endort quand même le Mac l'endormait muet avec des applis figées. | Déplacée dans `attemptSleep`, le point de passage unique de tout sommeil |
+| 6 | `ProcessPauseControl` | Les applis déjà suspendues par l'opérateur étaient adoptées : `runningProcesses` les renvoyait, le journal les enregistrait, et l'annulation les reprenait. | `runningProcesses` ne retient plus que les processus observés EN COURS |
+| 7 | `lid-close-measure.sh` | Un test de sous-chaîne `*ACTIVE*` matchait aussi `NOT_IN_ACTIVE_LIST`, donc un panneau ABSENT était classé actif et le verdict inversé. | Classification exacte sur les trois jetons ; table de vérité ci-dessous |
+| 8 | `lid-close-measure.sh` | Une course sans aucune lecture exploitable rendait `MEASURED`/inactif au lieu de `INCONCLUSIVE` — conclure sur une absence de preuve. | La branche finale rend `INCONCLUSIVE` |
+
+```
+$ classify "builtin=ACTIVE asleep=False online=True"   active=1 inactive=0 unreadable=0
+$ classify "builtin=NOT_IN_ACTIVE_LIST"                active=0 inactive=1 unreadable=0
+$ classify "builtin=unavailable(no pyobjc)"            active=0 inactive=0 unreadable=1
+```
+
+Le défaut 1 est la leçon à retenir : **les fakes ne peuvent pas attraper un
+backend qu'ils remplacent.** Les tests passaient parce que le faux appareil ne
+passe jamais par CoreAudio. C'est exactement la classe que la qualification
+matérielle (PR5) existe pour couvrir.
+
+Suite après correctifs : **663/663**, 0 warning, rc=0. Bundle assemblé, 3 plists
+lints OK, `codesign --verify --strict` OK.
+
+### Tours 2 et 3 de `ai-review-gate` — 8 WARN de plus, tous corrigés
+
+Le tour 2 a rendu 3 WARN, le tour 3 5 WARN, toujours **0 CRITICAL**. Tous réels,
+tous sur le chemin de récupération ou de mesure.
+
+**Tour 2**
+
+| Défaut | Correction | Contre-épreuve |
+|---|---|---|
+| Le journal groupé donnait la propriété de reprise AVANT le signal : un crash sur le processus 2/5 laissait 3,4,5 enregistrés comme nôtres. | Une écriture de journal PAR processus, juste avant son propre signal. | `journalAtCrash` lit `[1,2]` au lieu de `[1]` — le test capture le journal AU POINT DE CRASH (ma première version ne regardait que l'état final, que la version boguée atteint aussi). |
+| Une lecture immédiate unique jetait un arrêt en vol : `SIGSTOP` est asynchrone, le processus doit être ordonnancé pour atteindre `SSTOP`. | Confirmation relue avec réessai (5 lectures, 20 ms ; le délai est injectable donc aucun test ne dort). | Sans le réessai, `apply` lit `failed` et la liste est vide. |
+| Une lecture audio illisible traitée comme appareil RETIRÉ : entrée effacée, `deviceGone` annoncé, appareil muet sans rien pour réessayer. | Une seconde lecture avant de conclure à la disparition. | `deviceGone=true` et le son reste coupé. |
+
+**Tour 3**
+
+| Défaut | Correction | Contre-épreuve |
+|---|---|---|
+| `isMuted` était DÉRIVÉ de `canMute` : un `muted=true` lu avec succès était jeté dès que la propriété cessait d'être inscriptible, et une lecture en échec rendait `isMuted:false` — l'annulation voyait « audible » sur un appareil muet et effaçait le journal. | `isMuted` devient `Bool?` : lisible → ce qui a été lu, quelle que soit la capacité d'écriture ; illisible → `nil`, et `nil` n'est jamais une preuve. | Un drapeau illisible lit `.incomplete` au lieu d'une restauration vérifiée. |
+| Réutilisation de PID entre l'énumération et le signal : `SIGSTOP` sur le processus de remplacement, journal avec l'identité d'origine, reprise refusée → processus étranger suspendu pour toujours. | Identité re-prouvée immédiatement AVANT le signal. | `SIGSTOP` envoyé après recyclage, propriété enregistrée pour un processus jamais signalé. |
+| Deux lectures illisibles dans la MÊME passe effaçaient l'obligation. | Compteur `unreadablePasses` ; « disparu » n'est conclu qu'après 360 passes séparées (trois heures à 30 s). | Deux lectures instables effacent l'obligation. |
+| Une énumération CoreGraphics EN ÉCHEC était classée panneau inactif (`result[0]` ignoré) — un verdict définitif tiré d'une requête cassée. | Le `CGError` est vérifié et rend `unavailable`, donc `INCONCLUSIVE`. | Table de vérité des trois jetons. |
+
+Suite après ces huit correctifs : **671/671**, 0 warning, rc=0.
+
+### La leçon de ce lot
+
+Trois tours de relecture ont trouvé **16 WARN** sur un code dont la suite de
+tests était verte et dont j'avais relu le chemin d'annulation moi-même. Les
+défauts les plus graves étaient tous dans la même famille : **confondre « je
+n'ai pas pu observer » avec « je n'ai rien fait »**. Un `nil` de relecture, un
+`kill` accepté, un `CGError` non vérifié — chaque fois la même erreur de
+raisonnement, à trois endroits différents. C'est exactement ce que le principe
+« prouver qu'on peut le remettre » interdit, et c'est ce que la relecture a
+attrapé et pas moi.
+
+### Tour 4 — 4 WARN, dont deux vrais défauts de comportement
+
+| Défaut | Correction | Contre-épreuve |
+|---|---|---|
+| Couper UN SEUL interrupteur (« Couper le son ») ne restaurait rien : la passe d'application sautait simplement l'effet désactivé, donc le Mac restait muet jusqu'à ce que le master ou les conditions changent. | `undoEffectsThatAreNowOff`, partagé par les DEUX entrées de `apply` (la normale et celle où les deux interrupteurs sont coupés), inverse l'effet dont l'interrupteur vient de passer à off. Le `guard` d'entrée ne court-circuite plus l'annulation. | `testTurningOffTheMuteSwitchRestoresTheSound`, `testTurningOffThePauseSwitchResumesTheApps` — le son reste coupé et l'appli figée sans le correctif. |
+| Un appareil conclu « disparu » après 360 passes était OUBLIÉ : des écouteurs muets par le service, débranchés trois heures puis rebranchés en gardant leur muet, ne trouvaient plus aucune entrée. | L'obligation passe dans `unverifiedAudio` au lieu de disparaître : elle cesse de piloter l'annulation (rien à atteindre) mais survit, reste signalée à l'opérateur (`Notice.audioLeftMuted`), et une passe d'application qui revoit le même UID encore muet la RÉ-ADOPTE. | `testGenuinelyAbsentDeviceIsConcludedGoneAfterEscalation` vérifie le déplacement, `testReturningDeviceIsReAdopted` vérifie la reprise. |
+
+Les deux autres WARN du tour 4 sont des variantes du même raisonnement déjà
+corrigé (`nil` de lecture ≠ absence ; attente bornée ≠ preuve qu'un signal ne
+prendra jamais), consignées ici comme résidu assumé : la confirmation d'arrêt
+est bornée à 5 lectures, et un `SIGSTOP` qui prendrait au-delà de ce budget
+resterait enregistré comme « à vérifier » plutôt que repris à l'aveugle — le
+côté sûr, déjà testé.
+
+Suite après ce tour : **675/675**, 0 warning, rc=0. Bundle assemblé, plists
+lints, `codesign --verify --strict` OK.
+
+### Tour 7 — deux WARN, deux vrais défauts, et un « 0 warning » qui était faux
+
+Le tour 7 a couvert les 17 commits que les six tours précédents n'avaient pas
+vus. **0 CRITICAL, 2 WARN** — les deux réels.
+
+| Défaut | Correction | Contre-épreuve |
+|---|---|---|
+| **La sortie audio par défaut peut changer ENTRE les deux lectures.** `isCurrentDefaultOutputRecorded` lit une fois, `confirmExistingMute` une seconde, et la seconde retombait sur `record.audio.first` quand la sortie courante était inconnue ou non enregistrée. Elle lisait alors l'appareil A comme muet pendant que B, celui qui joue vraiment, restait audible — et sur une lecture en échec, elle annonçait un succès sur une sortie qu'elle ne savait même pas nommer. | Plus aucun repli. Sortie courante inconnue ou non enregistrée ⇒ `.unconfirmed` : l'écriture a peut-être abouti (donc pas `.failed`, qui promet une machine intacte), mais l'appareil qui joue n'est pas prouvé muet. Le tick suivant voit B non enregistré et le coupe par `muteDefaultOutput`, le chemin prévu pour ça. | `testADefaultSwitchBetweenCheckAndConfirmIsNotReportedAsMuted` — la lecture est scriptée pour que la sonde voie A et la confirmation voie B. Sans le correctif : `.applied` sur une machine audible. Avec : ni l'un ni l'autre. |
+| **La seconde annulation thermique était jetée.** Le chemin de veille thermique gardait le premier résultat (`if lidCloseUndo == nil`) alors que `cfdbb35` venait de corriger exactement ce motif sur le chemin batterie. Une seconde passe qui reprend un processus laissé « à vérifier » disparaissait du rapport : pid, signal `changed` et avis perdus, pour un rapport qui se lit comme une récupération propre. | La règle et TOUS ses champs vivent désormais une seule fois, dans `TickOutcome.merging`. Les trois copies manuelles (batterie, thermique, backstop) l'appellent. C'est la duplication qui avait laissé la copie thermique fausse deux tours après le correctif de la copie batterie. | `testTheSecondThermalUndoIsMergedNotDiscarded` — le processus reprend à la 5ᵉ tentative, donc uniquement dans la seconde passe du tick qui épuise le veto. Sans le correctif : `resumedPids` vide et `changed` faux. |
+
+**Et le « 0 warning » de `cfdbb35` était faux.** Le message de commit annonçait
+« 0 failures, 0 warnings » ; une compilation complète en signale deux, tous
+deux présents dans ce commit : un `if/else` inatteignable après un `continue`
+(dans le bloc des `unverified`), et un `var guardService` jamais muté. Les deux
+sont corrigés ici. Leçon : un compte de warnings doit être lu dans la sortie du
+compilateur, pas recopié depuis un message de commit.
+
+Suite au head fusionné : **711/711**, 0 échec, 0 warning, rc=0.
+
+### Tour 8 — trois WARN, tous dans la même famille
+
+Le tour 8 a revu le commit de correctifs lui-même. **0 CRITICAL, 3 WARN**, les
+trois réels et les trois du même genre : *un résultat de récupération perdu ou
+écrasé en chemin*.
+
+| Défaut | Correction | Contre-épreuve |
+|---|---|---|
+| Désactiver la pause d'apps reprenait bien les processus, mais `resumedPids` n'était jamais recopié dans le résultat : `changed == true` avec une liste vide, donc « la machine a bougé » sans nommer ce qui a bougé. | Les pid repris sont fusionnés dans l'outcome. | `testDisablingPausesReportsTheResumedPids` — sans le report, la liste lit `[]`. |
+| Le backstop ne recopiait jamais `thermal.lidCloseUndo` dans son rapport. La seconde annulation trouvait alors un journal vidé et répondait `nothingToDo`, donc le JSON omettait les processus réellement repris par l'étape thermique. | Le résultat thermique est porté dans `report.lidClose`, et la seconde passe FUSIONNE dedans. | `testTheThermalUndoResultReachesTheReport` — sans le report, `resumedPids` est vide. |
+| Le backstop n'avait pas la règle que les deux autres appelants ont déjà : après un VETO thermique (relâchement refusé parce qu'une annulation est incomplète), il exécutait la politique ordinaire, qui voyait la session encore active, capot fermé, et **re-mutait le son et re-figeait les apps** que l'annulation venait de restaurer. Toutes les 60 s, tant que le veto tenait. | Branche « undo only » sur refus thermique, comme `lockedTick` et `thermalTick`. | `testAThermalVetoDoesNotReApplyWhatTheUndoRestored` — sans la branche, l'audio relit `isMuted == true`. |
+
+Et un défaut dans **mon propre correctif**, trouvé en écrivant le troisième test :
+la fusion laissait la seconde passe écraser `restored` par `nothingToDo`. C'est
+la même erreur un niveau plus bas — traiter une passe tardive comme
+autoritaire alors qu'elle ne décrit qu'un vide qu'elle a hérité. `nothingToDo`
+ne gagne donc plus : seul un verdict qui a réellement fait quelque chose
+remplace le précédent.
+
+Suite : **714/714**, 0 échec, 0 warning, rc=0.
+
+### Tour 9 — deux WARN, dont un site oublié
+
+Le tour 9 a revu le commit du tour 8. **0 CRITICAL, 2 WARN**, les deux réels.
+
+| Défaut | Correction | Contre-épreuve |
+|---|---|---|
+| La branche BATTERIE du backstop gardait `if report.lidClose == nil`, donc un processus laissé « à vérifier » par la première annulation et REPRIS par celle d'après-veille disparaissait du rapport : la minute pouvait encore se lire comme un échec sur une machine déjà remise d'aplomb. | Fusion sur les deux sites (`TickOutcome.merging`), comme le chemin thermique. | `testTheBatterySleepPathMergesTheSecondUndo` — sans la fusion, `resumedPids` est vide. |
+| Les compteurs de dommage du journal étaient décodés avec `try` et non `try?`. Un `"droppedAudioEntries": "1"` (chaîne, typo, ancien writer) faisait échouer le décodage du Record ENTIER : `load()` rendait un enregistrement vide et toutes les obligations valides du même fichier devenaient inaccessibles — appareil muet, apps figées, `isCorrupt` pour seule trace. | `try?` sur les deux compteurs : une métadonnée illisible ne vaut rien, les obligations à côté valent tout. | `testAMisTypedDamageCounterKeepsTheObligations` — avec `try`, l'audio ET le processus lisent `[]`. |
+
+En écrivant la contre-épreuve du premier point, un troisième défaut est apparu,
+dans mon propre diagnostic : le rapport ne lisait jamais le `lidClose` du pas
+protecteur (`ProtectiveOutcome` ne le portait pas), donc la seconde annulation
+était la seule voix même quand la première avait réellement repris un processus.
+`ProtectiveOutcome.lidClose` existe maintenant et le backstop le reporte.
+
+Deux leçons de méthode, tirées de mes propres erreurs dans ce tour :
+
+- **Un build incrémental ne prouve pas « 0 warning ».** Trois warnings
+  pré-existants de `LidCloseActionJournal.swift` (`try?` sur des appels qui ne
+  jettent pas) n'apparaissaient qu'après suppression du cache du module. C'est la
+  deuxième fois dans ce lot ; la règle est désormais : recompiler le module
+  touché, pas seulement le projet.
+- **Un test qui passe avec le correctif n'a rien prouvé** tant qu'on ne l'a pas
+  vu échouer sans lui. Trois de mes tests de ce tour étaient vacants à la
+  première écriture (service thermique sans `lidCloseActions`, batterie à 60 % sur
+  secteur donc aucun sommeil, journal déjà vidé). Chacun a été corrigé jusqu'à ce
+  que le retrait du correctif le fasse échouer.
+
+Suite : **716/716**, 0 échec, 0 warning, rc=0.
+
+### Tour 10 — quatre WARN et une suggestion, dont deux dans mes propres correctifs
+
+Le tour 10 a revu le commit du tour 9. **0 CRITICAL, 4 WARN, 1 SUGGESTION**, tous réels.
+
+| Défaut | Correction | Contre-épreuve |
+|---|---|---|
+| `schemaVersion` était encore décodé avec `try` : un `"1"` chaîne jetait le Record avant toute lecture, donc un fichier plein d'obligations valides lisait vide. Même classe que les compteurs du tour 9 — j'en avais corrigé deux sur trois. | `try?`, comme les compteurs. | `testAMisTypedSchemaVersionKeepsTheObligations` — avec `try`, audio ET processus lisent `[]`. |
+| La notice audio écrasait celle des apps : quand une app reste figée **et** que le son ne revient pas, seul `.audioLeftMuted` sortait. L'opérateur n'apprenait jamais que l'app était encore gelée — le pire des deux états, silencieusement perdu. | `?? ` au lieu d'une affectation nue : la première notice, celle des apps, gagne. | Couvert par la relecture ; le comportement est désormais « un avis par passe, le plus grave d'abord ». |
+| **Mon** correctif du tour 9 était incomplet : `releaseFailed` manquait dans l'ensemble « undo only ». Le service thermique annule AVANT d'écrire ; un échec d'écriture laisse donc les effets restaurés et la session active, puis le pas ordinaire re-mutait et re-figeait tout. | `releaseFailed` rejoint `releaseRefused` sur les deux chemins. | `testAFailedThermalReleaseDoesNotReApplyTheRestoredEffects` — sans lui, `isMuted == true` ET le processus re-figé. |
+| **Mon** `else if` du tour 9 remplaçait le résultat thermique au lieu de fusionner, et `thermalOutcome` ne fusionnait pas non plus. Le pid repris par la première annulation disparaissait du JSON. | Fusion aux deux endroits. | Couvert ; le motif est désormais un seul appel à `TickOutcome.merging`. |
+| (SUGGESTION) `sessionID` et `startedAt` étaient assignés au record, puis jetés quand le code relisait `evaluation.journalBefore` — le journal ne pouvait pas dire à quelle session il appartenait. | Les métadonnées d'épisode sont reportées sur le record relu. | — |
+
+Le schéma est net : trois des cinq points sont des **correctifs de mes propres
+correctifs**, tous de la même famille — un résultat calculé puis jeté, une
+condition appliquée à un site mais pas à son jumeau. La fusion vit maintenant
+dans `TickOutcome.merging` et n'est plus recopiée à la main ; c'est la seule
+raison pour laquelle ce tour n'a pas trouvé une cinquième copie.
+
+Suite : **718/718**, 0 échec, 0 warning, rc=0.
+
+### Tour 11 — un WARN : la même notice, l'autre occurrence
+
+Le tour 11 a rendu **1 WARN, 0 CRITICAL**. Le tour 10 avait corrigé la notice
+audio qui écrasait celle des apps — mais seulement dans la branche « échec de
+restauration ». La branche « audio vide + appareil échoué » portait la même
+affectation nue, et produisait le même résultat : l'opérateur apprenait un
+problème de son alors qu'une application restait figée. Corrigé avec `??` comme
+sa jumelle.
+
+C'est la troisième fois dans ce lot qu'un correctif est appliqué à un site et
+pas à son jumeau. Le test le verrouille désormais :
+`testTheAppNoticeSurvivesAStrandedAudioDevice`, dont la première version était
+elle aussi vacante — elle exerçait un APPLY (`undo == nil`) et non le chemin
+d'annulation visé. Réécrite jusqu'à ce que le retrait du correctif la fasse
+échouer.
+
+Suite : **719/719**, 0 échec, 0 warning, rc=0.
+
+### Tour 12 — trois WARN, dont un jumeau oublié et un crash
+
+Le tour 12 a rendu **3 WARN, 0 CRITICAL**, tous réels.
+
+| Défaut | Correction | Contre-épreuve |
+|---|---|---|
+| Le tick batterie ne traitait que `releaseRefused` comme protecteur. Un `releaseFailed` thermique — qui a lui aussi annulé avant d'échouer à écrire — laissait donc le pas ordinaire re-muter et re-figer. `thermalTick` avait déjà la règle ; le chemin batterie non. **Quatrième jumeau oublié du lot.** | `releaseFailed` rejoint `releaseRefused` dans `thermalVetoed`. | Couvert par la relecture ; le motif est désormais aligné sur `thermalOutcome`. |
+| Un échec d'écriture du journal était perdu quand les deux interrupteurs étaient coupés : l'entrée passait de `stopped` à `unverified` en mémoire seulement, et comme rien n'avait bougé sur la machine la sauvegarde finale était sautée — le rapport annonçait `journalSaveFailed == false` sur une propriété périmée. | Le drapeau est reporté depuis le `scratch`. | Couvert. |
+| `droppedAudioEntries += Int.max` **trappe** en Swift, et `try?` n'attrape pas un trap. Chaque lecture de ce journal tuait le processus — `lid-close status`, la récupération — en emportant les obligations valides du même fichier. | Addition saturante (`addingReportingOverflow`). | `testAnOverflowingDamageCounterClampsInsteadOfTrapping` — sans le correctif le processus de test meurt en SIGTRAP. |
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.
+
+### Tour 13 — trois WARN, dont deux correctifs du tour 12 incomplets
+
+Le tour 13 a rendu **3 WARN, 0 CRITICAL**, tous réels.
+
+| Défaut | Correction | Contre-épreuve |
+|---|---|---|
+| Le tour 12 bornait `saturatingAdd` sur l'addition du DÉCODAGE, mais les incréments de la boucle utilisaient encore `+=`. Un `Int.max` persisté atteignait donc quand même un `+=` et **trappait**. | Les dix sites d'accumulation passent par `saturatingAdd`. Zéro `+=` restant sur ces compteurs. | Le test du tour 12 couvre le décodage ; le balayage mécanique `grep` prouve qu'il ne reste aucun site nu. |
+| `unmuteOne` incrémentait `unreadablePasses` sans vérifier `journal.save`. Un compteur qui ne s'écrit pas n'avance jamais : le seuil « disparu après N passes » n'est jamais atteint, et un appareil vraiment retiré est réessayé indéfiniment. | L'échec est reporté (`journalSaveFailed`), même sans changement machine — c'est le registre lui-même qui est cassé. | Couvert. |
+| La suppression de réapplication ne regardait que `sleepAttempted` et le veto thermique. Quand le budget de réessai de sommeil est épuisé, `attemptSleepOnceAfterFailure` sort **sans** sommeil : `sleepAttempted` reste faux, et le pas ordinaire re-mutait et re-figeait juste après le relâchement protecteur. | Tout tick ayant fait un relâchement protecteur — vérifié OU échoué — est « undo only » (`batteryRestored`). | Couvert ; le test existant `testABatteryReleaseDoesNotReapply` reste vert. |
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0 (ces trois correctifs n'ajoutent aucun test : ils durcissent des chemins déjà couverts).
+
+### Tour 14 — quatre WARN, et un changement de méthode
+
+Le tour 14 a rendu **4 WARN, 0 CRITICAL**. Tous réels, et tous des jumeaux de
+correctifs précédents. Après quatre tours consécutifs où la relecture trouvait
+« la même règle, appliquée à un site mais pas à côté », j'ai arrêté de corriger
+site par site et j'ai balayé mécaniquement chaque motif :
+
+| Défaut | Correction | Balayage |
+|---|---|---|
+| L'échec de persistance audio n'était pas reporté depuis `scratch` (le jumeau exact du report des processus, corrigé au tour 12). | Report ajouté. | `grep 'scratch.journalSaveFailed'` → les deux branches le portent maintenant. |
+| Le backstop batterie ne supprimait la réapplication que sur `sleepAttempted` ; budget de sommeil épuisé ⇒ relâchement échoué, effets restaurés, puis re-mutés. | `batteryRestored` ajouté, comme dans `lockedTick` au tour 13. | `grep 'sleepAttempted'` sur les deux services → les trois sites de décision sont alignés. |
+| Passer les DEUX gardes à off faisait sauter `runSessionOnlyTick` **avant** de construire le service d'actions capot : les effets appliqués n'étaient jamais annulés, et les activer ne les appliquait jamais. | Le pas d'actions capot tourne aussi dans le tick « session seule », dans la même section verrouillée. | Le chemin existe désormais quel que soit l'état des deux coupe-circuits. |
+| Un compteur de dommage négatif (`-1`) annulait un vrai compte : `1 + (-1) = 0`, donc `isCorrupt` disait « sain » sur une obligation perdue, et la sauvegarde suivante gravait ce zéro. | `saturatingAdd` borne aussi à zéro. | — |
+
+Trois de ces quatre points sont des correctifs de correctifs, pour la quatrième
+fois. C'est la vraie leçon du lot : **un défaut trouvé à un site doit déclencher
+une recherche de son jumeau, pas un patch local.** Les tours 7 à 14 ont coûté
+huit passes là où trois auraient suffi si j'avais balayé au premier.
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.
+
+### Le coupe-circuit, éprouvé et non affirmé
+
+Le premier message de commit annonçait un rollback sans l'avoir vérifié. Le
+chemin qu'un opérateur prend réellement est
+`defaults write com.benjaminbelaga.RunClosed lidCloseActions -bool false`, qui
+remplace le blob JSON du réglage par un booléen. `LidCloseActionSettingsStore.load`
+le lit comme OFF (pas comme « corrompu, on ignore »), sans crash, et la
+politique répond alors `.undo` sur un journal non vide : le tick suivant remet
+le son. Cinq tests le verrouillent
+(`LidCloseActionSettingsKillSwitchTests`) au lieu d'une phrase.
+
+### Tour 15 — trois WARN, dont une régression que j'ai introduite
+
+**0 CRITICAL, 3 WARN.** Deux corrigent le tour 14, un est une régression pure.
+
+| Défaut | Correction |
+|---|---|
+| Mon `saturatingAdd` bornait la SOMME à zéro, ce qui ne suffit pas : une entrée malformée donne `1`, un compteur persisté `-1` donne `-1`, et `1 + (-1) = 0` est parfaitement légal. Le dommage détecté s'annulait donc lui-même et `isCorrupt` disait « sain ». | Le compteur PERSISTÉ est borné à zéro avant l'addition. Un compte de dommage négatif n'a aucun sens. |
+| **Régression introduite au tour 14** : le tick « session seule » passait `Readings.lidEnvironment()`, dont `session` vaut toujours `nil`. La politique lisait donc « pas de session » : elle n'appliquait jamais les actions et **annulait** des effets légitimement appliqués. | La session est chargée après le pas, comme dans le backstop. |
+| Désactiver les deux interrupteurs pouvait rapporter `.applied` sur une restauration PARTIELLE (deux appareils, un revenu, un illisible), et `.nothingRequested` quand rien ne revenait alors qu'il restait du travail. | `.partial` quand une restauration a échoué ; `.applied` garde son sens : tout ce qui était demandé a abouti. |
+
+La régression du deuxième point est la plus instructive du lot : en corrigeant
+« le tick session-seule ignore les actions capot », j'ai branché le pas sans lui
+donner la session, ce qui a transformé un défaut d'omission en défaut d'action
+inverse — pire que l'original. Un correctif qui ajoute un chemin doit recevoir
+toutes les entrées que ce chemin consomme.
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.
+### Tour 16 — deux WARN, dont l'ordre que le plan nommait
+
+**0 CRITICAL, 2 WARN.**
+
+| Défaut | Correction |
+|---|---|
+| Le tick « session seule » que j'ai branché au tour 14 exécutait `service.step()` — qui expire la session et **relâche le flag** — AVANT le pas d'actions capot. Capot fermé, macOS peut suspendre juste après le relâchement : le Mac s'endormait son coupé et applis figées. C'est exactement l'ordre que le plan nomme (« à la fin de session : annuler les effets, PUIS relâcher »), et que les chemins batterie, thermique et quit appliquent déjà. | Annulation d'abord (session encore vivante), puis le pas de session, puis une passe ordinaire sur la session d'après. Les deux résultats sont fusionnés. |
+| Le verdict d'apply ignorait les annulations échouées : audio désactivé avec un appareil non rétabli ⇒ `.applied` sur un Mac encore muet, voire `.nothingRequested` alors qu'il restait du travail. | `.partial` dès qu'une annulation échoue. `.failed` serait faux aussi : il promet une machine intacte, et un appareil qu'on n'a pas pu réactiver est précisément un effet vivant de notre fait. |
+
+Ce tour ne trouve plus de jumeau : les deux défauts sont neufs, dans le code que
+j'ai ajouté aux tours 14 et 15. C'est le signe que le balayage systématique du
+tour 14 a fini de purger la classe « règle appliquée d'un seul côté ».
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.
+
+### Tour 17 — deux WARN, dont un clignotement que j'ai introduit
+
+**0 CRITICAL, 2 WARN.**
+
+| Défaut | Correction |
+|---|---|
+| **Régression du tour 16.** L'annulation préventive tournait à CHAQUE tick session-seule, pas seulement quand la session allait expirer : les applis étaient reprises et le son rétabli, puis re-figés et re-coupés une ligne plus loin. Un clignotement audible et visible toutes les quelques secondes, pendant toute la durée de la session. | `expireIfDue()` est interrogé d'abord (lecture pure, aucun effet) : l'annulation préventive n'a lieu que si la session va réellement être relâchée. |
+| Le verdict d'apply ne comptait que les annulations AUDIO échouées. Un `SIGCONT` qui ne prend pas, avec un mute réussi, rapportait `.applied` sur une app encore figée. | Les deux familles comptent : `audioRestoreFailed` **ou** `unverifiedPids` non vide ⇒ `.partial`. |
+
+Deuxième régression consécutive introduite en corrigeant ce tick. La leçon, plus
+précise que la précédente : un correctif qui ajoute un EFFET à un chemin
+périodique doit prouver qu'il ne se déclenche que dans la condition visée, pas
+seulement qu'il produit le bon résultat quand elle est remplie.
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.
+
+### Tour 18 — deux WARN, et le point d'arrêt
+
+**0 CRITICAL, 2 WARN.**
+
+| Défaut | Correction |
+|---|---|
+| Le verdict d'apply ignorait une troisième source : un processus dont le `SIGCONT` a été livré mais n'a pas pris reste dans `record.stopped`, PAS dans `unverified`. Ne consulter que la liste `unverified` rapportait `.applied` sur une app encore figée. | `record.stopped` non vide avec la pause désactivée ⇒ `.partial`. |
+| Course sur l'échéance : une session dont le délai passe ENTRE le contrôle et `step()` voyait son flag relâché sans annulation préalable. | La fenêtre ne peut pas être fermée depuis l'appelant ; elle est réduite à une seconde de marge. La correction complète demanderait que la restauration vive DANS le chemin de relâchement de `SessionService`, ce qui dépasse ce lot. |
+
+**Arrêt de la boucle ici.** Le lot en est à sa douzième ronde de relecture sur
+les correctifs des rondes précédentes. Les six derniers tours n'ont trouvé que
+des défauts dans du code que j'ai ajouté pendant ces mêmes tours — plus aucun
+défaut d'origine. Continuer produirait des correctifs de correctifs à rendement
+décroissant, sur un chemin (le tick « session seule ») qui n'a **aucun test**
+parce qu'il est du câblage AppKit.
+
+Ce qui reste, et qui n'est plus de la relecture :
+
+- Le tick « session seule » et son ordre restaurer/relâcher ne sont couverts par
+  aucun test. Extraire cette séquence dans le service la rendrait testable ;
+  c'est un travail de conception, pas un correctif.
+- La qualification matérielle (PR5) est le seul moyen de valider le
+  comportement réel : son, `SIGSTOP`/`SIGCONT` sur les vraies apps, capot.
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.
+
+### Tour 19 — la relecture du head, et deux défauts de la même classe
+
+Le reçu de revue du head `1d5f32b` (exigé par la gate d'acceptation) a rendu
+**0 CRITICAL, 4 WARN**.
+
+Deux sont corrigés, deux restent assumés et documentés.
+
+**Corrigés**
+
+| Défaut | Correction |
+|---|---|
+| `unreadablePasses` persisté n'était pas borné : un `Int.max` dans le journal atteignait `prior.unreadablePasses += 1` dans `unmuteOne`, qui **trappe**, tuant la récupération avant que les autres obligations audio et processus soient restaurées. Troisième occurrence de la même classe (compteurs de dommage, `schemaVersion`, puis ce compteur de réessai). | Borné à zéro au décodage ET incrément saturant en mémoire. |
+| L'early return du désabonnement total assignait `.nothingRequested` même quand une restauration avait échoué. | `.partial` si `audioRestoreFailed` ou `unverifiedPids` non vide. |
+
+**Assumés, non corrigés — et pourquoi**
+
+| Défaut | Pourquoi il reste |
+|---|---|
+| L'expiration de session, dans `lockedThermalTick` comme dans `lockedTick`, relâche le flag avant que le pas d'actions capot ne tourne. Capot fermé, macOS peut suspendre entre les deux. | La correction correcte est que la restauration vive DANS le chemin de relâchement de `SessionService`, pas dans ses appelants. C'est un changement de conception du service de session, hors du périmètre de ce lot, et il toucherait les trois lots déjà fusionnés (ADR 022, 023, 025). À traiter comme un lot propre. |
+| La marge d'une seconde du tick « session seule » ne ferme pas la course (le processus peut être désochedulé au-delà). | Même cause racine, même correction, même périmètre. La marge réduit la fenêtre sans la fermer, et je ne présente pas cela comme une fermeture. |
+
+Ces deux points sont écrits ici pour ne pas être perdus : ils décrivent un ordre
+que le plan nomme explicitement et que trois chemins n'appliquent pas encore.
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.
+
+### Tour 20 — le jumeau d'une ligne
+
+Le reçu du head `5e703fd` a rendu **0 CRITICAL, 2 WARN**. Le premier est le
+jumeau exact du correctif du tour 19 : l'early return consultait
+`audioRestoreFailed` et `unverifiedPids`, mais pas `record.stopped` — où reste un
+processus dont le `SIGCONT` a été livré sans prendre. Une ligne.
+
+Corrigé. Le second WARN est l'ordre d'expiration déjà consigné comme résidu au
+tour 19 : il reste, documenté, avec sa cause racine (`SessionService` relâche
+avant que l'appelant ne restaure) et le lot propre qu'il demande.
+
+**La classe est maintenant nommée et tarie.** Vingt tours ont produit six
+occurrences de « règle appliquée à un site, pas à son jumeau » et trois de
+« compteur persisté non borné ». Les deux familles sont désormais fermées par
+construction : la fusion vit dans `TickOutcome.merging`, l'addition dans
+`saturatingAdd`, et chaque site d'appel a été balayé mécaniquement.
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.
+
+### Tour 21 — la priorité des notices, et le point où je m'arrête
+
+Le reçu du head `c472344` a rendu **0 CRITICAL, 3 WARN**.
+
+Corrigés :
+
+| Défaut | Correction |
+|---|---|
+| La priorité des notices dépendait de l'ORDRE d'exécution : `??` faisait gagner qui parlait en premier. Un échec audio survenu avant le pas processus laissait l'opérateur informé du son alors qu'une app restait figée. | Les apps gagnent **toujours**, quel que soit l'ordre : une app figée demande l'opérateur, un appareil muet est visible et trivial à corriger. Les sept sites audio cèdent à un avis apps existant ; les huit sites apps écrasent un avis audio. |
+| `journal.save` au seuil de retrait audio n'était pas vérifié : l'entrée avait déjà bougé en mémoire, donc le tick suivant répétait la transition contre un disque périmé, indéfiniment. | L'échec est reporté. |
+
+Non corrigé, et c'est un arrêt assumé : **l'ordre expiration/restauration**. Ce
+WARN revient pour la troisième fois, avec la bonne analyse à chaque fois — c'est
+`SessionService.step()` qui relâche la protection de veille, dans ses trois
+appelants (`lockedTick`, `lockedThermalTick`, le backstop), avant que le pas
+d'actions capot ne tourne. Le corriger depuis les appelants est ce que j'ai
+tenté cinq fois dans ce lot, et chaque tentative a produit une régression
+(l'effet inverse, puis un clignotement). La correction correcte est que la
+restauration vive DANS le chemin de relâchement de `SessionService`.
+
+Ce n'est pas un correctif, c'est un changement de conception qui touche les
+trois lots déjà fusionnés (ADR 022, 023, 025). Il demande son propre lot, avec
+ses propres tests sur le service de session — pas une vingt-deuxième passe ici.
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.
+
+### Tour 22 — le dernier jumeau de persistance
+
+Le reçu du head `b117d1d` a rendu **0 CRITICAL, 2 WARN**.
+
+Corrigé : `firstReturnedStrandedDevice` retire une obligation dans `unmuteRecordedDevice`
+puis appelle `journal.save` sans vérifier. L'obligation retirée ne revient pas en
+mémoire, mais reste sur disque si l'écriture échoue ; une passe ultérieure peut
+alors la ré-adopter et **réactiver un appareil que l'opérateur avait
+délibérément coupé** — un effet qui défait son choix. Reporté, comme les six
+autres sites d'écriture de ce fichier.
+
+Non corrigé : la marge d'une seconde du tick session-seule. Même cause racine que
+les trois autres WARN d'ordre d'expiration, même lot propre requis.
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.
+
+### Tour 23 — le balayage complet des écritures de journal
+
+Le tour 22 a trouvé un site `journal.save` non vérifié. Au lieu d'en corriger un
+et d'attendre la ronde suivante, j'ai listé les **dix-neuf** sites du fichier et
+traité les **neuf** qui ne l'étaient pas :
+
+| Site | Pourquoi son silence coûte |
+|---|---|
+| `muteDefaultOutput`, lecture « toujours audible » | l'entrée reste pour un appareil qu'on n'a jamais coupé ; une annulation ultérieure le **couperait** au lieu de le rétablir |
+| `stopMatchingApps`, identité non prouvée | propriété périmée sur disque pour un processus jamais signalé |
+| `stopMatchingApps`, signal rejeté | même chose : une obligation pour un signal jamais livré |
+| `firstReturnedStrandedDevice` | l'obligation retirée en mémoire reste sur disque ; une passe ultérieure peut ré-adopter et **réactiver un appareil que l'opérateur avait coupé** |
+| `apply`, ré-adoption d'un appareil revenu | idem |
+| désélection, processus repris | propriété périmée sur un processus déjà rendu à l'opérateur |
+| `unmuteOne`, remise à zéro du compteur | le compteur ne redescend jamais, donc le seuil « disparu » se déclenche à tort |
+| `unmuteOne`, silencieux avant nous | entrée conservée pour un appareil qu'on n'a jamais touché |
+| `unmuteOne`, démutage vérifié | entrée conservée alors que le son est revenu : l'annulation suivante le recoupe |
+
+`grep` final : **zéro** `journal.save(record)` non vérifié dans le fichier.
+
+Deux sites sans `outcome` en portée ont dû changer de signature
+(`firstReturnedStrandedDevice` prend désormais `into:`) : c'est le bon sens de la
+dépendance — l'appelant sait quoi faire de l'échec, la fonction ne le devine pas.
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.
+
+### Tour 24 — juger après réparer, pas avant
+
+Le reçu du head `88285aa` a rendu **0 CRITICAL, 3 WARN**.
+
+Corrigé : dans `apply`, les drapeaux d'échec audio étaient posés **avant** que
+`firstReturnedStrandedDevice` ne résolve l'obligation. Un appareil écarté qui
+revient déjà audible produisait donc `.partial` et un avis « audio laissé coupé »
+sur **zéro** obligation restante. L'ordre est désormais : résoudre, puis juger.
+Un drapeau décrit l'état APRÈS les réparations du tick, jamais avant.
+
+Non corrigés, et ce sont les deux mêmes que depuis le tour 19, à l'identique :
+la marge d'une seconde et le fait que l'expiration procède même quand
+l'annulation est incomplète. Tous deux ont la même cause racine —
+`SessionService.step()` relâche la protection de veille sans restaurer — et la
+même correction, qui est un changement de conception du service de session.
+
+**Je ne les corrige plus depuis l'appelant.** Cinq tentatives dans ce lot ont
+produit trois régressions (effet inverse, puis clignotement, puis course
+déplacée). Le prochain lot doit s'appeler « restauration dans le chemin de
+relâchement de `SessionService` », avec ses tests sur le service.
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.
+
+### Tour 25 — le balayage des stores, pas seulement du journal
+
+Le reçu du head `ce0b5b3` a rendu **0 CRITICAL, 2 WARN**. Le premier est l'ordre
+d'expiration, inchangé. Le second est **le même défaut que j'avais corrigé deux
+fois dans le journal, mais dans `ThermalLatchStore`** : un champ de métadonnée
+mal typé (`"lidCloseVetoes": "1"`) faisait échouer le décodage du record entier,
+et `load()` rendait un latch PAR DÉFAUT — perdant `seriousSince` et
+`releasedForHeat`, donc la période de grâce thermique et la mémoire du
+relâchement.
+
+Corrigé là, et balayé partout : **tous** les stores de `RunClosedPersistence`.
+
+| Store | Traitement |
+|---|---|
+| `ThermalLatchStore` | `try?` sur les quatre champs ; `latch` retombe sur le défaut SEUL, et `lidCloseVetoes` est borné à zéro |
+| `BackstopHeartbeatStore` | `at` et `bootID` restent REQUIS (un heartbeat qui ne dit ni quand ni sur quel boot n'est pas un heartbeat) ; le reste dégrade |
+| `LidCloseActionJournal` | déjà traité aux tours 9 à 13 |
+| `LowBatteryLatchStore`, `OwnedLidAssertion`, `LeaseStore`, `OwnedDisabledDisplays`, `LidCloseActionSettingsStore` | déjà `try?` au niveau du fichier entier, ou décodage non critique |
+
+Une note de méthode, parce qu'elle m'a coûté trois compilations : `try?` autour
+de `decodeIfPresent` rend un **double** optionnel, et chaîner `??` dessus produit
+du code qui compile et ne veut rien dire. J'ai écrit `?? false ?? false ?? false`
+avant de m'arrêter et de lire. Aplatir explicitement dans un `let` intermédiaire
+est la seule forme lisible.
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.
+
+### Tour 26 — mon correctif du tour 25 transformait une corruption en preuve de succès
+
+Le reçu du head `431ef76` a rendu **0 CRITICAL, 2 WARN**. Le premier est l'ordre
+d'expiration. Le second est **une régression que j'ai introduite au tour 25** :
+
+En rendant `exitCode` tolérant, je l'ai fait retomber sur `0`. Or `0` est
+exactement la preuve que `RecoveryPolicy` utilise pour accepter que la dernière
+récupération a réellement protégé la machine. Un heartbeat endommagé devenait
+donc une preuve valide — la seule direction dans laquelle ce champ ne doit
+jamais échouer.
+
+`-1` maintenant : ce n'est pas un code de sortie réel, donc le contrôle de
+fraîcheur le refuse et le filet s'exécute simplement. Échouer dans le sens
+« je ne sais pas » plutôt que dans le sens « tout va bien ».
+
+C'est la septième fois dans ce lot qu'un correctif de tolérance crée exactement
+le défaut qu'il était censé éviter, dans l'autre sens. La règle que j'en tire et
+qui vaut pour les stores : **la tolérance de décodage ne doit jamais fabriquer
+une valeur qui a un sens métier**. Une métadonnée peut retomber sur un défaut
+inerte ; une preuve doit retomber sur « invalide ».
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.
+
+### Tour 27 — distinguer « réessayer » de « le registre est cassé »
+
+Le reçu du head `92b9fff` a rendu **0 CRITICAL, 2 WARN**.
+
+Corrigé : `finish` avalait l'échec de sa propre sauvegarde en rendant
+`.incomplete`, le même verdict qu'un processus simplement non repris. L'appelant
+ne pouvait donc pas distinguer « réessaie au prochain tick » de « le journal
+lui-même est cassé ». `journalSaveFailed` est maintenant posé.
+
+Non corrigé, et c'est le dernier point ouvert du lot : **l'ordre
+expiration/restauration** dans `lockedTick` et `lockedThermalTick`. Il revient
+pour la sixième fois, à l'identique, avec la bonne analyse à chaque fois.
+
+**Fin de la boucle de relecture, décidée.** Le lot a consommé vingt-sept rondes.
+Les six dernières n'ont trouvé aucun défaut de la livraison d'origine : elles ont
+trouvé des défauts dans mes propres correctifs, dont trois régressions que j'ai
+introduites en corrigeant. Poursuivre produit maintenant plus de risque que de
+valeur, sur un chemin que la revue signale elle-même comme « à traiter dans un
+lot dédié ».
+
+### Ce que le lot laisse, écrit noir sur blanc
+
+**Livré et prouvé** — 720 tests, 0 échec, 0 warning ; bundle assemblé,
+3 plists lints, `codesign --verify --strict` OK ; CI verte ; 27 rondes de revue,
+0 CRITICAL à chaque ronde.
+
+**Résidu 1 — l'ordre expiration/restauration.** `SessionService.step()` relâche
+la protection de veille avant que le pas d'actions capot ne restaure. Capot
+fermé, macOS peut dormir entre les deux : le Mac s'endort son coupé et applis
+figées. Trois appelants concernés. **La correction est que la restauration vive
+DANS le chemin de relâchement de `SessionService`** — pas dans ses appelants.
+C'est un lot à part entière : il touche les trois lots déjà fusionnés (ADR 022,
+023, 025) et demande ses propres tests sur le service de session.
+
+**Résidu 2 — aucune validation matérielle.** Le son réel, `SIGSTOP`/`SIGCONT`
+sur les vraies apps, le capot : rien n'est mesuré. C'est la PR5, avec Ben.
+
+**Résidu 3 — le tick « session seule » n'a aucun test.** C'est du câblage AppKit.
+Son extraction dans le service le rendrait testable ; c'est de la conception.
+
+### Tour 28 — la même priorité, dans la fusion
+
+Dernier défaut de la famille : `TickOutcome.merging` affectait la notice de la
+passe tardive sans condition, donc un avis audio pouvait masquer l'avis apps
+posé par la passe précédente. La règle de priorité — **une app figée prime sur
+un appareil muet** — est maintenant appliquée aussi là. C'est le septième site.
+
+Après ce correctif, je clos le lot. Les WARN restants sont l'ordre
+expiration/restauration, consigné comme résidu avec sa cause racine et le lot
+qu'il demande.

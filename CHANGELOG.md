@@ -7,6 +7,61 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Lid-close actions (ADR 026). During a keep-awake session, when the lid is
+  closed and no external display is attached, RunClosed mutes the default
+  audio output and (on its own, separate switch) pauses Slack, Discord and
+  WhatsApp. The governing principle is that **nothing is touched without a
+  proven way back**: every effect is journaled BEFORE it is applied, the undo
+  is verified by readback, and a journal entry is cleared only once the prior
+  state is proven restored. `LidCloseActionPolicy` (Core) is pure and takes
+  three conditions together — a session in progress (an indefinite session
+  counts; a paused one does not), the lid closed per `ClamshellObserver`, and
+  **no external display attached**, with `unknown` counting as attached. All
+  three are named refusals, so a post-mortem reads the cause instead of
+  "nothing happened". A docked Mac with the lid closed is therefore never
+  touched — the rule that protects the operator's desk setup. The whole feature
+  is OFF by default and is switched on from the menu bar's right-click menu,
+  where the app-pause list is visible and the app-pause switch is separate:
+  freezing a process is far more intrusive than muting a device. The sound path
+  records the device by **UID** (the `AudioObjectID` is a per-process handle
+  that changes across restarts, so a journal holding only the id could not find
+  the device it muted) together with its prior mute flag and volume, then reads
+  back: a device that was already silent is left alone and journaled as
+  nothing, so the undo never turns sound back on that the operator had turned
+  off, and a device that has disappeared is noted, never an error. The app
+  path stops a process with `SIGSTOP` after journaling its **identity triple**
+  (pid, process start seconds + microseconds, boot session) — a pid alone is
+  recycled by the kernel, so "pid 4711 is stopped" is not a fact that survives
+  a few minutes — and confirms the stopped state with `proc_pidinfo`
+  (`PROC_PIDTBSDINFO`), because `kill(2)` returning 0 means "delivered", not
+  "stopped". `SIGCONT` requires the identity to be re-proved: a process whose
+  pid now belongs to something else, or that has vanished, is left stopped and
+  reported as **"to verify"**, never resumed blindly — resuming the wrong
+  process is strictly worse than leaving an app paused. An app we did not stop
+  ourselves is never resumed, because the journal is the only authority. The
+  undo runs in the reverse order everywhere (apps then sound) and at four
+  points the plan names: the lid reopening or any condition stopping, the end
+  of a session, a quit, and — the one this lot adds deliberately — the ADR 024
+  backstop, which runs the SAME policy rather than a copy so a Mac whose app
+  crashed does not stay muted with an app frozen. The undo also runs
+  immediately BEFORE a thermal or low-battery release sleeps the Mac: a machine
+  that goes down muted with a frozen app comes back in that state, and nobody
+  would connect it to the heat event. A pending journal is itself a reason for
+  the backstop to take the lock, even with no session and no ownership record,
+  which is exactly the crashed-app case. Screen brightness and keyboard
+  backlight are **NOT** part of this lot: `DisplayBrightness.set` answers OK
+  without an effect, so the undo would not be verifiable — the measurement is
+  deferred to the hardware qualification and the fields are marked NOT_TESTED.
+  Read-only CLI `runclosed lid-close status [--json]` (settings, the three
+  readings, the decision, the journal and the "to verify" list; exit 3 when
+  something is left to verify) and `runclosed lid-close simulate` (a pure
+  decision on injected values, mutating nothing). The app's quit teardown
+  undoes inside the same `LidWriteLock` section as the rest of the release.
+  Kill switch: the right-click menu, or
+  `defaults write com.benjaminbelaga.RunClosed lidCloseActions -bool false`,
+  which reads as OFF and makes the next tick restore whatever the journal
+  still holds.
+
 - Thermal guard and clamshell detection (ADR 025). `pmset disablesleep 1`
   also blocks macOS's own emergency sleep, and nothing covered HEAT: a Mac
   sitting with the lid closed under a fleet of agents can run hot with nothing

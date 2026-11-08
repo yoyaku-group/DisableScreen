@@ -64,6 +64,13 @@ public struct ThermalGuardService {
     /// ADR 023 session layer. A thermal release ENDS the session; `nil` means
     /// there is none, and the release is the same either way.
     public var sessionService: SessionService?
+    /// ADR 026 lid-close actions. A thermal release must UNDO them before the
+    /// Mac sleeps: otherwise it goes down muted with an app frozen and comes
+    /// back that way, with nobody left to notice. `nil` = no lid-close layer.
+    public var lidCloseActions: LidCloseActionService?
+    /// Vetoes counted in THIS process, so an unwritable latch cannot reset the
+    /// budget every tick and refuse the release forever.
+    private var vetoesThisProcess = 0
 
     public init(
         lidService: LidMutationService,
@@ -74,7 +81,8 @@ public struct ThermalGuardService {
         monotonic: @escaping @Sendable () -> Double,
         sleeper: any SystemSleeper,
         auditLog: ThermalAuditLog = ThermalAuditLog(),
-        sessionService: SessionService? = nil
+        sessionService: SessionService? = nil,
+        lidCloseActions: LidCloseActionService? = nil
     ) {
         self.lidService = lidService
         self.latchStore = latchStore
@@ -85,11 +93,14 @@ public struct ThermalGuardService {
         self.sleeper = sleeper
         self.auditLog = auditLog
         self.sessionService = sessionService
+        self.lidCloseActions = lidCloseActions
     }
 
     /// Live wiring: real thermal state, real clamshell bit, real display
     /// inventory, real `pmset`, real session layer.
-    public static func live(bootID: String, sessionService: SessionService?) -> ThermalGuardService {
+    public static func live(bootID: String,
+                            sessionService: SessionService?,
+                            lidCloseActions: LidCloseActionService? = nil) -> ThermalGuardService {
         let lidStore = OwnedLidAssertion(currentBootID: bootID)
         return ThermalGuardService(
             lidService: LidMutationService(
@@ -103,7 +114,8 @@ public struct ThermalGuardService {
             externalDisplayProvider: { ClamshellReadback.externalDisplayConnected() },
             monotonic: { MonotonicReadback.seconds() },
             sleeper: PMSetSleeper(),
-            sessionService: sessionService)
+            sessionService: sessionService,
+            lidCloseActions: lidCloseActions)
     }
 
     public struct Evaluation: Equatable, Sendable {
@@ -137,6 +149,14 @@ public struct ThermalGuardService {
         /// The session was ended by the thermal release (ADR 025: heat ENDS a
         /// session, it does not pause it).
         public var sessionEndedByHeat: Bool = false
+        /// What the lid-close undo did before this release's sleep (ADR 026).
+        /// `nil` when no lid-close layer is wired or nothing was applied.
+        public var lidCloseUndo: LidCloseActionService.TickOutcome?
+        /// The lid-close veto budget ran out and the release proceeded anyway.
+        public var lidCloseVetoExhausted = false
+        /// The lid-close journal could not be read, so its obligations could not
+        /// be recovered before this release.
+        public var lidCloseJournalCorrupt = false
         /// The latch could not be persisted this tick.
         ///
         /// Reported rather than swallowed because of what it costs: the
@@ -226,6 +246,22 @@ public struct ThermalGuardService {
             performRelease(evaluation: evaluation, record: &record, outcome: &outcome)
         }
 
+        // A NEW episode gets a fresh veto budget: the counter belongs to an
+        // EPISODE, and leaving it accumulated meant a later, unrelated overheat
+        // was released on its first incomplete undo instead of getting its own
+        // bounded attempts (gate finding, `Thermal undo veto budget never
+        // resets`).
+        // Reset on the POLICY's own episode boundary, not on a latch-diff: a
+        // directly-critical episode never changes the latch at all (all fields
+        // stay at their empty values), so a diff comparison never fired and the
+        // budget accumulated ACROSS episodes (gate finding, `Le budget de veto
+        // ne se réinitialise pas toujours entre deux épisodes`). A tick that is
+        // not hot is the boundary.
+        if !evaluation.input.state.isHot {
+            record.lidCloseVetoes = 0
+            vetoesThisProcess = 0
+        }
+
         if record != before {
             persistLatch(record, into: &outcome)
         }
@@ -239,14 +275,16 @@ public struct ThermalGuardService {
     /// broken — the one failure mode that makes an untouched machine look
     /// protected while it is not. `TickOutcome.latchSaveFailed` carries the same
     /// fact to the callers that can do something with it.
+    @discardableResult
     private func persistLatch(_ record: ThermalLatchStore.Record,
-                              into outcome: inout TickOutcome) {
-        guard !latchStore.save(record) else { return }
+                              into outcome: inout TickOutcome) -> Bool {
+        guard !latchStore.save(record) else { return true }
         outcome.latchSaveFailed = true
         FileHandle.standardError.write(Data(
             ("[RunClosed] thermal: latch could NOT be written to \(latchStore.url.path) "
              + "— the sustained-heat clock will restart every tick, so the "
              + "ten-minute release cannot fire until this is fixed\n").utf8))
+        return false
     }
 
     /// The ONE thermal release branch — shared by the app's guard tick and the
@@ -257,6 +295,97 @@ public struct ThermalGuardService {
                                         record: inout ThermalLatchStore.Record,
                                         outcome: inout TickOutcome) {
         let recordBootID = lidService.store.load().bootID
+        // ADR 026: undo the lid-close effects BEFORE releasing the flag.
+        //
+        // `setEnabled(false)` re-enables normal sleep, and with the lid closed
+        // the Mac can suspend before this function's later lines ever run —
+        // leaving the sound muted and apps paused across the sleep (gate
+        // finding, `Thermal undo runs after releasing lid protection`).
+        var undoIncomplete = false
+        if var actions = lidCloseActions {
+            // A truncated journal loads as EMPTY, so the undo below sees no
+            // obligations. This is the thermal path's own corruption report —
+            // neither the backstop trim nor the guard tick covers it (gate
+            // finding, `Thermal sleep can report successful recovery over a
+            // corrupt journal`).
+            if actions.journal.isCorrupt { outcome.lidCloseJournalCorrupt = true }
+            let undo = actions.undoAll()
+            outcome.lidCloseUndo = undo
+            lidCloseActions = actions
+            // An INCOMPLETE undo means effects are still applied. Releasing the
+            // flag here would let the Mac sleep with an app suspended or the
+            // sound muted, before any further recovery attempt (gate finding,
+            // `Le relâchement thermique ignore une annulation incomplète`). The
+            // release is skipped and the operator is told instead.
+            // Only a LIVE effect that we could not reverse may veto the
+            // release. A HISTORICAL obligation (`unverifiedProcesses`, a
+            // device stranded in `unverifiedAudio`) is not a live effect: no
+            // process entry and no audio entry remains, so there is nothing
+            // the sleep would trap. Vetoing on those disabled the protective
+            // thermal action indefinitely — an unplugged headset was enough
+            // (gate finding, `Historical recovery obligations indefinitely veto
+            // thermal protection`).
+            // A CORRUPT journal is a veto too: `load()` returns empty for a
+            // truncated file, so "nothing left" is not trustworthy and the
+            // effects may still be applied (gate finding, `Unreadable journal
+            // bypasses the thermal undo guard`).
+            let journalUnreadable = actions.journal.isCorrupt
+            let live = actions.journal.load()
+            let liveAudioLeft = !live.audio.isEmpty
+            let liveStopLeft = !live.stopped.isEmpty
+            undoIncomplete = journalUnreadable
+                || undo.undo == .incomplete
+                || (undo.audioRestoreFailed && liveAudioLeft)
+                || (!undo.unverifiedPids.isEmpty && liveStopLeft)
+        }
+        // The veto is BOUNDED. Refusing forever trades a comfort nuisance (a
+        // muted output, a paused app — both survive sleep via hibernation and
+        // both are trivially fixed by the operator) for a machine that cannot
+        // cool itself, which is the safety case this whole rule exists for. A
+        // permanently truncated journal must not keep an overheating Mac awake
+        // indefinitely (gate finding, `Failed lid-close recovery indefinitely
+        // vetoes thermal sleep`).
+        if undoIncomplete {
+            // Count the veto in MEMORY for this process's lifetime too, so a
+            // latch that cannot be WRITTEN does not reset the budget on every
+            // tick and stall the refusal forever (gate finding, `Failed latch
+            // writes prevent the thermal veto budget from advancing`). The
+            // persisted counter is the cross-restart memory; this one is the
+            // within-process floor.
+            // The counter must survive the RECREATION of this service on every
+            // tick (`live()` builds a new one), so it lives in the latch store
+            // and is advanced even when the SAVE fails — the in-memory copy is
+            // what bounds the refusals within this process, the file is what
+            // carries it across. Relying on an instance property meant the
+            // budget reset every tick and the overheating Mac was refused
+            // forever (gate finding, `Le compteur mémoire ne survit pas aux
+            // ticks réels`).
+            record.lidCloseVetoes += 1
+            vetoesThisProcess += 1
+            // A refusal is only honest if the count can be REMEMBERED. When the
+            // latch cannot be written the budget can never be exhausted — the
+            // service is rebuilt every tick and reloads the same stale count —
+            // so refusing again would keep an overheating Mac awake forever.
+            // In that case protection wins immediately (gate finding, `Le
+            // compteur mémoire ne survit pas aux ticks réels`).
+            let canRemember = persistLatch(record, into: &outcome)
+            if canRemember,
+               max(record.lidCloseVetoes, vetoesThisProcess) <= Self.maximumLidCloseVetoes {
+                outcome.mutation = .releaseRefused
+                outcome.mutationError = "the lid-close undo is incomplete; not releasing "
+                    + "the flag so the Mac cannot sleep with effects still applied "
+                    + "(\(record.lidCloseVetoes)/\(Self.maximumLidCloseVetoes))"
+                outcome.shouldNotify = true
+                outcome.notice = .releaseFailed
+                return
+            }
+            // Budget exhausted: PROTECTION WINS. Say so loudly.
+            outcome.lidCloseVetoExhausted = true
+            FileHandle.standardError.write(Data(
+                ("[RunClosed] thermal: lid-close undo still incomplete after "
+                 + "\(Self.maximumLidCloseVetoes) attempts; releasing anyway because heat "
+                 + "is the safety case — effects may remain applied across the sleep\n").utf8))
+        }
         // `.automatic` only: heat has no cross-boot widening. A stale record is
         // NOT active ownership, and the policy already refused that case — if
         // it ever got here, the gate refuses too (B2 stays authoritative).
@@ -378,7 +507,25 @@ public struct ThermalGuardService {
         }
     }
 
-    private func attemptSleep(_ outcome: inout TickOutcome) {
+    private mutating func attemptSleep(_ outcome: inout TickOutcome) {
+        // The lid-close undo must run BEFORE `sleepnow` on THIS path too.
+        // `LowBatteryGuardService.attemptSleep` was protected, but the thermal
+        // service sleeps through its own call — so a heat emergency could
+        // suspend the Mac with the sound muted and apps suspended, and the
+        // restoration in `thermalOutcome` would only run on wake (gate finding,
+        // `Thermal sleep precedes restoration of paused apps and audio`).
+        if var actions = lidCloseActions {
+            let undo = actions.undoAll()
+            // MERGE, exactly as the battery sleep path does. Keeping only the
+            // first result lost a process THIS pass resumed (the pre-release
+            // undo may have left it unconfirmed) and, with it, the `changed`
+            // signal and any notice — a report that reads like a clean
+            // recovery over a Mac that still has an app frozen (gate finding,
+            // `Second thermal undo result is discarded`). The whole merge now
+            // lives on `TickOutcome` so the two paths cannot drift again.
+            outcome.lidCloseUndo = outcome.lidCloseUndo.map { $0.merging(undo) } ?? undo
+            lidCloseActions = actions
+        }
         let r = sleeper.sleepNow()
         outcome.sleepAttempted = true
         outcome.sleepRC = r.rc
@@ -400,6 +547,11 @@ public struct ThermalGuardService {
             error: outcome.mutationError,
             sleepRC: outcome.sleepRC))
     }
+
+    /// How many thermal attempts may be refused because the lid-close undo is
+    /// incomplete before heat wins. Small: a transient failure resolves in one
+    /// or two ticks, a permanent one must not gate a safety action.
+    public static let maximumLidCloseVetoes = 3
 
     private static func triState(_ value: Bool?, closed: String, open: String) -> String {
         guard let value else { return "unknown" }

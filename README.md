@@ -34,6 +34,19 @@ as the audited baseline (see [Repository layout](#repository-layout)).
   released as an emergency; a flag set by another tool is never touched
   (ADR 022). Kill switch:
   `defaults write com.benjaminbelaga.RunClosed lowBatteryGuardEnabled -bool false`.
+- **Lid-close actions** — during a keep-awake session, with the lid closed
+  **and no external display attached**, mutes the default audio output and (on
+  a separate switch) pauses Slack, Discord and WhatsApp. Off by default;
+  switched on in the menu bar's right-click menu. A docked Mac with the lid
+  closed is never touched. Every effect is journaled before it is applied and
+  the undo is verified by readback, so nothing is left muted or frozen; an app
+  whose process id was recycled is left paused and listed "to verify" rather
+  than resumed blindly. Screen brightness and keyboard backlight are
+  deliberately **not** included yet: they need a proof-of-undo that only the
+  hardware measurement can provide (ADR 026). Kill switch: the right-click
+  menu, or `defaults write com.benjaminbelaga.RunClosed lidCloseActions -bool
+  false`, which the next tick reads as "undo whatever is journaled". CLI:
+  `runclosed lid-close status --json | simulate`.
 - **Recovery backstop** — a per-user LaunchAgent runs `runclosed-cli recover
   --backstop` every 60 s and takes only protective actions while the app is not
   running: a session whose deadline passed is ended, and at critical battery
@@ -111,6 +124,8 @@ recovery_audit.jsonl    # one line per recovery-backstop action or failure (neve
 backstop_heartbeat.json # proof the recovery agent RUNS: last run time, boot, exit code
 lid.lock                # cross-process lock serialising every lid writer
 app.lock                # held while the menu-bar app runs (it enforces session deadlines)
+lid_close_actions.json  # what the lid-close actions changed: audio device UID + prior state, stopped pids with their identity triple
+lid_close_audit.jsonl   # one line per lid-close apply/undo (never per tick)
 ```
 
 ## Safety model
@@ -173,6 +188,7 @@ Sources/
                          #      session (start / extend / end / status),
                          #      recover --backstop (what the LaunchAgent runs),
                          #      backstop (status / register / login-items / unregister)
+                         #      lid-close status (read-only) / simulate (pure decision)
 tests/                   # Swift test suites
 main.py, launcher.m,     # legacy Python app (audited baseline, kept in-tree)
 build.sh, test_e2e.py
