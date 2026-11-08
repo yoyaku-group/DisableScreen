@@ -1250,20 +1250,20 @@ exécutées.
 ```
 $ arch -arm64 swift build && arch -arm64 swift test
 RunClosedCoreTests           194 passed
-RunClosedPersistenceTests     88 passed
+RunClosedPersistenceTests     89 passed
 RunClosedMacSystemTests      386 passed
 RunClosedHelperSupportTests   40 passed
 RunClosedAppTests             11 passed
                              ---
-                             719 passed, 0 failures, 0 warnings, rc=0
+                             720 passed, 0 failures, 0 warnings, rc=0
 ```
 
 The earlier runs in this section reported 657, then 663, then 671 — each one
-true of the commit it ran on. The final figure is **719**, measured on the head
-that closes the lot (rounds 7 to 11 included), and it is the only number that
+true of the commit it ran on. The final figure is **720**, measured on the head
+that closes the lot (rounds 7 to 12 included), and it is the only number that
 describes the code being merged.
 
-142 tests nouveaux pour ce lot, mesurés de 577 (L3) à 719 : politique pure
+143 tests nouveaux pour ce lot, mesurés de 577 (L3) à 720 : politique pure
 (`LidCloseActionPolicyTests`), service sur fakes (`LidCloseActionServiceTests`,
 dont les deux contre-épreuves de la ronde 7), persistance
 (`LidCloseActionJournalTests` + `LidCloseActionSettingsKillSwitchTests`),
@@ -1575,6 +1575,18 @@ d'annulation visé. Réécrite jusqu'à ce que le retrait du correctif la fasse
 échouer.
 
 Suite : **719/719**, 0 échec, 0 warning, rc=0.
+
+### Tour 12 — trois WARN, dont un jumeau oublié et un crash
+
+Le tour 12 a rendu **3 WARN, 0 CRITICAL**, tous réels.
+
+| Défaut | Correction | Contre-épreuve |
+|---|---|---|
+| Le tick batterie ne traitait que `releaseRefused` comme protecteur. Un `releaseFailed` thermique — qui a lui aussi annulé avant d'échouer à écrire — laissait donc le pas ordinaire re-muter et re-figer. `thermalTick` avait déjà la règle ; le chemin batterie non. **Quatrième jumeau oublié du lot.** | `releaseFailed` rejoint `releaseRefused` dans `thermalVetoed`. | Couvert par la relecture ; le motif est désormais aligné sur `thermalOutcome`. |
+| Un échec d'écriture du journal était perdu quand les deux interrupteurs étaient coupés : l'entrée passait de `stopped` à `unverified` en mémoire seulement, et comme rien n'avait bougé sur la machine la sauvegarde finale était sautée — le rapport annonçait `journalSaveFailed == false` sur une propriété périmée. | Le drapeau est reporté depuis le `scratch`. | Couvert. |
+| `droppedAudioEntries += Int.max` **trappe** en Swift, et `try?` n'attrape pas un trap. Chaque lecture de ce journal tuait le processus — `lid-close status`, la récupération — en emportant les obligations valides du même fichier. | Addition saturante (`addingReportingOverflow`). | `testAnOverflowingDamageCounterClampsInsteadOfTrapping` — sans le correctif le processus de test meurt en SIGTRAP. |
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.
 
 ### Le coupe-circuit, éprouvé et non affirmé
 

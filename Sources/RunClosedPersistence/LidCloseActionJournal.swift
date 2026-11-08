@@ -281,6 +281,17 @@ public struct LidCloseActionJournal: Sendable {
                  unverifiedAudio, droppedAudioEntries, droppedProcessEntries
         }
 
+        /// `a + b`, clamped instead of trapping.
+        ///
+        /// Swift's `+` traps on overflow and `try?` does not catch a trap: with
+        /// a counter at `Int.max` in the file, every read of the journal killed
+        /// the process rather than reporting it — taking the valid obligations
+        /// down with it.
+        static func saturatingAdd(_ a: Int, _ b: Int) -> Int {
+            let (sum, overflow) = a.addingReportingOverflow(b)
+            return overflow ? Int.max : sum
+        }
+
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             // `try?` for the SAME reason as the damage counters below: a
@@ -347,10 +358,19 @@ public struct LidCloseActionJournal: Sendable {
             // finding, `Malformed damage counters discard all valid recovery
             // entries`). A counter that cannot be read is worth nothing; the
             // obligations next to it are worth everything.
-            droppedAudioEntries += (try? c.decodeIfPresent(
-                Int.self, forKey: .droppedAudioEntries)) ?? 0
-            droppedProcessEntries += (try? c.decodeIfPresent(
-                Int.self, forKey: .droppedProcessEntries)) ?? 0
+            // SATURATING, not `+=`. A file holding `Int.max` made the sum
+            // overflow, and an Int overflow TRAPS in Swift — `try?` does not
+            // catch a trap, it terminates the process. Every read of that file
+            // then crashed `lid-close status` and the recovery run, taking the
+            // valid obligations beside it down too: the worst possible outcome
+            // for a diagnostic counter (gate finding, `Addition non bornée des
+            // compteurs persistés`).
+            droppedAudioEntries = Self.saturatingAdd(
+                droppedAudioEntries,
+                (try? c.decodeIfPresent(Int.self, forKey: .droppedAudioEntries)) ?? 0)
+            droppedProcessEntries = Self.saturatingAdd(
+                droppedProcessEntries,
+                (try? c.decodeIfPresent(Int.self, forKey: .droppedProcessEntries)) ?? 0)
 
             // A damaged element is surfaced, never silently dropped.
             if audio.isEmpty, (c.contains(.audio)) == true {

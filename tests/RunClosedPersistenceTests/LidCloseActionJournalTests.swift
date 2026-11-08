@@ -214,6 +214,35 @@ final class LidCloseActionCorruptEntryTests: XCTestCase {
                        "a bad COUNTER discarded a valid process obligation")
     }
 
+    /// A counter at `Int.max` must not TRAP. Swift's `+` traps on overflow and
+    /// `try?` does not catch a trap, so a hostile or corrupted counter killed
+    /// every read of the journal — taking the valid obligations down with it
+    /// (gate finding, `Addition non bornée des compteurs persistés`).
+    ///
+    /// Counter-proof: with `+=` this test CRASHES the test process.
+    func testAnOverflowingDamageCounterClampsInsteadOfTrapping() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("runclosed-overflow-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("lid_close_actions.json")
+
+        let json = """
+        {"schemaVersion":1,
+         "audio":[{"deviceUID":"Headphones","wasMuted":false,"volume":0.7},
+                  {"deviceUID":"Broken","wasMuted":false,"volume":"loud"}],
+         "stopped":[],"unverified":[],"unverifiedAudio":[],
+         "droppedAudioEntries":\(Int.max)}
+        """
+        try Data(json.utf8).write(to: url)
+
+        let rec = LidCloseActionJournal(url: url).load()
+
+        XCTAssertEqual(rec.audio.map { $0.deviceUID }, ["Headphones"],
+                       "the overflow lost the valid obligation")
+        XCTAssertEqual(rec.droppedAudioEntries, Int.max, "the counter must clamp, not wrap")
+    }
+
     /// A mis-typed `schemaVersion` must not cost the obligations either — same
     /// class as the counters, but it sits at the TOP of the decode, so a
     /// throwing read there discarded the file before anything else was read

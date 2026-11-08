@@ -1091,6 +1091,15 @@ public struct LidCloseActionService {
                 outcome.notice = scratch.notice
                 outcome.unverifiedPids = scratch.unverifiedPids
             }
+            // A recovery CLASSIFICATION that could not be persisted is a
+            // failure even when nothing moved on the machine: the entry moved
+            // from `stopped` to `unverified` in MEMORY only, so the file still
+            // claims a live stop. The final save below is skipped when
+            // `changed` is false, so without this carry the caller was told
+            // `journalSaveFailed == false` over stale ownership (gate finding,
+            // `Process recovery persistence failures are lost when disabling
+            // effects`).
+            if scratch.journalSaveFailed { outcome.journalSaveFailed = true }
             outcome.evaluation.journalBefore = record
         }
         // PERSIST the outcome. A resume removes entries in memory; returning

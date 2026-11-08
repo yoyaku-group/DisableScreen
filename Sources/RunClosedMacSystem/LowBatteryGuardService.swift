@@ -683,8 +683,16 @@ public struct LowBatteryGuardService {
         // blocked because the undo was incomplete, so running the ordinary step
         // afterwards re-applies exactly what it just restored (gate finding,
         // `Réapplication des effets après un veto thermique`). Undo only.
+        // `releaseFAILED` belongs here for exactly the same reason, and leaving
+        // it out was the twin of the bug `thermalTick` already fixed: the
+        // thermal service undoes BEFORE writing the flag, so a write that fails
+        // leaves the effects restored and the session active, and the ordinary
+        // step below would mute and suspend all over again. The no-sleep case is
+        // the one that reaches this line (with a sleep, `sleepAttempted` already
+        // covers it).
         let thermalVetoed = outcome.thermal.map { thermal in
-            thermal.mutation == .releaseRefused && thermal.lidCloseUndo != nil
+            (thermal.mutation == .releaseRefused || thermal.mutation == .releaseFailed)
+                && (thermal.lidCloseUndo != nil || thermal.lidCloseJournalCorrupt)
         } ?? false
         if outcome.sleepAttempted || thermalVetoed {
             // A TRUNCATED journal means `undoAll` read an empty record and could
