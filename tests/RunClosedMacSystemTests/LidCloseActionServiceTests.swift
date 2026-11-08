@@ -1213,6 +1213,37 @@ final class LidCloseActionServiceTests: XCTestCase {
                        "an old counter concluded 'gone' after a broken continuity")
     }
 
+
+    /// An existing journal entry is CONFIRMED, not assumed: a mute whose write
+    /// never landed must be retried on the next pass instead of being reported
+    /// applied for the rest of the session (gate finding, `Unconfirmed mute is
+    /// subsequently treated as applied without readback`).
+    func testUnconfirmedMuteIsRetriedNotAssumed() {
+        var rig = makeRig(muted: false)
+        // The journal claims a mute of this device, but the device is audible.
+        rig.journal.save(.init(audio: .init(
+            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)))
+
+        let out = stepEnclosed(&rig, settings())
+
+        XCTAssertEqual(rig.audio.device?.isMuted, true,
+                       "an audible device was reported as muted")
+        XCTAssertEqual(out.apply, .applied)
+    }
+
+    /// And when even the retry cannot land, the pass reports FAILURE rather
+    /// than a silent Mac that is not silent.
+    func testUnconfirmableMuteReportsFailure() {
+        var rig = makeRig(muted: false)
+        rig.journal.save(.init(audio: .init(
+            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)))
+        rig.audio.acceptWithoutEffect = true
+
+        let out = stepEnclosed(&rig, settings())
+
+        XCTAssertEqual(out.apply, .failed, "an unmuted Mac was reported as applied")
+    }
+
     // MARK: — Journal durability
 
     /// The journal is written BEFORE the effect: the file on disk carries the

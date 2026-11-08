@@ -346,7 +346,15 @@ public struct LidCloseActionService {
                 audioError = "the journal could not be written"
             }
         } else if decision.muteAudio {
-            audioEffect = .alreadyRecorded
+            // The entry exists, but that is not evidence the MUTE landed: a
+            // write whose readback was unavailable keeps its journal entry
+            // (correct) and then every later pass reported `applied` without
+            // ever reading the device again — leaving the sound audible for the
+            // whole closed-lid session (gate finding, `Unconfirmed mute is
+            // subsequently treated as applied without readback`).
+            //
+            // So an existing entry is CONFIRMED, not assumed.
+            audioEffect = confirmExistingMute(record: record)
         }
 
         // — 2. Apps, only if the sound step did not already fail the journal.
@@ -643,6 +651,31 @@ public struct LidCloseActionService {
         // Any reversal is an effect, not "nothing requested".
     }
 
+    /// Is the mute this journal entry claims actually in effect right now?
+    ///
+    /// `alreadyMuted` when the device reads muted; `muted` after a retry that
+    /// lands; `failed` when it reads audible or cannot be read, so the caller
+    /// never reports a silent Mac that is not silent.
+    private func confirmExistingMute(
+        record: LidCloseActionJournal.Record
+    ) -> AudioEffect {
+        guard let entry = record.audio else { return .alreadyMuted }
+        guard let snapshot = audio.readOutput(uid: entry.deviceUID),
+              let muted = snapshot.isMuted else {
+            return .failed
+        }
+        guard muted else {
+            // Still audible: retry the write once, then believe only a readback.
+            guard snapshot.canMute else { return .failed }
+            audio.setMuted(true, uid: entry.deviceUID)
+            if let after = audio.readOutput(uid: entry.deviceUID)?.isMuted, after {
+                return .muted
+            }
+            return .failed
+        }
+        return .alreadyMuted
+    }
+
     private enum AudioEffect: String, Sendable {
         case muted
         case alreadyMuted
@@ -854,19 +887,6 @@ public struct LidCloseActionService {
             journal.save(record)
         }
         guard let prior = record.audio else { return }
-        // An unreadable device is NOT a removed device. The apply path already
-        // makes that distinction; the undo path used to collapse both into
-        // `nil`, drop the entry and report `deviceGone`, which left a muted
-        // device with nothing to retry from (gate finding). Two reads tell a
-        // transient failure from a real removal.
-        // A SUCCESSFUL read resets the consecutive-unreadable counter.
-        //
-        // Without this the counter only ever grew: a cable that flapped 200
-        // times one evening, then a perfectly healthy device for hours, would
-        // still be sitting at 200 — and 160 unrelated failures later the
-        // threshold would conclude "gone" long after the continuity was broken.
-        // The threshold has to mean CONSECUTIVE passes.
-
 
         // A SUCCESSFUL read resets the consecutive-unreadable counter.
         //
@@ -874,20 +894,33 @@ public struct LidCloseActionService {
         // times one evening, then a perfectly healthy device for hours, would
         // still be sitting at 200 — and 160 unrelated failures later the
         // threshold would conclude "gone" long after the continuity was broken.
-        // The threshold has to mean CONSECUTIVE passes.
-        if record.audio?.unreadablePasses != 0, audio.readOutput(uid: prior.deviceUID) != nil {
-            record.audio?.unreadablePasses = 0
+        // The threshold has to mean CONSECUTIVE passes (Lord review, round 3).
+        //
+        // The reset is applied to a FRESH local, never to `prior`: `prior` is a
+        // stale snapshot, so building `escalated` from it put the OLD count back
+        // and the threshold fired on a device that had just been read
+        // successfully (gate finding, `Unreadable counter reset is overwritten
+        // using the stale snapshot`).
+        let readable = readOutputTwice(uid: prior.deviceUID)
+        if readable != nil, prior.unreadablePasses != 0 {
+            var cleared = prior
+            cleared.unreadablePasses = 0
+            record.audio = cleared
             journal.save(record)
         }
 
-        guard let current = readOutputTwice(uid: prior.deviceUID) else {
+        guard let current = readable else {
             // Still unreadable after the retry. That is NOT proof the device
             // was removed: clearing the entry here left a muted device with no
             // retry left. So the obligation STAYS, and the conclusion "gone" is
             // only drawn after the device stays unreadable across several
             // SEPARATE passes — a flaky read must never strand it, and a single
             // failure must never be read as removal (gate findings).
-            var escalated = prior
+            // Build from the RECORD's current entry, not the stale `prior`
+            // snapshot: the reset above may have just zeroed it (gate finding,
+            // `Unreadable counter reset is overwritten using the stale
+            // snapshot`).
+            var escalated = record.audio ?? prior
             escalated.unreadablePasses += 1
             if escalated.unreadablePasses >= Self.unreadablePassesBeforeGone {
                 // Concluding "gone" DROPS the obligation, and a device can come
