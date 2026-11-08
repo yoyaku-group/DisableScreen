@@ -240,6 +240,13 @@ public struct ThermalGuardService {
             performRelease(evaluation: evaluation, record: &record, outcome: &outcome)
         }
 
+        // A NEW episode gets a fresh veto budget: the counter belongs to an
+        // EPISODE, and leaving it accumulated meant a later, unrelated overheat
+        // was released on its first incomplete undo instead of getting its own
+        // bounded attempts (gate finding, `Thermal undo veto budget never
+        // resets`).
+        if record.latch != before.latch { record.lidCloseVetoes = 0 }
+
         if record != before {
             persistLatch(record, into: &outcome)
         }

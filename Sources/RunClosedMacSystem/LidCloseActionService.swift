@@ -500,6 +500,33 @@ public struct LidCloseActionService {
         // longer selected, when its identity is proved.
         var resumedDropped: [Int32] = []
         var droppedUnproved = false
+
+        // De-selected apps sitting in `unverified` too: a stop that timed out
+        // may have landed afterwards, and once the app is dropped from the
+        // selection nothing else would ever look at it — it would stay frozen
+        // (gate finding, `Deselecting an app does not recover its unverified
+        // stop`).
+        // Entries for apps STILL selected are none of this block's business:
+        // they stay listed (the normal path keeps reporting them).
+        var stillUnverified = record.unverified.filter { names.contains($0.appName) }
+        for entry in record.unverified where !names.contains(entry.appName) {
+            guard identityProved(entry) else {
+                stillUnverified.append(entry)
+                droppedUnproved = true
+                continue
+            }
+            if processes.isStopped(pid: entry.pid) == true {
+                processes.resume(pid: entry.pid)
+            }
+            if processes.isStopped(pid: entry.pid) == false {
+                resumedDropped.append(entry.pid)
+            } else {
+                stillUnverified.append(entry)
+                droppedUnproved = true
+            }
+        }
+        record.unverified = stillUnverified
+
         for entry in record.stopped where !names.contains(entry.appName) {
             // An UNPROVABLE identity must not be skipped silently: the app is
             // excluded from the target enumeration below, so nothing else would
