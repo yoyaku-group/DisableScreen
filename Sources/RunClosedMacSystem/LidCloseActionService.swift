@@ -416,17 +416,25 @@ public struct LidCloseActionService {
         // only on the paths that happen to touch `unverifiedAudio` hid it for
         // the whole session while another output was muted successfully (gate
         // finding, `Active audio policy suppresses stranded-device alerts`).
-        if !record.unverifiedAudio.isEmpty {
-            outcome.shouldNotify = true
-            outcome.notice = outcome.notice == .appsLeftPaused ? .appsLeftPaused : .audioLeftMuted
-            outcome.audioRestoreFailed = true
-        }
-
+        // ORDER: resolve a RETURNED device FIRST, then judge what is left.
+        //
+        // The other way round raised the failure flags for an obligation the
+        // very next line was about to resolve: a stranded device that came back
+        // already audible produced `.partial` and an "audio left muted" notice
+        // over zero remaining audio obligations (gate finding, `The apply path
+        // can report an audio recovery failure after the outstanding device
+        // obligation has been resolved`). Flags must describe the state AFTER
+        // this tick's own repairs, never before them.
         if decision.muteAudio, let stranded = firstReturnedStrandedDevice(&record, into: &outcome) {
             if !record.audio.contains(where: { $0.deviceUID == stranded.deviceUID }) {
                 record.audio.append(stranded)
             }
             if !journal.save(record) { outcome.journalSaveFailed = true }
+        }
+        if !record.unverifiedAudio.isEmpty {
+            outcome.shouldNotify = true
+            outcome.notice = outcome.notice == .appsLeftPaused ? .appsLeftPaused : .audioLeftMuted
+            outcome.audioRestoreFailed = true
         }
 
         // — 1. Sound. The CURRENT default output is muted whenever it is not

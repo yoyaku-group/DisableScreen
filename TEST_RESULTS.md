@@ -1818,3 +1818,26 @@ Deux sites sans `outcome` en portée ont dû changer de signature
 dépendance — l'appelant sait quoi faire de l'échec, la fonction ne le devine pas.
 
 Suite : **720/720**, 0 échec, 0 warning, rc=0.
+
+### Tour 24 — juger après réparer, pas avant
+
+Le reçu du head `88285aa` a rendu **0 CRITICAL, 3 WARN**.
+
+Corrigé : dans `apply`, les drapeaux d'échec audio étaient posés **avant** que
+`firstReturnedStrandedDevice` ne résolve l'obligation. Un appareil écarté qui
+revient déjà audible produisait donc `.partial` et un avis « audio laissé coupé »
+sur **zéro** obligation restante. L'ordre est désormais : résoudre, puis juger.
+Un drapeau décrit l'état APRÈS les réparations du tick, jamais avant.
+
+Non corrigés, et ce sont les deux mêmes que depuis le tour 19, à l'identique :
+la marge d'une seconde et le fait que l'expiration procède même quand
+l'annulation est incomplète. Tous deux ont la même cause racine —
+`SessionService.step()` relâche la protection de veille sans restaurer — et la
+même correction, qui est un changement de conception du service de session.
+
+**Je ne les corrige plus depuis l'appelant.** Cinq tentatives dans ce lot ont
+produit trois régressions (effet inverse, puis clignotement, puis course
+déplacée). Le prochain lot doit s'appeler « restauration dans le chemin de
+relâchement de `SessionService` », avec ses tests sur le service.
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.
