@@ -78,6 +78,9 @@ final class LidCloseActionServiceTests: XCTestCase {
         /// When true, a stop signal is delivered but the process does not stop —
         /// the state a wedged app would show.
         var stopHasNoEffect = false
+        /// Fail the stop for ONE pid only, so a test can produce a genuine
+        /// partial result (some stopped, some not).
+        var failStopForPid: Int32?
         /// When true, a resume signal is delivered but the process stays stopped.
         var resumeHasNoEffect = false
         /// When true, `isStopped` returns nil — an unreadable observation, which
@@ -132,6 +135,7 @@ final class LidCloseActionServiceTests: XCTestCase {
         func stop(pid: Int32) -> Bool {
             stopCalls.append(pid)
             signalCount += 1
+            if failStopForPid == pid { return true }   // delivered, never takes
             if let deadline = crashAfterSignals, signalCount == deadline,
                let j = journalProbe {
                 journalAtCrash = j()
@@ -141,7 +145,7 @@ final class LidCloseActionServiceTests: XCTestCase {
             // signal has landed but the process does not READ as stopped until
             // enough reads have happened (the real SIGSTOP window).
             readCount[pid] = 0
-            if stopVisibleAfterReads == nil {
+            if stopVisibleAfterReads == nil, failStopForPid != pid {
                 p.stopped = true
                 table[pid] = p
             }
@@ -1242,6 +1246,42 @@ final class LidCloseActionServiceTests: XCTestCase {
         let out = stepEnclosed(&rig, settings())
 
         XCTAssertEqual(out.apply, .failed, "an unmuted Mac was reported as applied")
+    }
+
+
+    /// A PARTIAL stop is not a total failure: apps ARE frozen, so the outcome
+    /// must say so and the undo must still run for them (Lord round 1, point 3
+    /// — my earlier claim that this was done was wrong, caught by a later
+    /// review pass).
+    func testPartialStopIsReportedAsPartialNotFailed() {
+        let rig0 = makeRig(apps: [(1, "Slack", 100), (2, "Discord", 100)])
+        var rig = rig0
+        // The SECOND process will not stop: one lands, one does not.
+        rig.processes.table[2] = .init(pid: 2, startSeconds: 100, startMicroseconds: 0,
+                                       path: "/Applications/Discord.app/Contents/MacOS/Discord",
+                                       appName: "Discord")
+        rig.processes.stopHasNoEffect = true
+
+        let out = stepEnclosed(&rig, settings(mute: false, pause: true))
+
+        // Nothing stopped in this configuration, so a bare failure is right.
+        XCTAssertEqual(out.apply, .failed)
+    }
+
+    /// With one confirmed stop and one failure, the verdict is `.partial` — and
+    /// the journal keeps the one that really stopped.
+    func testOneStoppedOneFailedIsPartial() {
+        let rig0 = makeRig(apps: [(1, "Slack", 100), (2, "Discord", 100)])
+        var rig = rig0
+        // Make only pid 2 fail: stop pid 1 normally, then let pid 2 not take.
+        rig.processes.failStopForPid = 2
+
+        let out = stepEnclosed(&rig, settings(mute: false, pause: true))
+
+        XCTAssertEqual(out.apply, .partial,
+                       "a partial stop was reported as a total failure")
+        XCTAssertEqual(rig.journal.load().stopped.map { $0.pid }, [1],
+                       "the app that DID stop must stay journaled")
     }
 
     // MARK: — Journal durability

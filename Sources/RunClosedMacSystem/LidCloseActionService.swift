@@ -520,7 +520,14 @@ public struct LidCloseActionService {
         }
         outcome.stoppedPids = stopped.map { $0.pid }
         guard failed.isEmpty else {
-            return .failure("could not stop \(failed.count) process(es): \(failed)")
+            // Apps WERE stopped. Reporting a bare failure here said "nothing
+            // landed" over a machine that now has frozen processes — the
+            // caller and the audit were both misled, and it is the opposite of
+            // what the journal says (Lord round 1, point 3).
+            guard !stopped.isEmpty else {
+                return .failure("could not stop \(failed.count) process(es): \(failed)")
+            }
+            return .success(.partial)
         }
         return .success(.stopped)
     }
@@ -685,7 +692,13 @@ public struct LidCloseActionService {
     }
 
     private enum AppsEffect: String, Sendable {
+        /// Every target was stopped and confirmed.
         case stopped
+        /// SOME were stopped and confirmed, some were not. Distinct from
+        /// `failed` because apps ARE frozen: the undo must still run for them,
+        /// and the caller must not be told nothing happened (Lord round 1,
+        /// point 3).
+        case partial
         case failed
         case skipped
     }
@@ -694,13 +707,20 @@ public struct LidCloseActionService {
     private func combine(audio: AudioEffect, apps: AppsEffect) -> ApplyOutcome {
         let audioOK = audio == .muted || audio == .alreadyMuted || audio == .alreadyRecorded
         let appsOK = apps == .stopped
+        // `partial` means SOMETHING landed for that effect, so it is not a
+        // failure — but it is not a clean success either.
+        let appsPartial = apps == .partial
         let audioAsked = audio != .skipped
         let appsAsked = apps != .skipped
         let asked = [audioAsked, appsAsked].filter { $0 }.count
         let ok = [audioAsked && audioOK, appsAsked && appsOK].filter { $0 }.count
         if asked == 0 { return .nothingRequested }
         if ok == asked { return .applied }
-        return ok == 0 ? .failed : .partial
+        // Anything landed at all (including a partial effect) is `.partial`,
+        // never `.failed`: `.failed` promises the machine is untouched, and
+        // the undo's decision to run hangs off that promise.
+        if ok > 0 || appsPartial { return .partial }
+        return .failed
     }
 
     /// Three-way result for one effect: done, refused with a reason, or the
