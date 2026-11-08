@@ -1612,6 +1612,20 @@ final class LidCloseActionServiceTests: XCTestCase {
         XCTAssertTrue(out.audioRestoreFailed)
     }
 
+
+    /// A delivered SIGSTOP whose effect lands after the confirmation window must
+    /// raise attention NOW: normal apply ticks do not revisit `unverified`, so
+    /// the promised notice would otherwise never arrive.
+    func testStopTimeoutRaisesAttentionImmediately() {
+        var rig = makeRig(apps: [(4711, "Slack", 1_700_000_000)])
+        rig.processes.stopVisibleAfterReads = 9_999
+
+        let out = stepEnclosed(&rig, settings(mute: false, pause: true))
+
+        XCTAssertTrue(out.shouldNotify, "a stop timeout went unreported")
+        XCTAssertEqual(out.unverifiedPids, [4711])
+    }
+
     // MARK: — Journal durability
 
     /// The journal is written BEFORE the effect: the file on disk carries the

@@ -623,7 +623,15 @@ public struct LowBatteryGuardService {
         // ADR 026 — LAST, after every step that could end the session or
         // release the flag: this step's job is to keep the sound and the apps
         // in step with the session the steps above just changed.
-        outcome.lidClose = runLidCloseStep()
+        //
+        // But NEVER re-APPLY in a tick that just tried to sleep the Mac: the
+        // release may have failed and left the session active, and applying
+        // again would UNDO the protective restore that `attemptSleep` performed
+        // moments earlier (gate finding, `The final policy step can reapply
+        // effects after protective sleep`). A sleep attempt means "undo only".
+        outcome.lidClose = outcome.sleepAttempted
+            ? runLidCloseUndo()
+            : runLidCloseStep()
         return outcome
     }
 

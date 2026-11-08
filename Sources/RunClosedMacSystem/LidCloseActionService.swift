@@ -614,6 +614,20 @@ public struct LidCloseActionService {
                 if !record.unverified.contains(where: { $0.pid == entry.pid }) {
                     record.unverified.append(entry)
                 }
+                // Tell the operator NOW. Normal apply ticks do not revisit
+                // `unverified` entries, so without this the app could stop a
+                // moment later and stay frozen with the promised notice never
+                // raised (gate finding, `Stop timeouts leave recovery
+                // obligations without operator notification`).
+                outcome.shouldNotify = true
+                outcome.notice = outcome.notice ?? .appsLeftPaused
+                outcome.unverifiedPids = record.unverified.map { $0.pid }
+                // Tell the operator NOW. Normal apply ticks do not revisit
+                // `unverified` entries, so without this the app could stop a
+                // moment later and stay frozen with the promised notice never
+                // raised (gate finding, `Stop timeouts leave recovery
+                // obligations without operator notification`).
+
             case .none:
                 // UNREADABLE is not proof of absence: keep the entry so the
                 // undo can re-prove and reverse it.
