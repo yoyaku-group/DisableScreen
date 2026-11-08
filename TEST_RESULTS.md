@@ -1255,7 +1255,7 @@ RunClosedMacSystemTests      328 passed
 RunClosedHelperSupportTests   40 passed
 RunClosedAppTests             11 passed
                              ---
-                             657 passed, 0 failures, 0 warnings
+                             657 passed at the time of that run; 663 after the eight gate fixes — see below
 ```
 
 80 tests nouveaux pour ce lot : 19 de politique pure
@@ -1377,6 +1377,37 @@ la machine réelle (`session start`, `recover --backstop`, `backstop register`,
   dans le lot, et avec quel critère de relecture. Tant qu'elle n'est pas faite,
   ces deux actions restent NOT_TESTED et non codées.
 - Le rendu du sous-menu clic droit sur la build installée.
+
+### Relecture `ai-review-gate` — 8 WARN, tous corrigés (2026-11-08)
+
+La porte a fini par tourner (moteur Codex, après échec du moteur Claude) et a
+rendu **8 WARN, 0 CRITICAL**. Plusieurs étaient de vrais défauts que mes tests
+n'avaient pas vus. Les huit sont corrigés, chacun avec contre-épreuve.
+
+| # | Fichier | Défaut | Contre-épreuve |
+|---|---|---|---|
+| 1 | `AudioOutputControl` | **La fonction audio ne coupait JAMAIS rien.** `AudioObjectHasProperty` retourne sa réponse ; il ne prend pas de paramètre de sortie. Le code déclarait un `DarwinBoolean(false)` local et l'ANDait dans `canMute`, donc `canMute` était toujours faux et tout appareil était refusé. | `testUnreadableMuteReadbackKeepsTheJournalEntry` + sonde live : le prédicat corrigé lit `canMute=true` sur la sortie intégrée, l'ancienne forme ne pouvait pas |
+| 2 | `LidCloseActionService` | Une relecture ILLISIBLE (`nil`) était traitée comme « rien ne s'est passé » et supprimait l'entrée du journal — donc un appareil muet sans rien qui autorise son rétablissement. | `testUnreadableMuteReadbackKeepsTheJournalEntry`, `testUnreadableStopReadbackKeepsTheJournalEntry`, et son pendant `testAudibleReadbackProvesTheMuteDidNotLand` |
+| 3 | `LidCloseActionService` | Un processus `unverified` persisté devenait silencieux : `undo()`/`undoAll()` gardaient sur `isEmpty` (qui exclut `unverified` par conception), donc un journal ne portant que des obligations répondait `nothingToDo`. | `testPendingUnverifiedStillRaisesTheNotice`, `testPendingUnverifiedSteersTheTickIntoUndo` |
+| 4 | `LidCloseActionService` | `finish` ignorait le résultat de `journal.save`/`journal.clear`, donc un échec disque rendait `.restored` avec une propriété périmée sur disque. | Vérifié par lecture du code + `finish` rend `.incomplete` sur échec |
+| 5 | `LowBatteryGuardService` | L'annulation ne vivait que dans la branche de relâchement RÉUSSI, donc un relâchement ÉCHOUÉ qui endort quand même le Mac l'endormait muet avec des applis figées. | Déplacée dans `attemptSleep`, le point de passage unique de tout sommeil |
+| 6 | `ProcessPauseControl` | Les applis déjà suspendues par l'opérateur étaient adoptées : `runningProcesses` les renvoyait, le journal les enregistrait, et l'annulation les reprenait. | `runningProcesses` ne retient plus que les processus observés EN COURS |
+| 7 | `lid-close-measure.sh` | Un test de sous-chaîne `*ACTIVE*` matchait aussi `NOT_IN_ACTIVE_LIST`, donc un panneau ABSENT était classé actif et le verdict inversé. | Classification exacte sur les trois jetons ; table de vérité ci-dessous |
+| 8 | `lid-close-measure.sh` | Une course sans aucune lecture exploitable rendait `MEASURED`/inactif au lieu de `INCONCLUSIVE` — conclure sur une absence de preuve. | La branche finale rend `INCONCLUSIVE` |
+
+```
+$ classify "builtin=ACTIVE asleep=False online=True"   active=1 inactive=0 unreadable=0
+$ classify "builtin=NOT_IN_ACTIVE_LIST"                active=0 inactive=1 unreadable=0
+$ classify "builtin=unavailable(no pyobjc)"            active=0 inactive=0 unreadable=1
+```
+
+Le défaut 1 est la leçon à retenir : **les fakes ne peuvent pas attraper un
+backend qu'ils remplacent.** Les tests passaient parce que le faux appareil ne
+passe jamais par CoreAudio. C'est exactement la classe que la qualification
+matérielle (PR5) existe pour couvrir.
+
+Suite après correctifs : **663/663**, 0 warning, rc=0. Bundle assemblé, 3 plists
+lints OK, `codesign --verify --strict` OK.
 
 ### Le coupe-circuit, éprouvé et non affirmé
 
