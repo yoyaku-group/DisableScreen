@@ -556,7 +556,10 @@ public struct RecoveryBackstopService {
                 // ended: the tick's policy would otherwise see "no session" and
                 // leave the journal waiting another 60 s.
                 if report.sleepAttempted {
-                    report.lidClose = guardService.runLidCloseUndo()
+                    // Same rule as the battery branch: keep what the protective
+                    // undo actually did.
+                    let second = guardService.runLidCloseUndo()
+                    if report.lidClose == nil { report.lidClose = second }
                     report.lidCloseStepRan = true
                 } else {
                     runLidCloseStep(&report, recordBootID: recordBootID)
@@ -688,7 +691,13 @@ public struct RecoveryBackstopService {
                 || report.thermalLidCloseCorrupt == true {
                 report.lidCloseJournalCorrupt = true
             }
-            report.lidClose = guardService.runLidCloseUndo()
+            // KEEP the protective undo's result: this second pass finds a
+            // cleared journal and reports `nothingToDo`, so assigning it erased
+            // the resumed pids and `changed` of a run that really did resume
+            // apps (gate finding, `La seconde annulation efface le résultat de
+            // la récupération`).
+            let second = guardService.runLidCloseUndo()
+            if report.lidClose == nil { report.lidClose = second }
             report.lidCloseStepRan = true
         } else {
             runLidCloseStep(&report, recordBootID: recordBootID)
