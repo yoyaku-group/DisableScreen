@@ -35,8 +35,13 @@ public protocol AudioOutputBackend: Sendable {
 /// One observation of an output device.
 public struct AudioOutputSnapshot: Equatable, Sendable {
     public var uid: String
-    /// `true` = muted right now. `false` = audible.
-    public var isMuted: Bool
+    /// Mute state. `true` = muted, `false` = audible, `nil` = the flag could
+    /// not be read.
+    ///
+    /// `nil` is NOT `false` (ADR 009): an unreadable observation is never
+    /// coerced into "audible", because the undo would then clear the journal on
+    /// a device that is still silent.
+    public var isMuted: Bool?
     /// The output volume scalar, when the device reports a settable one.
     /// `nil` = no volume property, so only the mute flag belongs to us.
     public var volume: Float?
@@ -44,7 +49,7 @@ public struct AudioOutputSnapshot: Equatable, Sendable {
     /// must be reported as such rather than "muted successfully".
     public var canMute: Bool
 
-    public init(uid: String, isMuted: Bool, volume: Float?, canMute: Bool) {
+    public init(uid: String, isMuted: Bool?, volume: Float?, canMute: Bool) {
         self.uid = uid
         self.isMuted = isMuted
         self.volume = volume
@@ -132,13 +137,23 @@ public struct CoreAudioOutputBackend: AudioOutputBackend {
         let muteRC = AudioObjectGetPropertyData(device, &muteAddr, 0, nil, &muteSize, &muted)
         let canMute = settableRC == noErr && hasRC && settable.boolValue && muteRC == noErr
 
-        // `muteRC != noErr` means the device has no readable mute flag. Report
-        // `isMuted: false` and `canMute: false` rather than inventing a state:
-        // the service refuses to act on a device whose prior state it does not
-        // know, because the undo would be a guess.
+        // The STATE and the CAPABILITY are independent facts and must not be
+        // conflated.
+        //
+        // An earlier version derived `isMuted` from `canMute`, so a successfully
+        // read `muted = true` was thrown away the moment the property stopped
+        // being settable, and a device whose mute read failed reported
+        // `isMuted: false`. Either way the undo saw "audible" on a device that
+        // was still silent and cleared the journal — leaving it muted with
+        // nothing to retry (gate finding).
+        //
+        // So: a readable mute flag reports what it read, whatever the write
+        // capability says. An UNREADABLE one reports `nil`, which the service
+        // treats as "not evidence" rather than as proof of audible.
+        let isMuted: Bool? = muteRC == noErr ? (muted != 0) : nil
         return AudioOutputSnapshot(
             uid: uid,
-            isMuted: canMute ? muted != 0 : false,
+            isMuted: isMuted,
             volume: volume(of: device),
             canMute: canMute)
     }

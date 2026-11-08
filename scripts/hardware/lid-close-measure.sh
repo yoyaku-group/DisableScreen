@@ -74,11 +74,17 @@ except Exception:
 # pyobjc answers `(err, (ids,), count)`; anything else is reported, never
 # guessed — this witness exists to remove doubt, not to add some.
 result = Quartz.CGGetActiveDisplayList(16, None, None)
-if len(result) == 3 and isinstance(result[1], tuple):
-    ids = list(result[1])
-else:
+# The FIRST element is a CGError. A non-zero one means the enumeration FAILED,
+# and an empty list from a failed query says nothing about the panel — reading
+# it as "not in the active list" would turn a broken observation into a
+# definitive "the panel was off" verdict (gate finding).
+if len(result) != 3 or not isinstance(result[1], tuple):
     print("builtin=unavailable(unexpected CGGetActiveDisplayList shape)")
     raise SystemExit
+if result[0] != 0:
+    print("builtin=unavailable(CGGetActiveDisplayList error %s)" % (result[0],))
+    raise SystemExit
+ids = list(result[1])
 for d in ids:
     if Quartz.CGDisplayIsBuiltin(d):
         print("builtin=ACTIVE asleep=%s online=%s" % (

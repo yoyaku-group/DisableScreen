@@ -366,7 +366,12 @@ public struct LidCloseActionService {
         guard let snapshot = audio.readDefaultOutput(), snapshot.canMute else {
             return .failure("no murable default output device")
         }
-        guard !snapshot.isMuted else { return .success(.alreadyMuted) }
+        // An unreadable prior state is not a licence to write: the undo would
+        // be a guess (ADR 009).
+        guard let wasMuted = snapshot.isMuted else {
+            return .failure("the device's mute state could not be read")
+        }
+        guard !wasMuted else { return .success(.alreadyMuted) }
 
         record.audio = LidCloseActionJournal.AudioState(
             deviceUID: snapshot.uid, wasMuted: false, volume: snapshot.volume)
@@ -383,14 +388,16 @@ public struct LidCloseActionService {
         // ai-review-gate). Only a POSITIVE reading of "still audible" proves
         // nothing changed. So: unreadable keeps the entry and reports the
         // effect as unconfirmed; audible-only drops it.
-        switch audio.readOutput(uid: snapshot.uid) {
-        case .some(let after) where after.isMuted:
+        switch audio.readOutput(uid: snapshot.uid)?.isMuted {
+        case .some(true):
             return .success(.muted)
-        case .some:
+        case .some(false):
+            // Proved still audible: nothing was written, so the entry goes.
             record.audio = nil
             journal.save(record)
             return .failure("readback did not confirm the mute")
         case .none:
+            // Unreadable is not proof of absence: keep the entry.
             return .failure("the mute could not be verified (readback unreadable)")
         }
     }
@@ -426,6 +433,20 @@ public struct LidCloseActionService {
             guard journal.save(record) else {
                 record.stopped.removeAll { $0.pid == entry.pid }
                 return .journalFailed
+            }
+            // RE-PROVE the identity immediately before signalling. The
+            // snapshot `runningProcesses` returned may be stale: the app can
+            // exit and the kernel can hand the same pid to something else
+            // between the enumeration and this line, and `LidWriteLock` does
+            // not serialise process exit. Signalling the replacement would
+            // suspend an unrelated process while the journal records the
+            // original identity, and the undo would refuse to resume it
+            // (gate finding).
+            guard identityProved(entry) else {
+                failed.append(entry.pid)
+                record.stopped.removeAll { $0.pid == entry.pid }
+                journal.save(record)
+                continue
             }
             processes.stop(pid: entry.pid)
             // `kill(2)` returning 0 means "delivered", not "stopped", and the
@@ -488,6 +509,10 @@ public struct LidCloseActionService {
 
     /// How many times the stopped state is read before it is believed.
     static let stopConfirmAttempts = 5
+
+    /// How many SEPARATE undo passes a device must stay unreadable before it is
+    /// concluded removed. Three hours of 30 s ticks is far past any transient.
+    static let unreadablePassesBeforeGone = 360
 
     /// The wait between those reads. Production sleeps 20 ms (5 × 20 ms = the
     /// sub-100 ms window a `SIGSTOP` needs); tests replace it with a no-op.
@@ -654,12 +679,30 @@ public struct LidCloseActionService {
         // device with nothing to retry from (gate finding). Two reads tell a
         // transient failure from a real removal.
         guard let current = readOutputTwice(uid: prior.deviceUID) else {
-            record.audio = nil
+            // Still unreadable after the retry. That is NOT proof the device
+            // was removed: clearing the entry here left a muted device with no
+            // retry left. So the obligation STAYS, and the conclusion "gone" is
+            // only drawn after the device stays unreadable across several
+            // SEPARATE passes — a flaky read must never strand it, and a single
+            // failure must never be read as removal (gate findings).
+            var escalated = prior
+            escalated.unreadablePasses += 1
+            if escalated.unreadablePasses >= Self.unreadablePassesBeforeGone {
+                record.audio = nil
+                journal.save(record)
+                outcome.audioDeviceGone = true
+                writeAudit(outcome: "deviceGone", reason: "undo",
+                           evaluation: outcome.evaluation, audio: "gone",
+                           audioError: "unreadable on \(escalated.unreadablePasses) separate passes",
+                           audioDeviceUID: prior.deviceUID, stopped: [], failed: [], error: nil)
+                return
+            }
+            record.audio = escalated
             journal.save(record)
-            outcome.audioDeviceGone = true
-            writeAudit(outcome: "deviceGone", reason: "undo", evaluation: outcome.evaluation,
-                       audio: "gone", audioError: nil, audioDeviceUID: prior.deviceUID,
-                       stopped: [], failed: [], error: nil)
+            writeAudit(outcome: "partial", reason: "undo", evaluation: outcome.evaluation,
+                       audio: "readUnavailable",
+                       audioError: "the device could not be read; the restore is unconfirmed",
+                       audioDeviceUID: prior.deviceUID, stopped: [], failed: [], error: nil)
             return
         }
         guard !prior.wasMuted else {
@@ -673,7 +716,9 @@ public struct LidCloseActionService {
         }
         // Still muted is what we asked for; anything else means someone else
         // touched it in the meantime, in which case we do not write either.
-        guard current.isMuted else {
+        // Only a POSITIVE "audible" proves someone else already did our job.
+        // An unreadable flag is not that proof, so we fall through and write.
+        if current.isMuted == false {
             record.audio = nil
             journal.save(record)
             writeAudit(outcome: "undone", reason: "undo", evaluation: outcome.evaluation,
@@ -684,7 +729,7 @@ public struct LidCloseActionService {
         audio.setMuted(false, uid: prior.deviceUID)
         // Readback, not acceptance: only a device that reads audible is
         // restored (ADR 009).
-        guard let after = audio.readOutput(uid: prior.deviceUID), !after.isMuted else {
+        guard audio.readOutput(uid: prior.deviceUID)?.isMuted == false else {
             writeAudit(outcome: "partial", reason: "undo", evaluation: outcome.evaluation,
                        audio: "unmuteFailed",
                        audioError: "readback did not confirm the unmute",

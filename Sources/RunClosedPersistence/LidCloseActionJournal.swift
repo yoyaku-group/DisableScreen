@@ -48,11 +48,33 @@ public struct LidCloseActionJournal: Sendable {
         /// reports one. `nil` = the device has no settable volume, so only the
         /// mute flag belongs to us.
         public var volume: Float?
+        /// Consecutive undo passes that could not READ this device.
+        ///
+        /// One unreadable read is not proof of removal, so the entry stays and
+        /// this counts up. Only a device that stays unreadable across several
+        /// separate passes is concluded gone — otherwise a flaky read would
+        /// strand the obligation, and concluding removal on the first failure
+        /// would leave a muted Mac with nothing to retry from.
+        public var unreadablePasses: Int
 
-        public init(deviceUID: String, wasMuted: Bool, volume: Float?) {
+        public init(deviceUID: String, wasMuted: Bool, volume: Float?,
+                    unreadablePasses: Int = 0) {
             self.deviceUID = deviceUID
             self.wasMuted = wasMuted
             self.volume = volume
+            self.unreadablePasses = unreadablePasses
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case deviceUID, wasMuted, volume, unreadablePasses
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            deviceUID = try c.decode(String.self, forKey: .deviceUID)
+            wasMuted = try c.decodeIfPresent(Bool.self, forKey: .wasMuted) ?? false
+            volume = try c.decodeIfPresent(Float.self, forKey: .volume)
+            unreadablePasses = try c.decodeIfPresent(Int.self, forKey: .unreadablePasses) ?? 0
         }
     }
 

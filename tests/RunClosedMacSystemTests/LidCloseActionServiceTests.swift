@@ -39,9 +39,14 @@ final class LidCloseActionServiceTests: XCTestCase {
                 failNextReads -= 1
                 return nil
             }
-            guard !readbackUnreadable, !deviceGone, let d = device, d.uid == uid else {
+            guard !readbackUnreadable, !deviceGone, var d = device, d.uid == uid else {
                 return nil
             }
+            // Model a device whose mute FLAG cannot be read while the device
+            // itself is perfectly reachable: the snapshot exists but its state
+            // is unknown (CoreAudio returning noErr for the device and an error
+            // for the property).
+            if muteFlagUnreadable { d.isMuted = nil }
             return d
         }
         func setMuted(_ muted: Bool, uid: String) -> Bool {
@@ -51,6 +56,9 @@ final class LidCloseActionServiceTests: XCTestCase {
             device = d
             return true
         }
+        /// When true, the device's mute flag becomes UNREADABLE (the mutation
+        /// succeeds or fails, but the state cannot be observed afterwards).
+        var muteFlagUnreadable = false
     }
 
     /// A fake process table. `identity(ofPid:)` is what makes a pid an identity:
@@ -78,6 +86,9 @@ final class LidCloseActionServiceTests: XCTestCase {
         /// Model the ASYNC part of SIGSTOP: the process only reads as stopped
         /// from the Nth read onwards. `nil` = immediate.
         var stopVisibleAfterReads: Int?
+        /// Model PID REUSE between the enumeration and the signal: when set,
+        /// the first `stop` call first recycles the pid to another process.
+        var recycleBeforeFirstStop: UInt64?
         /// Model a CRASH part-way through the stop loop: reading the journal
         /// exactly at this point throws, so the collector captures what was on
         /// disk BEFORE the remaining signals were sent.
@@ -87,7 +98,7 @@ final class LidCloseActionServiceTests: XCTestCase {
         var journalAtCrash: [Int32]?
 
         func runningProcesses(matching appNames: [String]) -> [RunningProcess] {
-            table.values
+            let snapshot = table.values
                 .filter { appNames.contains($0.appName) }
                 .sorted { $0.pid < $1.pid }
                 .map {
@@ -95,6 +106,20 @@ final class LidCloseActionServiceTests: XCTestCase {
                                    startMicroseconds: $0.startMicroseconds,
                                    path: $0.path, appName: $0.appName)
                 }
+            // Recycle the pid IMMEDIATELY after the snapshot is taken: this is
+            // the real window, where the app exits between enumeration and the
+            // signal and the kernel hands its pid to something else.
+            if let newStart = recycleBeforeFirstStop {
+                recycleBeforeFirstStop = nil
+                for target in snapshot {
+                    if var p = table[target.pid] {
+                        p.startSeconds = newStart
+                        p.stopped = false
+                        table[target.pid] = p
+                    }
+                }
+            }
+            return snapshot
         }
 
         func identity(ofPid pid: Int32) -> LidCloseActionJournal.ProcessIdentity? {
@@ -335,20 +360,25 @@ final class LidCloseActionServiceTests: XCTestCase {
 
     /// The user changes the audio output during the session: the undo must NOT
     /// touch the new one.
+    ///
+    /// The muted device is simply absent from the default-output path, so the
+    /// undo cannot reach it. The obligation is RETAINED rather than silently
+    /// dropped (an unreadable device is not proof of removal), and only after
+    /// the device stays unreadable across `unreadablePassesBeforeGone`
+    /// separate passes is it concluded gone — which is not an error (ADR 026).
     func testUserSwitchingOutputIsNotTouched() {
         var rig = makeRig(muted: false)
         _ = stepEnclosed(&rig, settings())
 
-        // The user switches to headphones: the device we muted is gone from the
-        // default-output path entirely.
         rig.audio.deviceGone = true
-        let undo = rig.service.undoAll()
+        let first = rig.service.undoAll()
 
-        XCTAssertEqual(undo.undo, .restored)
-        XCTAssertTrue(undo.audioDeviceGone)
+        XCTAssertEqual(first.undo, .incomplete,
+                       "one unreadable pass must not be read as removal")
         XCTAssertEqual(rig.audio.writes.map { $0.muted }, [true],
                        "only the mute write; nothing was un-muted")
-        XCTAssertTrue(rig.journal.load().isEmpty, "a vanished device is not an error")
+        XCTAssertEqual(rig.journal.load().audio?.unreadablePasses, 1,
+                       "the obligation must be kept, with its failure count")
     }
 
     /// An unmute that does not read back keeps the journal so the next step
@@ -784,18 +814,89 @@ final class LidCloseActionServiceTests: XCTestCase {
         XCTAssertEqual(rig.audio.device?.isMuted, false, "the sound was not restored")
     }
 
-    /// A genuinely absent device is still reported as gone, and that is not an
-    /// error (ADR 026) — the two must stay distinguishable.
-    func testGenuinelyAbsentDeviceIsStillReportedGone() {
+    /// A genuinely absent device is eventually concluded gone, and that is not
+    /// an error (ADR 026) — but only after it has stayed unreadable across the
+    /// configured number of separate passes, so a flaky read can never strand
+    /// the obligation nor a single failure be read as removal.
+    func testGenuinelyAbsentDeviceIsConcludedGoneAfterEscalation() {
         let rig0 = makeRig(muted: false)
         var rig = rig0
         _ = stepEnclosed(&rig, settings())
         rig.audio.deviceGone = true
-        rig.audio.failNextReads = 0
+
+        // Walk the escalation one pass at a time. The pass that reaches the
+        // threshold is the one that concludes "gone": `unreadablePasses` is
+        // incremented BEFORE it is compared, so the Nth pass is the decision.
+        var concluded: LidCloseActionService.TickOutcome?
+        for pass in 1...LidCloseActionService.unreadablePassesBeforeGone {
+            concluded = rig.service.undoAll()
+            if pass < LidCloseActionService.unreadablePassesBeforeGone {
+                XCTAssertEqual(concluded?.undo, .incomplete,
+                               "concluded gone too early (pass \(pass))")
+                XCTAssertFalse(concluded?.audioDeviceGone ?? true)
+            }
+        }
+        XCTAssertTrue(concluded?.audioDeviceGone ?? false,
+                      "a device unreadable for \(LidCloseActionService.unreadablePassesBeforeGone) passes was never concluded gone")
+        XCTAssertEqual(concluded?.undo, .restored, "a vanished device is not an error")
+        XCTAssertTrue(rig.journal.load().isEmpty)
+    }
+
+
+    /// PID REUSE between enumeration and signal. The process we enumerated
+    /// exits and the kernel hands the same pid to something else before we
+    /// signal: sending SIGSTOP then would suspend an unrelated process while
+    /// the journal recorded the ORIGINAL identity, so the undo would refuse to
+    /// resume it and it would stay frozen (gate finding,
+    /// `Process identity is not rechecked before stopping`).
+    func testRecycledPidBetweenEnumerationAndSignalIsNeverSignalled() {
+        var rig = makeRig(apps: [(4711, "Slack", 1_700_000_000)])
+        rig.processes.recycleBeforeFirstStop = 1_800_000_000
+
+        let out = stepEnclosed(&rig, settings(mute: false, pause: true))
+
+        XCTAssertTrue(rig.processes.stopCalls.isEmpty,
+                      "SIGSTOP was sent after the pid had been recycled")
+        XCTAssertTrue(rig.journal.load().stopped.isEmpty,
+                      "ownership was recorded for a process we never signalled")
+        XCTAssertEqual(out.apply, .failed)
+    }
+
+    /// An UNREADABLE mute flag is not "audible". Deriving the state from the
+    /// write capability made a muted device report `isMuted: false`, so the
+    /// undo cleared the journal on a device that was still silent (gate
+    /// finding, `Unknown mute state is returned as verified unmuted`).
+    func testUnreadableMuteFlagIsNotTreatedAsAudible() {
+        let rig0 = makeRig(muted: false)
+        var rig = rig0
+        _ = stepEnclosed(&rig, settings())
+        XCTAssertEqual(rig.audio.device?.isMuted, true)
+
+        // The device is reachable but its flag cannot be read during the undo.
+        rig.audio.muteFlagUnreadable = true
+        let undo = rig.service.undoAll()
+
+        XCTAssertEqual(undo.undo, .incomplete,
+                       "an unreadable flag was read as proof of a restore")
+        XCTAssertNotNil(rig.journal.load().audio,
+                        "the obligation was cleared on an unreadable reading")
+    }
+
+    /// Two failed reads across the SAME pass are not proof of removal: the
+    /// obligation is kept and counted, not erased (gate finding, `Two
+    /// unreadable audio snapshots erase the recovery obligation`).
+    func testTwoUnreadableReadsInOnePassDoNotEraseTheObligation() {
+        let rig0 = makeRig(muted: false)
+        var rig = rig0
+        _ = stepEnclosed(&rig, settings())
+        // Both the first read and its retry fail.
+        rig.audio.failNextReads = 2
 
         let undo = rig.service.undoAll()
-        XCTAssertTrue(undo.audioDeviceGone)
-        XCTAssertEqual(undo.undo, .restored, "a vanished device is not an error")
+
+        XCTAssertFalse(undo.audioDeviceGone, "two flaky reads were read as removal")
+        XCTAssertNotNil(rig.journal.load().audio, "the obligation was erased")
+        XCTAssertEqual(rig.journal.load().audio?.unreadablePasses, 1)
     }
 
     // MARK: — Journal durability
