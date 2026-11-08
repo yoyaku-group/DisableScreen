@@ -124,7 +124,11 @@ saw_panel_unreadable=0
 interrupted=0
 trap 'interrupted=1; echo "interrupted"' INT
 while [[ "$interrupted" == "0" ]]; do
-  l="$(lid)"; p="$(panel)"; c="$(conditions)"
+  # A probe interrupted by Ctrl-C exits 130, which `set -e` would turn into a
+  # silent abort BEFORE the report is written. Each assignment tolerates that,
+  # so the trap's flag is what ends the run (gate finding, `Ctrl-C during a
+  # probe can bypass report generation`).
+  l="$(lid || true)"; p="$(panel || true)"; c="$(conditions || true)"
   line="$(date '+%F %T') clamshell=$l $p $c"
   echo "$line" | tee -a "$LOG"
   # A sample only qualifies if the machine is in the configuration the feature

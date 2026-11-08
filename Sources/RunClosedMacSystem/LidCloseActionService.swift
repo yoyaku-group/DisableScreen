@@ -380,7 +380,15 @@ public struct LidCloseActionService {
 
         outcome.apply = combine(audio: decision.muteAudio ? audioEffect : .skipped,
                                 apps: decision.pauseApps ? appsEffect : .skipped)
-        outcome.changed = audioEffect == .muted || appsEffect == .stopped
+        // OR, never assign: `undoEffectsThatAreNowOff` may already have reversed
+        // something, and a partial stop DID freeze a process. Assigning here
+        // erased both, so callers refeshing their caches kept stale state
+        // (gate finding, `Change reporting loses partial stops and successful
+        // reversals`).
+        outcome.changed = outcome.changed
+            || audioEffect == .muted
+            || appsEffect == .stopped
+            || appsEffect == .partial
         writeAudit(outcome: outcome.apply?.rawValue ?? "none",
                    reason: decision.reason.rawValue,
                    evaluation: evaluation,
@@ -494,7 +502,17 @@ public struct LidCloseActionService {
                 journal.save(record)
                 continue
             }
-            processes.stop(pid: entry.pid)
+            // A REJECTED signal (EPERM on another user's process, a process
+            // that just exited) is not a pending stop: recording it would keep
+            // asking the operator to verify a signal that was never delivered
+            // (gate finding, `Rejected stop signals become permanent recovery
+            // obligations`).
+            guard processes.stop(pid: entry.pid) else {
+                failed.append(entry.pid)
+                record.stopped.removeAll { $0.pid == entry.pid }
+                journal.save(record)
+                continue
+            }
             // `kill(2)` returning 0 means "delivered", not "stopped", and the
             // transition is not instantaneous: a single immediate read can
             // legitimately still see it running. Deleting the entry on that

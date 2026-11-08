@@ -195,7 +195,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // writer; the journal is the authority, not the conditions.
             var lidClose = LidCloseActionService.live(bootID: bootID)
             let lidCloseUndo = lidClose.undoAll()
-            _ = lidService.restoreIfOwned()
+            // Only release the lid protection when the undo actually completed.
+            // `restoreIfOwned` turns normal sleep behaviour back on, and with the
+            // lid closed the Mac can sleep immediately — so releasing it while
+            // apps are still paused or the sound still muted puts it to sleep in
+            // exactly that state (gate finding, `Quit releases lid protection
+            // even when undo fails`).
+            let undoOutstanding = lidCloseUndo.undo == .incomplete
+                || lidCloseUndo.undo == .unverifiedProcesses
+                || lidCloseUndo.audioRestoreFailed
+                || !lidCloseUndo.unverifiedPids.isEmpty
+            if !undoOutstanding {
+                _ = lidService.restoreIfOwned()
+            } else {
+                FileHandle.standardError.write(Data(
+                    ("[RunClosed] quit: lid stay-awake left ON because the lid-close "
+                     + "undo is incomplete; the Mac must not sleep with effects applied\n").utf8))
+            }
             if lidCloseUndo.changed || lidCloseUndo.shouldNotify {
                 FileHandle.standardError.write(Data(
                     ("[RunClosed] quit: lid-close actions undone "

@@ -81,6 +81,8 @@ final class LidCloseActionServiceTests: XCTestCase {
         /// Fail the stop for ONE pid only, so a test can produce a genuine
         /// partial result (some stopped, some not).
         var failStopForPid: Int32?
+        /// Model a signal the kernel REFUSES (EPERM on another user's process).
+        var rejectStop = false
         /// When true, a resume signal is delivered but the process stays stopped.
         var resumeHasNoEffect = false
         /// When true, `isStopped` returns nil — an unreadable observation, which
@@ -135,6 +137,7 @@ final class LidCloseActionServiceTests: XCTestCase {
         func stop(pid: Int32) -> Bool {
             stopCalls.append(pid)
             signalCount += 1
+            if rejectStop { return false }             // refused, never delivered
             if failStopForPid == pid { return true }   // delivered, never takes
             if let deadline = crashAfterSignals, signalCount == deadline,
                let j = journalProbe {
@@ -1318,6 +1321,36 @@ final class LidCloseActionServiceTests: XCTestCase {
 
         XCTAssertTrue(out.changed, "an entry removal was not reported as a change")
         XCTAssertTrue(rig.journal.load().audio == nil)
+    }
+
+
+    /// `changed` is OR-ed, never assigned: a partial stop froze a process, and a
+    /// reversal done earlier in the same pass still counts (gate finding,
+    /// `Change reporting loses partial stops and successful reversals`).
+    func testPartialStopMarksTheOutcomeChanged() {
+        var rig = makeRig(apps: [(1, "Slack", 100), (2, "Discord", 100)])
+        rig.processes.failStopForPid = 2
+
+        let out = stepEnclosed(&rig, settings(mute: false, pause: true))
+
+        XCTAssertEqual(out.apply, .partial)
+        XCTAssertTrue(out.changed, "a newly frozen process did not count as a change")
+    }
+
+    /// A REJECTED signal is not a pending stop: it must not become a permanent
+    /// "to verify" obligation (gate finding, `Rejected stop signals become
+    /// permanent recovery obligations`).
+    func testRejectedSignalIsNotAPermanentObligation() {
+        var rig = makeRig(apps: [(4711, "Slack", 1_700_000_000)])
+        rig.processes.rejectStop = true
+
+        let out = stepEnclosed(&rig, settings(mute: false, pause: true))
+
+        XCTAssertEqual(out.apply, .failed)
+        let rec = rig.journal.load()
+        XCTAssertTrue(rec.stopped.isEmpty)
+        XCTAssertTrue(rec.unverified.isEmpty,
+                      "a signal that was never delivered became an obligation")
     }
 
     // MARK: — Journal durability
