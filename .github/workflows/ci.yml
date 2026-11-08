@@ -15,7 +15,18 @@ concurrency:
 jobs:
   build-and-test:
     name: Build & test (macOS 15, Swift 6)
-    runs-on: macos-15
+    # Self-hosted macOS lane, repo-scoped. This repository is PUBLIC and every org
+    # runner group declares allows_public_repositories: false, so no group can
+    # admit it — the runner is therefore attached to THIS repository
+    # (`disablescreen-ci-1`), which is the pattern already proven on
+    # benjaminbelaga/comux. The org's shared Mac stays in its 2026-10-05
+    # quarantine group untouched, so the containment proof still holds.
+    #
+    # Fork PRs are the risk of a self-hosted runner on a public repo: their code
+    # runs arbitrary scripts on this host. Mitigated outside this file by setting
+    # fork_pr_contributor_approval to all_external_contributors, so no fork job
+    # starts without a maintainer approval. Do not relax that setting.
+    runs-on: [self-hosted, macOS, ARM64, disablescreen-ci]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -30,7 +41,38 @@ jobs:
         run: swift build --build-tests
 
       - name: Test
-        run: swift test
+        # `swift test` discovers ZERO of this repository's tests on the
+        # Swift 6.4.2 / Xcode 27 toolchain: it reports
+        # "Test run with 0 tests in 0 suites passed" while 329 XCTest methods
+        # exist across five bundles. That is a green check proving nothing —
+        # the migration to a self-hosted Mac must not inherit it.
+        #
+        # Each bundle is therefore executed explicitly through `xcrun xctest`,
+        # which discovers and runs them correctly (verified locally: 106 + 153 +
+        # 46 + 13 + 11 = 329 tests, 0 failures). The per-bundle count is asserted
+        # so a future toolchain that silently stops discovering tests fails the
+        # job instead of passing it quietly.
+        run: |
+          set -euo pipefail
+          total=0
+          for bundle in .build/debug/*Tests.xctest; do
+            out="$(xcrun xctest "$bundle" 2>&1)"
+            printf '%s\n' "$out" | tail -3
+            n="$(printf '%s\n' "$out" \
+                 | grep -oE 'Executed [0-9]+ tests, with [0-9]+ failures' \
+                 | tail -1 | grep -oE '[0-9]+' | head -1)"
+            # A bundle that ran nothing is a failure, not a pass.
+            test -n "${n:-}" && test "$n" -gt 0 \
+              || { echo "::error::$bundle executed no tests"; exit 1; }
+            printf '%s\n' "$out" | grep -q 'with 0 failures' \
+              || { echo "::error::$bundle reported failures"; exit 1; }
+            total=$((total + n))
+          done
+          echo "total tests executed: $total"
+          # The suite had 329 tests when this lane was introduced. Guard the
+          # number so a silent discovery regression cannot pass as green.
+          test "$total" -ge 329 \
+            || { echo "::error::only $total tests ran, expected at least 329"; exit 1; }
 
       - name: Assemble app bundle (ad-hoc signed)
         run: bash scripts/build-runclosed-app.sh
