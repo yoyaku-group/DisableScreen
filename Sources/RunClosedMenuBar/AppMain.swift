@@ -201,7 +201,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // apps are still paused or the sound still muted puts it to sleep in
             // exactly that state (gate finding, `Quit releases lid protection
             // even when undo fails`).
-            let undoOutstanding = lidCloseUndo.undo == .incomplete
+            // A journal that could not be READ is not "nothing to undo": the
+            // file exists and may still describe muted audio or paused apps, so
+            // quit must not release the lid protection over it (gate finding,
+            // `Unreadable journal bypasses quit recovery guard`).
+            let journalUnreadable = LidCloseActionJournal().isCorrupt
+            let undoOutstanding = journalUnreadable
+                || lidCloseUndo.undo == .incomplete
                 || lidCloseUndo.undo == .unverifiedProcesses
                 || lidCloseUndo.audioRestoreFailed
                 || !lidCloseUndo.unverifiedPids.isEmpty

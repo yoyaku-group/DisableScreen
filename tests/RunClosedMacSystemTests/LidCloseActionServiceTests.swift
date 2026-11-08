@@ -1642,6 +1642,22 @@ final class LidCloseActionServiceTests: XCTestCase {
         XCTAssertEqual(out.notice, .audioLeftMuted)
     }
 
+
+    /// An UNREADABLE stop confirmation is not proof the signal did nothing: the
+    /// process may be suspended, so the caller must see a change and the
+    /// operator must be told (gate finding, `Unreadable stop confirmation hides
+    /// an actual suspension`).
+    func testUnreadableStopConfirmationRaisesAttention() {
+        var rig = makeRig(apps: [(4711, "Slack", 1_700_000_000)])
+        rig.processes.stopReadbackUnreadable = true
+
+        let out = stepEnclosed(&rig, settings(mute: false, pause: true))
+
+        XCTAssertTrue(out.changed, "an unconfirmed suspension reported no change")
+        XCTAssertTrue(out.shouldNotify, "an unconfirmed suspension went silent")
+        XCTAssertEqual(out.notice, .appsLeftPaused)
+    }
+
     // MARK: — Journal durability
 
     /// The journal is written BEFORE the effect: the file on disk carries the

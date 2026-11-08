@@ -636,8 +636,14 @@ public struct LidCloseActionService {
 
             case .none:
                 // UNREADABLE is not proof of absence: keep the entry so the
-                // undo can re-prove and reverse it.
+                // undo can re-prove and reverse it. The process may genuinely be
+                // suspended, so this is a real (if unconfirmed) change and the
+                // operator must be told (gate finding, `Unreadable stop
+                // confirmation hides an actual suspension`).
                 failed.append(entry.pid)
+                outcome.changed = true
+                outcome.shouldNotify = true
+                outcome.notice = outcome.notice ?? .appsLeftPaused
             }
         }
         outcome.stoppedPids = stopped.map { $0.pid }
@@ -1048,7 +1054,7 @@ public struct LidCloseActionService {
         for entry in unverified where !record.unverified.contains(where: { $0.pid == entry.pid }) {
             record.unverified.append(entry)
         }
-        journal.save(record)
+        if !journal.save(record) { outcome.journalSaveFailed = true }
 
         outcome.resumedPids = resumed
         // The WHOLE outstanding list, not only what this pass happened to

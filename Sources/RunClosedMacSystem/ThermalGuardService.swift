@@ -269,6 +269,16 @@ public struct ThermalGuardService {
                                         record: inout ThermalLatchStore.Record,
                                         outcome: inout TickOutcome) {
         let recordBootID = lidService.store.load().bootID
+        // ADR 026: undo the lid-close effects BEFORE releasing the flag.
+        //
+        // `setEnabled(false)` re-enables normal sleep, and with the lid closed
+        // the Mac can suspend before this function's later lines ever run —
+        // leaving the sound muted and apps paused across the sleep (gate
+        // finding, `Thermal undo runs after releasing lid protection`).
+        if var actions = lidCloseActions {
+            outcome.lidCloseUndo = actions.undoAll()
+            lidCloseActions = actions
+        }
         // `.automatic` only: heat has no cross-boot widening. A stale record is
         // NOT active ownership, and the policy already refused that case — if
         // it ever got here, the gate refuses too (B2 stays authoritative).
@@ -292,13 +302,6 @@ public struct ThermalGuardService {
             // right after `sleepnow`, and a latch written afterwards would be
             // lost with it (journal before change, ADR 009/022).
             persistLatch(record, into: &outcome)
-            // ADR 026: undo the lid-close actions BEFORE the sleep. A Mac that
-            // goes down muted with a frozen app comes back in that state, and
-            // the operator has no reason to connect it to a heat event.
-            if var actions = lidCloseActions {
-                outcome.lidCloseUndo = actions.undoAll()
-                lidCloseActions = actions
-            }
             // Best effort, and NOT retried: the protective action already
             // happened, so the Mac follows its normal power management and
             // sleeps/throttles on its own. Retrying would mean calling
