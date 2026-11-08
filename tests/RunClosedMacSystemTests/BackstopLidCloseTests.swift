@@ -380,6 +380,29 @@ final class BackstopLidCloseTests: XCTestCase {
                        "a new episode erased an obligation the operator was never told about")
     }
 
+
+    /// A backstop minute that ATTEMPTED a sleep must not re-apply the lid-close
+    /// effects: the release failed, the session is still active, and re-applying
+    /// would undo the protective restore that just ran (gate finding, `Backstop
+    /// bypasses the protective undo-only decision`).
+    func testBackstopDoesNotReapplyAfterASleepAttempt() {
+        var rig = makeRig(apps: [(4711, "Slack", 1_700_000_000)])
+        // A journaled, applied state.
+        rig.journal.save(.init(
+            audio: [.init(deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)],
+            stopped: [.init(pid: 4711, startSeconds: 1_700_000_000, startMicroseconds: 0,
+                            bootID: "A", path: "/x", appName: "Slack")]))
+        rig.audio.device?.isMuted = true
+        rig.processes.table[4711]?.stopped = true
+        saveIndefiniteSession(rig)
+
+        _ = rig.service.run()
+
+        // Whatever happened, the run must not leave the effects freshly APPLIED
+        // by its own final step after a sleep was requested.
+        XCTAssertFalse(rig.audio.writes.contains { $0.muted }, "re-muted after a sleep attempt")
+    }
+
     // MARK: — Reporting
 
     /// The JSON the agent prints carries the lid-close fields when — and only

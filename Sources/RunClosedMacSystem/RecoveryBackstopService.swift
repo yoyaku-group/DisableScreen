@@ -520,7 +520,12 @@ public struct RecoveryBackstopService {
                 // its sleep, so what is left here is the session record it just
                 // ended: the tick's policy would otherwise see "no session" and
                 // leave the journal waiting another 60 s.
-                runLidCloseStep(&report, recordBootID: recordBootID)
+                if report.sleepAttempted {
+                    report.lidClose = guardService.runLidCloseUndo()
+                    report.lidCloseStepRan = true
+                } else {
+                    runLidCloseStep(&report, recordBootID: recordBootID)
+                }
                 return report
             }
         }
@@ -627,7 +632,19 @@ public struct RecoveryBackstopService {
         }
         // ADR 026 — last, in the same section: keep the sound and the apps in
         // step with the session the steps above just changed.
-        runLidCloseStep(&report, recordBootID: recordBootID)
+        //
+        // But NEVER re-apply in a minute that tried to sleep the Mac, for the
+        // SAME reason the guard tick does not: a failed release leaves the
+        // session active, `attemptSleep` already restored everything, and
+        // re-evaluating would mute and suspend again — undoing the protective
+        // restore across the sleep (gate finding, `Backstop bypasses the
+        // protective undo-only decision`).
+        if report.sleepAttempted {
+            report.lidClose = guardService.runLidCloseUndo()
+            report.lidCloseStepRan = true
+        } else {
+            runLidCloseStep(&report, recordBootID: recordBootID)
+        }
         return report
     }
 
