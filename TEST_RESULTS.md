@@ -1251,18 +1251,18 @@ exécutées.
 $ arch -arm64 swift build && arch -arm64 swift test
 RunClosedCoreTests           194 passed
 RunClosedPersistenceTests     84 passed
-RunClosedMacSystemTests      327 passed
+RunClosedMacSystemTests      328 passed
 RunClosedHelperSupportTests   40 passed
 RunClosedAppTests             11 passed
                              ---
-                             656 passed, 0 failures, 0 warnings
+                             657 passed, 0 failures, 0 warnings
 ```
 
-79 tests nouveaux pour ce lot : 19 de politique pure
-(`LidCloseActionPolicyTests`), 33 de service sur fakes
+80 tests nouveaux pour ce lot : 19 de politique pure
+(`LidCloseActionPolicyTests`), 34 de service sur fakes
 (`LidCloseActionServiceTests`), 16 de persistance (11 `LidCloseActionJournalTests`
 + 5 `LidCloseActionSettingsKillSwitchTests`), 11 de backstop
-(`BackstopLidCloseTests`). Le total de la suite passe donc de 577 (L3) à 656.
+(`BackstopLidCloseTests`). Le total de la suite passe donc de 577 (L3) à 657.
 Aucun test ne touche la sortie audio réelle ni ne signale un vrai processus :
 les fakes sont la seule voie, et le brief l'exige.
 
@@ -1282,8 +1282,7 @@ les fakes sont la seule voie, et le brief l'exige.
 | le backstop annule aussi (même politique, pas une copie) | `testBackstopUndoesACrashedSessionsActions`, `testJournalAloneIsAReasonToWork` |
 | aucune action quand le réglage est désactivé (défaut) | `testSwitchedOffByDefaultDoesNothing`, `testNoActionWhenTheSwitchIsOff`, `testBackstopDoesNotApplyWithTheSwitchOff` |
 
-Deux défauts réels ont été trouvés par ces tests pendant l'écriture, tous deux
-corrigés :
+Trois défauts réels ont été trouvés par ces tests, tous corrigés :
 
 1. `runLidCloseStep` lisait les lectures **live** au lieu de les remplir depuis
    la closure du backstop, donc un test de backstop ne pouvait pas exercer la
@@ -1293,8 +1292,23 @@ corrigés :
    une machine **sans record de propriété** — exactement le cas « app plantée »
    que ce pas existe pour couvrir. Trouvé par `testJournalAloneIsAReasonToWork`,
    qui lit `nothingToDo` au lieu d'un run complété.
+3. `undo()` abandonnait l'annulation dès qu'une appli ne reprenait pas, laissant
+   le Mac muet en plus de l'appli figée — détail ci-dessous.
 
-Contre-épreuve : les deux tests nommés échouent sans leur correctif.
+Contre-épreuve : les trois tests nommés échouent sans leur correctif.
+
+### Troisième défaut trouvé en relecture (corrigé)
+
+`undo()` interrompait l'annulation dès qu'un `SIGCONT` n'avait pas pris : une
+appli figée laissait alors le Mac **muet en plus**. L'ordre est apps puis son,
+pas apps OU son — l'échec d'un effet n'est pas une raison de sauter l'autre, et
+c'est exactement l'échec en cascade que le principe « prouver qu'on peut le
+remettre » existe pour éviter. `finish(journal:appsStuck:)` porte maintenant le
+fait qu'un processus reste dans `stopped`, et rend `.incomplete` (donc
+réessayable) au lieu d'un `.restored` parce que le SON est revenu.
+
+Contre-épreuve : `testAWedgeAppDoesNotBlockTheSoundRestore` lit
+`isMuted == true` sans le correctif.
 
 ### Bundle et signature
 

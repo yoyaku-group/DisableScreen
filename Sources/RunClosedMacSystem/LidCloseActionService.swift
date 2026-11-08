@@ -470,18 +470,19 @@ public struct LidCloseActionService {
 
         // — 1. Apps first: resume what we stopped, never what we did not.
         resumeStoppedProcesses(journal: &record, into: &outcome)
-        if !record.stopped.isEmpty {
-            // A resume that did not take keeps the journal open so the next
-            // step retries; that is the "incomplete" case, not a silent pass.
-            outcome.undo = record.unverified.isEmpty ? .incomplete : .unverifiedProcesses
-            outcome.evaluation.journalBefore = record
-            return
-        }
+        // A resume that did not take keeps its journal entry for the next step
+        // to retry, and that is reported — but it does NOT abort the undo.
+        //
+        // Aborting here was a real defect: a wedged app (a `SIGCONT` delivered,
+        // the process still stopped) would leave the Mac MUTED as well, so one
+        // broken effect compounded into two. The order is apps-then-sound, not
+        // apps-OR-sound: the sound restore is independent and must still run.
+        let appsStuck = !record.stopped.isEmpty
 
         // — 2. Sound.
         unmuteRecordedDevice(journal: &record, into: &outcome)
 
-        outcome.undo = finish(journal: &record)
+        outcome.undo = finish(journal: &record, appsStuck: appsStuck)
         outcome.evaluation.journalBefore = record
     }
 
@@ -600,12 +601,19 @@ public struct LidCloseActionService {
     /// `unverified` is deliberately NOT part of `isEmpty`: a process we could
     /// not prove is still an outstanding obligation, so the file stays and the
     /// notice keeps being raised until the operator deals with it.
-    private func finish(journal record: inout LidCloseActionJournal.Record) -> UndoOutcome {
-        if record.isEmpty && record.unverified.isEmpty {
+    ///
+    /// `appsStuck` carries the one fact this function cannot read off the record:
+    /// a process whose entry is still in `stopped` because its `SIGCONT` did not
+    /// take. That is a retryable failure and an `.incomplete` undo, never
+    /// `.restored` just because the SOUND came back.
+    private func finish(journal record: inout LidCloseActionJournal.Record,
+                        appsStuck: Bool) -> UndoOutcome {
+        if record.isEmpty && record.unverified.isEmpty && !appsStuck {
             journal.clear()
             return .restored
         }
         journal.save(record)
+        if appsStuck { return .incomplete }
         return record.isEmpty ? .unverifiedProcesses : .incomplete
     }
 

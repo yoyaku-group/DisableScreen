@@ -534,6 +534,29 @@ final class LidCloseActionServiceTests: XCTestCase {
         XCTAssertEqual(rig.audio.device?.isMuted, false)
     }
 
+
+    /// ONE wedged app must not leave the Mac MUTED as well.
+    ///
+    /// The undo order is apps then sound, and the sound step must still run when
+    /// an app could not be resumed: a `SIGCONT` that did not take is one broken
+    /// effect, not a reason to skip the other. Aborting here is the compounding
+    /// failure the whole "prove you can put it back" principle exists to avoid.
+    func testAWedgeAppDoesNotBlockTheSoundRestore() {
+        let rig0 = makeRig(apps: [(4711, "Slack", 1_700_000_000)])
+        var rig = rig0
+        _ = stepEnclosed(&rig, settings(mute: true, pause: true))
+        XCTAssertEqual(rig.audio.device?.isMuted, true)
+        XCTAssertEqual(rig.processes.table[4711]?.stopped, true)
+
+        // The app will not come back: `SIGCONT` is delivered but it stays stopped.
+        rig.processes.resumeHasNoEffect = true
+
+        let undo = rig.service.undoAll()
+        XCTAssertEqual(undo.undo, .incomplete, "the stuck app must be reported")
+        XCTAssertEqual(rig.audio.device?.isMuted, false,
+                       "a wedged app left the Mac muted")
+    }
+
     // MARK: — Journal durability
 
     /// The journal is written BEFORE the effect: the file on disk carries the
