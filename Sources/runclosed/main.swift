@@ -1474,6 +1474,13 @@ func cmdLidClose(_ rest: [String]) -> Int32 {
                 "audioWasMuted": journal.audio?.wasMuted as Any? ?? NSNull(),
                 "stoppedPids": journal.stopped.map { Int($0.pid) },
                 "unverifiedPids": journal.unverified.map { Int($0.pid) },
+                // An audio obligation that is not a live effect: the device was
+                // muted by RunClosed, became unreachable and has not come back.
+                // Without this the operator sees `applied: false` and could not
+                // tell that a restore is still owed (gate finding, `Status
+                // reports success while audio restoration remains unresolved`).
+                "unverifiedAudioDeviceUID": journal.unverifiedAudio?.deviceUID as Any? ?? NSNull(),
+                "unverifiedAudioWasMuted": journal.unverifiedAudio?.wasMuted as Any? ?? NSNull(),
             ],
             "lastAction": entries.last.map { entry -> [String: Any] in
                 [
@@ -1483,7 +1490,11 @@ func cmdLidClose(_ rest: [String]) -> Int32 {
                 ]
             } as Any? ?? NSNull(),
         ])
-        return journal.unverified.isEmpty ? 0 : 3
+        // Exit 3 when ANYTHING is still owed: a process to verify, or an audio
+        // restore to complete. Reporting 0 over an unresolved obligation is the
+        // "healthy" signal this lot exists to avoid.
+        let unresolved = !journal.unverified.isEmpty || journal.unverifiedAudio != nil
+        return unresolved ? 3 : 0
 
     case "simulate":
         let args = Array(rest.dropFirst())

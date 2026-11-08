@@ -1029,6 +1029,45 @@ final class LidCloseActionServiceTests: XCTestCase {
                        "reopening dropped the audio obligation")
     }
 
+
+    /// A process whose `SIGSTOP` landed after the confirmation window is still
+    /// RESUMABLE once its identity is provable: opening the lid must not leave
+    /// it paused forever (gate finding, `Un SIGSTOP retardé perd sa
+    /// récupération automatique`).
+    func testDelayedStopIsResumedOnALaterPass() {
+        var rig = makeRig(apps: [(4711, "Slack", 1_700_000_000)])
+        // The signal was delivered but nothing observed it in time.
+        rig.processes.stopVisibleAfterReads = 9_999
+        _ = stepEnclosed(&rig, settings(mute: false, pause: true))
+        XCTAssertEqual(rig.journal.load().unverified.map { $0.pid }, [4711])
+
+        // It takes effect now.
+        rig.processes.table[4711]?.stopped = true
+        let undo = rig.service.undoAll()
+
+        XCTAssertEqual(rig.processes.table[4711]?.stopped, false,
+                       "the app stayed suspended after the lid opened")
+        XCTAssertTrue(undo.resumedPids.contains(4711))
+    }
+
+    /// A failed audio restore is REPORTED, not swallowed: keeping the entry for
+    /// a retry is right, but the caller must not be told the sound is back
+    /// (gate finding, `L'échec de restauration audio reste silencieux`).
+    func testFailedAudioRestoreIsReported() {
+        var rig = makeRig()
+        _ = stepEnclosed(&rig, settings(mute: true))
+        XCTAssertEqual(rig.audio.device?.isMuted, true)
+
+        // The unmute cannot be proved this pass.
+        rig.audio.muteFlagUnreadable = true
+        let out = stepEnclosed(&rig, settings(mute: false))
+
+        XCTAssertTrue(out.shouldNotify, "a silenced Mac was reported as restored")
+        XCTAssertEqual(out.notice, .audioLeftMuted)
+        XCTAssertTrue(out.audioRestoreFailed)
+        XCTAssertNotNil(rig.journal.load().audio, "the retry entry must survive")
+    }
+
     // MARK: — Journal durability
 
     /// The journal is written BEFORE the effect: the file on disk carries the

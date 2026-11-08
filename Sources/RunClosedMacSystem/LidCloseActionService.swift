@@ -122,6 +122,10 @@ public struct LidCloseActionService {
         /// An audio device that no longer exists at undo time. Not an error
         /// (ADR 026): noted and skipped.
         public var audioDeviceGone = false
+        /// The sound could not be restored this pass (the entry is kept for a
+        /// retry). Distinguished from "nothing to do", so the caller never
+        /// reports a clean outcome over a Mac that is still silent.
+        public var audioRestoreFailed = false
     }
 
     public enum Notice: String, Sendable, Equatable {
@@ -577,6 +581,16 @@ public struct LidCloseActionService {
             unmuteRecordedDevice(journal: &record, into: &scratch)
             if scratch.audioDeviceGone { outcome.audioDeviceGone = true }
             if scratch.changed { outcome.changed = true }
+            // A restore that did NOT land must be visible: the entry is kept
+            // for a retry (correct), but reporting `.nothingRequested` or a
+            // plain success would tell the operator the sound is back when it
+            // is not (gate finding, `L'échec de restauration audio reste
+            // silencieux`).
+            if record.audio != nil && !scratch.changed {
+                outcome.shouldNotify = true
+                outcome.notice = outcome.notice ?? .audioLeftMuted
+                outcome.audioRestoreFailed = true
+            }
             outcome.evaluation.journalBefore = record
         }
         if !decision.pauseApps, !record.stopped.isEmpty || !record.unverified.isEmpty {
@@ -675,6 +689,39 @@ public struct LidCloseActionService {
         journal record: inout LidCloseActionJournal.Record,
         into outcome: inout TickOutcome
     ) {
+        var remaining: [LidCloseActionJournal.StoppedProcess] = []
+        var resumed: [Int32] = []
+        var unverified: [LidCloseActionJournal.StoppedProcess] = []
+
+        // Retry the ones an earlier pass gave up on, but ONLY those whose
+        // identity is provable now: a bounded stop-confirmation window is not
+        // proof a pending `SIGSTOP` will never take, and opening the lid must
+        // still be able to resume an app that stopped a moment too late
+        // (gate finding, `Un SIGSTOP retardé perd sa récupération
+        // automatique`). This runs BEFORE the `stopped` guard, because a record
+        // holding only `unverified` entries is exactly the case it exists for.
+        var stillUnknown: [LidCloseActionJournal.StoppedProcess] = []
+        for entry in record.unverified {
+            guard identityProved(entry) else { stillUnknown.append(entry); continue }
+            guard processes.isStopped(pid: entry.pid) == true else {
+                // Proved alive: nothing of ours is holding it.
+                continue
+            }
+            processes.resume(pid: entry.pid)
+            if processes.isStopped(pid: entry.pid) == false {
+                resumed.append(entry.pid)
+            } else {
+                stillUnknown.append(entry)
+            }
+        }
+        record.unverified = stillUnknown
+        if !resumed.isEmpty { outcome.changed = true; outcome.resumedPids = resumed }
+        if !stillUnknown.isEmpty {
+            outcome.shouldNotify = true
+            outcome.notice = .appsLeftPaused
+            outcome.unverifiedPids = stillUnknown.map { $0.pid }
+        }
+
         // Nothing NEW to resume, but an obligation carried from an earlier pass
         // still has to be reported. Returning here silenced the notice on the
         // second pass, when `stopped` was already empty and only `unverified`
@@ -688,9 +735,6 @@ public struct LidCloseActionService {
             }
             return
         }
-        var remaining: [LidCloseActionJournal.StoppedProcess] = []
-        var resumed: [Int32] = []
-        var unverified: [LidCloseActionJournal.StoppedProcess] = []
         var failed: [Int32] = []
 
         for entry in record.stopped {
