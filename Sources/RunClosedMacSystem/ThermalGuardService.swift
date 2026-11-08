@@ -245,7 +245,13 @@ public struct ThermalGuardService {
         // was released on its first incomplete undo instead of getting its own
         // bounded attempts (gate finding, `Thermal undo veto budget never
         // resets`).
-        if record.latch != before.latch { record.lidCloseVetoes = 0 }
+        // Reset on the POLICY's own episode boundary, not on a latch-diff: a
+        // directly-critical episode never changes the latch at all (all fields
+        // stay at their empty values), so a diff comparison never fired and the
+        // budget accumulated ACROSS episodes (gate finding, `Le budget de veto
+        // ne se réinitialise pas toujours entre deux épisodes`). A tick that is
+        // not hot is the boundary.
+        if !evaluation.input.state.isHot { record.lidCloseVetoes = 0 }
 
         if record != before {
             persistLatch(record, into: &outcome)

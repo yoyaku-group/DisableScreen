@@ -99,6 +99,7 @@ public struct LibprocPauseBackend: ProcessPauseBackend {
         guard !appNames.isEmpty else { return [] }
         guard let pids = Self.allPids() else { return nil }
         var out: [RunningProcess] = []
+        var sawMatchingButUnreadable = false
         for pid in pids {
             guard let snap = Self.snapshot(pid: pid) else { continue }
             // An app the OPERATOR already suspended is never adopted. Pausing
@@ -107,13 +108,22 @@ public struct LibprocPauseBackend: ProcessPauseBackend {
             // never asked for (caught by ai-review-gate). Only a process we
             // can observe RUNNING is a candidate.
             guard snap.status != Self.stoppedStatus else { continue }
-            guard let path = Self.path(ofPid: pid) else { continue }
+            guard let path = Self.path(ofPid: pid) else {
+                // The path is what tells us whether this is a target; failing to
+                // read it is not "not a target" (gate finding, `Per-process read
+                // failures become successful suspension`).
+                sawMatchingButUnreadable = true
+                continue
+            }
             guard let name = appNames.first(where: { Self.matches(path: path, appName: $0) })
             else { continue }
             out.append(RunningProcess(
                 pid: snap.pid, startSeconds: snap.startSeconds,
                 startMicroseconds: snap.startMicroseconds, path: path, appName: name))
         }
+        // A per-process read failure is NOT proof that nothing matched: report
+        // it as unreadable so the service says so instead of `.applied`.
+        if out.isEmpty, sawMatchingButUnreadable { return nil }
         return out
     }
 

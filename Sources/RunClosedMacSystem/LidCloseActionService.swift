@@ -1077,6 +1077,18 @@ public struct LidCloseActionService {
         var stillUnknown: [LidCloseActionJournal.StoppedProcess] = []
         for entry in record.unverified {
             guard identityProved(entry) else { stillUnknown.append(entry); continue }
+            // Reads RUNNING. Two very different worlds produce that reading: an
+            // external SIGCONT genuinely released it, or our SIGSTOP is still
+            // IN FLIGHT. Sending `SIGCONT` disambiguates — it is a no-op on a
+            // running process and it CANCELS a pending stop — so only a
+            // positive "running" AFTER it settles the obligation. Both findings
+            // hold: a healthy app leaves recovery, and a pending signal is
+            // never silently dropped.
+            processes.resume(pid: entry.pid)
+            if processes.isStopped(pid: entry.pid) == false {
+                resumed.append(entry.pid)
+                continue
+            }
             // Only a POSITIVE "stopped" is a reason to signal. An unreadable
             // state is not proof the process is running, so the entry stays
             // (gate finding, `Unreadable process state drops its recovery
