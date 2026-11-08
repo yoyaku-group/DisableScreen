@@ -1561,6 +1561,24 @@ final class LidCloseActionServiceTests: XCTestCase {
         XCTAssertFalse(out.shouldNotify, "attention was raised over a healthy device")
     }
 
+
+    /// A stranded device that STAYS unreachable must keep raising attention:
+    /// once `audio` is empty, nothing was telling the operator about it (gate
+    /// finding, `Les périphériques audio devenus injoignables cessent de
+    /// déclencher une alerte`).
+    func testStillStrandedDeviceKeepsRaisingAttention() {
+        var rig = makeRig(muted: false)
+        rig.journal.save(.init(unverifiedAudio: [.init(
+            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)]))
+        // The device never comes back.
+        rig.audio.deviceGone = true
+
+        let out = rig.service.undoAll()
+
+        XCTAssertTrue(out.shouldNotify, "a stranded device went silent")
+        XCTAssertEqual(out.notice, .audioLeftMuted)
+    }
+
     // MARK: — Journal durability
 
     /// The journal is written BEFORE the effect: the file on disk carries the

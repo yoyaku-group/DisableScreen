@@ -1036,7 +1036,18 @@ public struct LidCloseActionService {
             }
             journal.save(record)
         }
-        guard !record.audio.isEmpty else { return }
+        guard !record.audio.isEmpty else {
+            // Nothing left in `audio`, but a STRANDED device may still be
+            // recorded: it stopped triggering any alert and the operator was
+            // never told (gate finding, `Les périphériques audio devenus
+            // injoignables cessent de déclencher une alerte`).
+            if !record.unverifiedAudio.isEmpty {
+                outcome.shouldNotify = true
+                outcome.notice = .audioLeftMuted
+                outcome.audioRestoreFailed = true
+            }
+            return
+        }
 
         // EVERY recorded device, not just the first: the default output can
         // change during a session, so there can be more than one device of ours

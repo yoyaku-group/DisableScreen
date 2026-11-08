@@ -256,15 +256,19 @@ public struct LidCloseActionJournal: Sendable {
                 audio = []
                 if (try? c.contains(.audio)) == true { droppedAudioEntries += 1 }
             }
-            // Same for the obligation list — but an ARRAY failure alone is not
-            // damage: the legacy SINGULAR form is supported, and counting it as
-            // corrupt made `lid-close status` exit 3 over a perfectly good
-            // journal written by the earlier build (gate finding, `Supported
-            // legacy audio records trigger false corruption reports`).
-            if (try? c.contains(.unverifiedAudio)) == true,
-               (try? c.decode([AudioState].self, forKey: .unverifiedAudio)) == nil,
-               (try? c.decode(AudioState.self, forKey: .unverifiedAudio)) == nil {
-                droppedAudioEntries += 1
+            // The obligation list is decoded ELEMENT-WISE too: one malformed
+            // record must not discard the valid ones, which is a lost recovery
+            // obligation (gate finding, `One malformed entry discards all
+            // unverified audio recovery records`). A legacy SINGULAR record is
+            // still supported and is NOT damage.
+            if let loose = try? c.decode([LooseAudioState].self, forKey: .unverifiedAudio) {
+                unverifiedAudio = loose.compactMap { $0.state }
+                droppedAudioEntries += loose.filter { $0.state == nil }.count
+            } else if let one = try? c.decode(AudioState.self, forKey: .unverifiedAudio) {
+                unverifiedAudio = [one]
+            } else {
+                unverifiedAudio = []
+                if (try? c.contains(.unverifiedAudio)) == true { droppedAudioEntries += 1 }
             }
             // A damaged element is surfaced, never silently dropped.
             if audio.isEmpty, (try? c.contains(.audio)) == true {
@@ -273,15 +277,6 @@ public struct LidCloseActionJournal: Sendable {
             }
             stopped = try c.decodeIfPresent([StoppedProcess].self, forKey: .stopped) ?? []
             unverified = try c.decodeIfPresent([StoppedProcess].self, forKey: .unverified) ?? []
-            // Tolerant of the SINGULAR form an earlier build wrote: a file from
-            // before this field became a list must not fail to decode.
-            if let list = try? c.decode([AudioState].self, forKey: .unverifiedAudio) {
-                unverifiedAudio = list
-            } else if let one = try? c.decode(AudioState.self, forKey: .unverifiedAudio) {
-                unverifiedAudio = [one]
-            } else {
-                unverifiedAudio = []
-            }
         }
     }
 

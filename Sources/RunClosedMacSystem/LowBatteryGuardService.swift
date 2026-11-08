@@ -311,7 +311,14 @@ public struct LowBatteryGuardService {
         // just finished it, and a finished session is exactly the moment the
         // undo has to happen.
         var r = readings()
-        r.session = sessionService?.load() ?? r.session
+        // The service's answer WINS, including nil: a session it just closed
+        // must not be resurrected from a readings closure that was captured
+        // before the close, or the step would APPLY effects for a session that
+        // no longer exists instead of undoing them (gate finding, `Une session
+        // supprimée peut être remplacée par une lecture périmée`).
+        if let sessionService {
+            r.session = sessionService.load()
+        }
         let outcome = service.step(readings: r)
         lidCloseActions = service
         return outcome
