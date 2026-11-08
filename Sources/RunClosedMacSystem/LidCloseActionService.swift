@@ -484,14 +484,27 @@ public struct LidCloseActionService {
         // session (Lord review round 4). Resume every journaled app that is no
         // longer selected, when its identity is proved.
         var resumedDropped: [Int32] = []
+        var droppedUnproved = false
         for entry in record.stopped where !names.contains(entry.appName) {
-            guard identityProved(entry) else { continue }
+            // An UNPROVABLE identity must not be skipped silently: the app is
+            // excluded from the target enumeration below, so nothing else would
+            // ever look at it again and it would stay frozen with no notice
+            // (gate finding, `Deselected apps silently remain paused after
+            // identity read failure`). Raise the attention instead.
+            guard identityProved(entry) else {
+                droppedUnproved = true
+                continue
+            }
             if processes.isStopped(pid: entry.pid) == true {
                 processes.resume(pid: entry.pid)
             }
             if processes.isStopped(pid: entry.pid) == false {
                 resumedDropped.append(entry.pid)
             }
+        }
+        if droppedUnproved {
+            outcome.shouldNotify = true
+            outcome.notice = outcome.notice ?? .appsLeftPaused
         }
         if !resumedDropped.isEmpty {
             let dropped = Set(resumedDropped)

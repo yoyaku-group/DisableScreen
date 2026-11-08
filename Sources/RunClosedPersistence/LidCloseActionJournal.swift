@@ -40,6 +40,7 @@ public struct LidCloseActionJournal: Sendable {
         }
     }
 
+
     /// The prior audio state of the device we muted.
     ///
     /// The DEVICE is recorded by UID, not by `AudioObjectID`: the id is a
@@ -173,6 +174,18 @@ public struct LidCloseActionJournal: Sendable {
         /// (gate finding, `Temporary device absence permanently discards
         /// restoration`).
         public var unverifiedAudio: [AudioState]
+        /// How many audio entries were discarded because a field was malformed.
+        /// Not persisted; set by the decoder so a damaged journal is visible.
+        public var droppedAudioEntries: Int = 0
+
+        /// A record that decoded BUT lost entries to malformed fields.
+        ///
+        /// `LooseAudioState` keeps one bad element from discarding the others,
+        /// but a dropped element is a lost obligation: the device may still be
+        /// muted with nothing authorising its restore. This makes the damage
+        /// visible instead of claiming a healthy journal (gate finding,
+        /// `Tolerant decoding silently loses audio restoration records`).
+        public var hasDroppedAudioEntries: Bool { droppedAudioEntries > 0 }
 
         public init(schemaVersion: Int = kLidCloseActionSchemaVersion,
                     sessionID: UUID? = nil,
@@ -231,6 +244,7 @@ public struct LidCloseActionJournal: Sendable {
             // (Lord review round 4, follow-up).
             if let loose = try? c.decode([LooseAudioState].self, forKey: .audio) {
                 audio = loose.compactMap { $0.state }
+                droppedAudioEntries = loose.filter { $0.state == nil }.count
             } else if let one = try? c.decode(AudioState.self, forKey: .audio) {
                 audio = [one]
             } else {
@@ -285,6 +299,7 @@ public struct LidCloseActionJournal: Sendable {
             readingFailed?()
             return Record()
         }
+        if rec.hasDroppedAudioEntries { readingFailed?() }
         return rec
     }
 
@@ -294,7 +309,10 @@ public struct LidCloseActionJournal: Sendable {
         guard let data = try? Data(contentsOf: url) else {
             return FileManager.default.fileExists(atPath: url.path)
         }
-        return (try? JSONDecoder().decode(Record.self, from: data)) == nil
+        guard let rec = try? JSONDecoder().decode(Record.self, from: data) else { return true }
+        // A record that decoded but LOST an audio entry is damaged too: the
+        // obligation is gone from the file even though the JSON still parses.
+        return rec.hasDroppedAudioEntries
     }
 
     /// Atomic write. `.atomic` writes a sibling temp file then renames it into

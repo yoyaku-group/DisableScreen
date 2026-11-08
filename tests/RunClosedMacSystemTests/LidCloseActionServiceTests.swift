@@ -1457,6 +1457,29 @@ final class LidCloseActionServiceTests: XCTestCase {
         XCTAssertEqual(out.apply, .applied)
     }
 
+
+    // MARK: — Lord review round 4, second follow-up
+
+    /// A deselect whose identity cannot be proved must RAISE attention: the app
+    /// is excluded from enumeration, so nothing else would ever look at it and
+    /// it would stay frozen silently.
+    func testDeselectedAppWithUnprovableIdentityRaisesAttention() {
+        let rig0 = makeRig(apps: [(4711, "Slack", 1_700_000_000)])
+        var rig = rig0
+        _ = stepEnclosed(&rig, settings(mute: false, pause: true, apps: ["Slack"]))
+        XCTAssertEqual(rig.processes.table[4711]?.stopped, true)
+
+        // The pid is recycled, so the identity can no longer be proved.
+        rig.processes.recycleBeforeFirstStop = nil
+        rig.processes.table[4711]?.startSeconds = 1_800_000_000
+
+        let out = stepEnclosed(&rig, settings(mute: false, pause: true, apps: ["Discord"]))
+
+        XCTAssertTrue(out.shouldNotify,
+                      "an unresumable de-selected app went silent")
+        XCTAssertEqual(out.notice, .appsLeftPaused)
+    }
+
     // MARK: — Journal durability
 
     /// The journal is written BEFORE the effect: the file on disk carries the
