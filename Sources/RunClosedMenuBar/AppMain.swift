@@ -1260,7 +1260,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // deadline passed and mutates nothing), so asking it first costs
                 // one clock read and lets the undo happen exactly when the
                 // session is about to be released.
-                let dueNow = service.expireIfDue() != .notDue
+                // A deadline that passes BETWEEN this check and the step would
+                // let `step()` release the flag with the effects still applied:
+                // with the lid closed macOS can sleep right there, leaving the
+                // Mac muted with apps frozen (gate finding, `Deadline crossing
+                // bypasses restoration before session expiry`). The window
+                // cannot be closed from here, so it is narrowed: a session due
+                // within the next second counts as due now.
+                let now = service.currentNow()
+                let live = service.load()
+                let dueNow: Bool
+                if let live {
+                    let dueByPolicy = SessionPolicy.dueReason(live, now: now) != nil
+                    let dueByMargin = live.endsAtWall.map {
+                        $0.timeIntervalSince(now.wall) <= 1
+                    } ?? false
+                    dueNow = dueByPolicy || dueByMargin
+                } else {
+                    dueNow = false
+                }
                 let pre = dueNow ? lidCloseService.undoAll() : nil
                 let s = service.step()
                 var readings = LidCloseActionService.Readings.lidEnvironment()

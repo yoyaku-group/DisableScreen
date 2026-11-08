@@ -496,7 +496,15 @@ public struct LidCloseActionService {
         // take — still frozen, reported as a clean apply — and
         // `.nothingRequested` when nothing came back at all (gate finding,
         // `Apply verdict omits failed process restoration`).
-        let restoreFailed = outcome.audioRestoreFailed || !outcome.unverifiedPids.isEmpty
+        // `record.stopped` is the third source and the one `unverifiedPids`
+        // misses: a process whose SIGCONT was DELIVERED but did not take stays
+        // in `stopped` (not in `unverified`), so checking only the unverified
+        // list reported `.applied` over an app that is still frozen (gate
+        // finding, `Apply verdict omits failed restoration on two return
+        // paths`).
+        let restoreFailed = outcome.audioRestoreFailed
+            || !outcome.unverifiedPids.isEmpty
+            || !record.stopped.isEmpty && !decision.pauseApps
         outcome.apply = restoreFailed ? .partial : requested
         // OR, never assign: `undoEffectsThatAreNowOff` may already have reversed
         // something, and a partial stop DID freeze a process. Assigning here

@@ -1679,3 +1679,29 @@ périodique doit prouver qu'il ne se déclenche que dans la condition visée, pa
 seulement qu'il produit le bon résultat quand elle est remplie.
 
 Suite : **720/720**, 0 échec, 0 warning, rc=0.
+
+### Tour 18 — deux WARN, et le point d'arrêt
+
+**0 CRITICAL, 2 WARN.**
+
+| Défaut | Correction |
+|---|---|
+| Le verdict d'apply ignorait une troisième source : un processus dont le `SIGCONT` a été livré mais n'a pas pris reste dans `record.stopped`, PAS dans `unverified`. Ne consulter que la liste `unverified` rapportait `.applied` sur une app encore figée. | `record.stopped` non vide avec la pause désactivée ⇒ `.partial`. |
+| Course sur l'échéance : une session dont le délai passe ENTRE le contrôle et `step()` voyait son flag relâché sans annulation préalable. | La fenêtre ne peut pas être fermée depuis l'appelant ; elle est réduite à une seconde de marge. La correction complète demanderait que la restauration vive DANS le chemin de relâchement de `SessionService`, ce qui dépasse ce lot. |
+
+**Arrêt de la boucle ici.** Le lot en est à sa douzième ronde de relecture sur
+les correctifs des rondes précédentes. Les six derniers tours n'ont trouvé que
+des défauts dans du code que j'ai ajouté pendant ces mêmes tours — plus aucun
+défaut d'origine. Continuer produirait des correctifs de correctifs à rendement
+décroissant, sur un chemin (le tick « session seule ») qui n'a **aucun test**
+parce qu'il est du câblage AppKit.
+
+Ce qui reste, et qui n'est plus de la relecture :
+
+- Le tick « session seule » et son ordre restaurer/relâcher ne sont couverts par
+  aucun test. Extraire cette séquence dans le service la rendrait testable ;
+  c'est un travail de conception, pas un correctif.
+- La qualification matérielle (PR5) est le seul moyen de valider le
+  comportement réel : son, `SIGSTOP`/`SIGCONT` sur les vraies apps, capot.
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.
