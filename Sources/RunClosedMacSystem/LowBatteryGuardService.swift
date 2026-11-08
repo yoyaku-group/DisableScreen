@@ -850,6 +850,12 @@ public struct LowBatteryGuardService {
             }
             if undo.changed { merged.changed = true }
             if undo.shouldNotify { merged.shouldNotify = true }
+            // The NOTICE is what gives `shouldNotify` a meaning: merging the
+            // flag without its payload produced a notification request with a
+            // nil notice, so the operator was never told WHICH thing needed
+            // attention (gate finding, `Second undo's notice is omitted from the
+            // merged outcome`).
+            if let notice = undo.notice { merged.notice = notice }
             if undo.audioRestoreFailed { merged.audioRestoreFailed = true }
             // A persistence failure in EITHER pass must survive the merge:
             // dropping it told the caller the journal was fine while stale
