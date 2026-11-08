@@ -122,7 +122,7 @@ final class LidCloseActionServiceTests: XCTestCase {
         /// The journal contents captured at the crash point.
         var journalAtCrash: [Int32]?
 
-        func runningProcesses(matching appNames: [String]) -> [RunningProcess] {
+        func runningProcesses(matching appNames: [String]) -> [RunningProcess]? {
             let snapshot = table.values
                 .filter { appNames.contains($0.appName) }
                 .sorted { $0.pid < $1.pid }
@@ -726,7 +726,7 @@ final class LidCloseActionServiceTests: XCTestCase {
         // The BACKEND decides, so drive the real filter rather than the fake's
         // stored table: `runningProcesses` must skip a stopped process.
         let targets = rig.processes.runningProcesses(matching: ["Slack"])
-        XCTAssertEqual(targets.count, 1,
+        XCTAssertEqual(targets?.count, 1,
                        "the fake's table is the seam; the FILTER is the product")
         // What the product must do, expressed against the real filter:
         // `LibprocPauseBackend` skips `SSTOP`. Its pure predicate is asserted
@@ -1624,6 +1624,22 @@ final class LidCloseActionServiceTests: XCTestCase {
 
         XCTAssertTrue(out.shouldNotify, "a stop timeout went unreported")
         XCTAssertEqual(out.unverifiedPids, [4711])
+    }
+
+
+    /// Turning the audio switch off must still report a STRANDED device: with
+    /// no `record.audio` the normal branch is skipped entirely (gate finding,
+    /// `Disabling audio suppresses stranded-device alerts`).
+    func testDisablingAudioStillReportsAStrandedDevice() {
+        var rig = makeRig()
+        rig.journal.save(.init(unverifiedAudio: [.init(
+            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)]))
+        rig.audio.deviceGone = true
+
+        let out = stepEnclosed(&rig, settings(mute: false))
+
+        XCTAssertTrue(out.shouldNotify, "a stranded device went silent")
+        XCTAssertEqual(out.notice, .audioLeftMuted)
     }
 
     // MARK: — Journal durability

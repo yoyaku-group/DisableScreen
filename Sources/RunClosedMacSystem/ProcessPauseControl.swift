@@ -21,7 +21,11 @@ import RunClosedPersistence
 ///   authority, so an app the operator paused themselves is untouched.
 public protocol ProcessPauseBackend: Sendable {
     /// Every process matching one of `appNames`, with its identity.
-    func runningProcesses(matching appNames: [String]) -> [RunningProcess]
+    ///
+    /// Returns `nil` when the enumeration FAILED — deliberately distinct from
+    /// an empty array, which means "nothing matched". Collapsing the two let a
+    /// failed enumeration report the pause as applied.
+    func runningProcesses(matching appNames: [String]) -> [RunningProcess]?
 
     /// The identity currently behind `pid`, or `nil` when no such process
     /// exists. Used to re-prove identity before a resume.
@@ -91,10 +95,11 @@ public struct LibprocPauseBackend: ProcessPauseBackend {
         return path.split(separator: "/").contains { $0 == component }
     }
 
-    public func runningProcesses(matching appNames: [String]) -> [RunningProcess] {
+    public func runningProcesses(matching appNames: [String]) -> [RunningProcess]? {
         guard !appNames.isEmpty else { return [] }
+        guard let pids = Self.allPids() else { return nil }
         var out: [RunningProcess] = []
-        for pid in Self.allPids() {
+        for pid in pids {
             guard let snap = Self.snapshot(pid: pid) else { continue }
             // An app the OPERATOR already suspended is never adopted. Pausing
             // it would journal it as ours, and the undo would then `SIGCONT`
@@ -146,21 +151,27 @@ public struct LibprocPauseBackend: ProcessPauseBackend {
     /// `true` when the kernel reports the process as stopped.
     public static let stoppedStatus = UInt32(SSTOP)
 
-    static func allPids() -> [Int32] {
+    /// `nil` = the enumeration FAILED, which is NOT the same as "no processes".
+    ///
+    /// Collapsing both to `[]` made a failed enumeration look like "no matching
+    /// apps", so the service reported the pause as applied while the apps were
+    /// still running (gate finding, `Process enumeration failure becomes
+    /// successful pause`).
+    static func allPids() -> [Int32]? {
         // The count can grow between the two calls; a slightly larger buffer
         // than reported costs nothing and avoids a second round trip.
         let hint = proc_listallpids(nil, 0)
-        guard hint > 0 else { return [] }
+        guard hint > 0 else { return nil }
         var capacity = Int(hint) + 64
         while capacity <= 1 << 20 {
             var buffer = [pid_t](repeating: 0, count: capacity)
             let n = proc_listallpids(&buffer, Int32(capacity * MemoryLayout<pid_t>.size))
-            if n <= 0 { return [] }
+            if n <= 0 { return nil }
             if Int(n) < capacity { return buffer.prefix(Int(n)).filter { $0 > 0 } }
             // Filled the buffer: another 64 and retry, bounded.
             capacity *= 2
         }
-        return []
+        return nil
     }
 
     static func snapshot(pid: Int32) -> Snapshot? {

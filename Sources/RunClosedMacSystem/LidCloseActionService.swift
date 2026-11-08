@@ -529,7 +529,13 @@ public struct LidCloseActionService {
             journal.save(record)
         }
 
-        let targets = processes.runningProcesses(matching: names)
+        // A FAILED enumeration is not "no matching apps": collapse them and the
+        // service reports the pause as applied while the apps keep running
+        // (gate finding, `Process enumeration failure becomes successful
+        // pause`).
+        guard let targets = processes.runningProcesses(matching: names) else {
+            return .failure("could not enumerate processes to pause")
+        }
         let known = Set(record.stopped.map { $0.pid })
         let pending = targets
             .map { $0.journalEntry(bootID: bootID) }
@@ -781,6 +787,16 @@ public struct LidCloseActionService {
             }
             outcome.evaluation.journalBefore = record
         }
+        // Turning the audio switch off must STILL report a device that is
+        // stranded in `unverifiedAudio`: with no `record.audio` the branch above
+        // is skipped entirely, so the obligation went silent forever (gate
+        // finding, `Disabling audio suppresses stranded-device alerts`).
+        if !decision.muteAudio, record.audio.isEmpty, !record.unverifiedAudio.isEmpty {
+            outcome.shouldNotify = true
+            outcome.notice = outcome.notice ?? .audioLeftMuted
+            outcome.audioRestoreFailed = true
+        }
+
         if !decision.pauseApps, !record.stopped.isEmpty || !record.unverified.isEmpty {
             var scratch = TickOutcome(evaluation: evaluation)
             resumeStoppedProcesses(journal: &record, into: &scratch)

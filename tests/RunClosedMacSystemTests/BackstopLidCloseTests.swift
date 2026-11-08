@@ -75,7 +75,7 @@ final class BackstopLidCloseTests: XCTestCase {
         var table: [Int32: P] = [:]
         var resumeCalls: [Int32] = []
 
-        func runningProcesses(matching appNames: [String]) -> [RunningProcess] {
+        func runningProcesses(matching appNames: [String]) -> [RunningProcess]? {
             table.values.filter { appNames.contains($0.name) }
                 .sorted { $0.pid < $1.pid }
                 .map { RunningProcess(pid: $0.pid, startSeconds: $0.start,
@@ -381,13 +381,13 @@ final class BackstopLidCloseTests: XCTestCase {
     }
 
 
-    /// A backstop minute that ATTEMPTED a sleep must not re-apply the lid-close
-    /// effects: the release failed, the session is still active, and re-applying
-    /// would undo the protective restore that just ran (gate finding, `Backstop
-    /// bypasses the protective undo-only decision`).
-    func testBackstopDoesNotReapplyAfterASleepAttempt() {
+    /// The backstop must not leave the lid-close effects FRESHLY APPLIED by its
+    /// own final step. This rig has no battery/lid control, so it cannot force
+    /// the protective-sleep branch, and I am NOT claiming it covers that path:
+    /// see the commit message. What it does assert is the invariant that matters
+    /// either way — a run never ends by newly muting an already-restored device.
+    func testBackstopRunNeverLeavesAFreshMute() {
         var rig = makeRig(apps: [(4711, "Slack", 1_700_000_000)])
-        // A journaled, applied state.
         rig.journal.save(.init(
             audio: [.init(deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)],
             stopped: [.init(pid: 4711, startSeconds: 1_700_000_000, startMicroseconds: 0,
@@ -398,9 +398,8 @@ final class BackstopLidCloseTests: XCTestCase {
 
         _ = rig.service.run()
 
-        // Whatever happened, the run must not leave the effects freshly APPLIED
-        // by its own final step after a sleep was requested.
-        XCTAssertFalse(rig.audio.writes.contains { $0.muted }, "re-muted after a sleep attempt")
+        XCTAssertFalse(rig.audio.writes.contains { $0.muted },
+                       "a backstop run newly muted the output")
     }
 
     // MARK: — Reporting
