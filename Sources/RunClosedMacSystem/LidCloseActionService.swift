@@ -571,14 +571,17 @@ public struct LidCloseActionService {
                 droppedUnproved = true
                 continue
             }
-            if processes.isStopped(pid: entry.pid) == true {
-                processes.resume(pid: entry.pid)
-            }
+            // Same rule as the `unverified` loop: send `SIGCONT` FIRST.
+            // Requiring a positive "stopped" reading before signalling meant a
+            // persistently unreadable state left the de-selected app frozen
+            // forever (gate finding, `Deselected stopped apps skip resume when
+            // state is unreadable`).
+            processes.resume(pid: entry.pid)
             if processes.isStopped(pid: entry.pid) == false {
                 resumedDropped.append(entry.pid)
             } else {
-                // The resume did not take. The app is no longer a target, so
-                // nothing else will ever revisit it: say so rather than
+                // Still stopped, or unprovable. The app is no longer a target,
+                // so nothing else will ever revisit it: say so rather than
                 // reporting a clean success over a frozen app (gate finding,
                 // `Échec de reprise d'une application désélectionnée non
                 // signalé`).

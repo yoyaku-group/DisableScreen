@@ -667,6 +667,14 @@ public struct RecoveryBackstopService {
         // restore across the sleep (gate finding, `Backstop bypasses the
         // protective undo-only decision`).
         if report.sleepAttempted {
+            // A truncated journal loads as empty, so `undoAll` reports
+            // `nothingToDo` and the obligations it could not see are invisible.
+            // This branch does not run `runLidCloseStep`, so the corruption
+            // check there never fires (gate finding, `Undo-only recovery
+            // bypasses journal corruption reporting`).
+            if guardService.lidCloseActions?.journal.isCorrupt == true {
+                report.lidCloseJournalCorrupt = true
+            }
             report.lidClose = guardService.runLidCloseUndo()
             report.lidCloseStepRan = true
         } else {
