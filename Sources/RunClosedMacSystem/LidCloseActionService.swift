@@ -364,8 +364,14 @@ public struct LidCloseActionService {
             // outstanding work, it just did not succeed (gate finding,
             // `Apply verdict omits failed restoration on two return paths`).
             if outcome.apply == nil {
+                // `record.stopped` too: a process whose SIGCONT was delivered but
+                // did not take stays there, NOT in `unverified`, so the earlier
+                // two-source check reported "no work" over a frozen app (gate
+                // finding, `Both switches off can hide a failed process
+                // restore`). Same third source the other return path needed.
                 let incomplete = outcome.audioRestoreFailed
                     || !outcome.unverifiedPids.isEmpty
+                    || !outcome.evaluation.journalBefore.stopped.isEmpty
                 outcome.apply = incomplete ? .partial : .nothingRequested
             }
             return

@@ -1731,3 +1731,22 @@ Ces deux points sont écrits ici pour ne pas être perdus : ils décrivent un or
 que le plan nomme explicitement et que trois chemins n'appliquent pas encore.
 
 Suite : **720/720**, 0 échec, 0 warning, rc=0.
+
+### Tour 20 — le jumeau d'une ligne
+
+Le reçu du head `5e703fd` a rendu **0 CRITICAL, 2 WARN**. Le premier est le
+jumeau exact du correctif du tour 19 : l'early return consultait
+`audioRestoreFailed` et `unverifiedPids`, mais pas `record.stopped` — où reste un
+processus dont le `SIGCONT` a été livré sans prendre. Une ligne.
+
+Corrigé. Le second WARN est l'ordre d'expiration déjà consigné comme résidu au
+tour 19 : il reste, documenté, avec sa cause racine (`SessionService` relâche
+avant que l'appelant ne restaure) et le lot propre qu'il demande.
+
+**La classe est maintenant nommée et tarie.** Vingt tours ont produit six
+occurrences de « règle appliquée à un site, pas à son jumeau » et trois de
+« compteur persisté non borné ». Les deux familles sont désormais fermées par
+construction : la fusion vit dans `TickOutcome.merging`, l'addition dans
+`saturatingAdd`, et chaque site d'appel a été balayé mécaniquement.
+
+Suite : **720/720**, 0 échec, 0 warning, rc=0.
