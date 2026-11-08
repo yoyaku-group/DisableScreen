@@ -101,7 +101,10 @@ public struct LibprocPauseBackend: ProcessPauseBackend {
         var out: [RunningProcess] = []
         var sawMatchingButUnreadable = false
         for pid in pids {
-            guard let snap = Self.snapshot(pid: pid) else { continue }
+            guard let snap = Self.snapshot(pid: pid) else {
+                sawMatchingButUnreadable = true
+                continue
+            }
             // An app the OPERATOR already suspended is never adopted. Pausing
             // it would journal it as ours, and the undo would then `SIGCONT`
             // an app the operator had deliberately stopped — an effect they
@@ -123,7 +126,12 @@ public struct LibprocPauseBackend: ProcessPauseBackend {
         }
         // A per-process read failure is NOT proof that nothing matched: report
         // it as unreadable so the service says so instead of `.applied`.
-        if out.isEmpty, sawMatchingButUnreadable { return nil }
+        // ANY unreadable candidate taints the result, not only an all-empty one:
+        // with two targets, one readable and one not, returning just the
+        // readable one let the service stop a SUBSET and report `.applied`
+        // while the other app kept running (gate finding, `Partial enumeration
+        // failures are reported as complete success`).
+        if sawMatchingButUnreadable { return nil }
         return out
     }
 

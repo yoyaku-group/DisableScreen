@@ -128,7 +128,12 @@ while [[ "$interrupted" == "0" ]]; do
   # silent abort BEFORE the report is written. Each assignment tolerates that,
   # so the trap's flag is what ends the run (gate finding, `Ctrl-C during a
   # probe can bypass report generation`).
-  l="$(lid || true)"; p="$(panel || true)"; c="$(conditions || true)"
+  # Read the lid BEFORE and AFTER the panel probe: agreement between the two
+  # endpoints does not prove the state DURING it, and a lid that closed for the
+  # first read, opened while panel() ran and closed again before the last one
+  # would otherwise qualify an open-lid panel reading (gate finding, `Sequential
+  # probes still allow an open-lid panel reading to qualify`).
+  l="$(lid || true)"; p="$(panel || true)"; l2="$(lid || true)"; c="$(conditions || true)"
   line="$(date '+%F %T') clamshell=$l $p $c"
   echo "$line" | tee -a "$LOG"
   # A sample only qualifies if the machine is in the configuration the feature
@@ -144,6 +149,7 @@ while [[ "$interrupted" == "0" ]]; do
   # closed-lid-ACTIVE verdict from an open-lid sample (gate finding,
   # `Sequential probes can qualify an open-lid panel reading`).
   if [[ "$l" == "1" || "$l" == "Yes" || "$l" == "yes" ]] \
+     && [[ "$l2" == "1" || "$l2" == "Yes" || "$l2" == "yes" ]] \
      && [[ "$c" == *"lidClosed=True"* ]] \
      && [[ "$c" == *"sessionActive=True"* ]] \
      && [[ "$c" == *"external=False"* ]]; then

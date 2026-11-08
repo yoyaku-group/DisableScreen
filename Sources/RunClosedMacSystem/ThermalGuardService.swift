@@ -68,6 +68,9 @@ public struct ThermalGuardService {
     /// Mac sleeps: otherwise it goes down muted with an app frozen and comes
     /// back that way, with nobody left to notice. `nil` = no lid-close layer.
     public var lidCloseActions: LidCloseActionService?
+    /// Vetoes counted in THIS process, so an unwritable latch cannot reset the
+    /// budget every tick and refuse the release forever.
+    private var vetoesThisProcess = 0
 
     public init(
         lidService: LidMutationService,
@@ -251,7 +254,10 @@ public struct ThermalGuardService {
         // budget accumulated ACROSS episodes (gate finding, `Le budget de veto
         // ne se réinitialise pas toujours entre deux épisodes`). A tick that is
         // not hot is the boundary.
-        if !evaluation.input.state.isHot { record.lidCloseVetoes = 0 }
+        if !evaluation.input.state.isHot {
+            record.lidCloseVetoes = 0
+            vetoesThisProcess = 0
+        }
 
         if record != before {
             persistLatch(record, into: &outcome)
@@ -329,8 +335,15 @@ public struct ThermalGuardService {
         // indefinitely (gate finding, `Failed lid-close recovery indefinitely
         // vetoes thermal sleep`).
         if undoIncomplete {
+            // Count the veto in MEMORY for this process's lifetime too, so a
+            // latch that cannot be WRITTEN does not reset the budget on every
+            // tick and stall the refusal forever (gate finding, `Failed latch
+            // writes prevent the thermal veto budget from advancing`). The
+            // persisted counter is the cross-restart memory; this one is the
+            // within-process floor.
             record.lidCloseVetoes += 1
-            if record.lidCloseVetoes <= Self.maximumLidCloseVetoes {
+            vetoesThisProcess += 1
+            if max(record.lidCloseVetoes, vetoesThisProcess) <= Self.maximumLidCloseVetoes {
                 outcome.mutation = .releaseRefused
                 outcome.mutationError = "the lid-close undo is incomplete; not releasing "
                     + "the flag so the Mac cannot sleep with effects still applied "
