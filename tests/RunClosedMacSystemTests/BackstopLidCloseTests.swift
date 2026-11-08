@@ -173,7 +173,7 @@ final class BackstopLidCloseTests: XCTestCase {
             audio: audio, processes: processes, bootID: "A",
             wallClock: { clock.wall })
 
-        var guardService = LowBatteryGuardService(
+        let guardService = LowBatteryGuardService(
             lidService: LidMutationService(bootID: "A", mutator: lid, store: lidStore,
                                            priorProvider: { flagBox.value }),
             latchStore: latchStore,

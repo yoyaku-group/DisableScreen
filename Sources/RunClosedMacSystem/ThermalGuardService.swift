@@ -516,7 +516,14 @@ public struct ThermalGuardService {
         // `Thermal sleep precedes restoration of paused apps and audio`).
         if var actions = lidCloseActions {
             let undo = actions.undoAll()
-            if outcome.lidCloseUndo == nil { outcome.lidCloseUndo = undo }
+            // MERGE, exactly as the battery sleep path does. Keeping only the
+            // first result lost a process THIS pass resumed (the pre-release
+            // undo may have left it unconfirmed) and, with it, the `changed`
+            // signal and any notice — a report that reads like a clean
+            // recovery over a Mac that still has an app frozen (gate finding,
+            // `Second thermal undo result is discarded`). The whole merge now
+            // lives on `TickOutcome` so the two paths cannot drift again.
+            outcome.lidCloseUndo = outcome.lidCloseUndo.map { $0.merging(undo) } ?? undo
             lidCloseActions = actions
         }
         let r = sleeper.sleepNow()

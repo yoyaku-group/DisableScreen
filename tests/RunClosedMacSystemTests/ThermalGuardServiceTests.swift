@@ -798,6 +798,91 @@ final class ThermalGuardServiceTests: XCTestCase {
 
 
 
+    /// The thermal sleep path runs the lid-close undo a SECOND time after the
+    /// first was incomplete. That pass can resume a process the first left
+    /// unconfirmed, and keeping only the first result dropped the newly resumed
+    /// pid, the `changed` signal and any notice — a report that reads like a
+    /// clean recovery over a Mac that still has an app frozen (gate finding,
+    /// `Second thermal undo result is discarded`).
+    ///
+    /// Counter-proof: with the old `if outcome.lidCloseUndo == nil` guard the
+    /// resumed pid below is absent and the assertion fails.
+    func testTheSecondThermalUndoIsMergedNotDiscarded() {
+        var rig = makeRig(state: .critical, flag: true, ownedBoot: "A")
+
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("merge-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+
+        // A process WE stopped, whose resume fails until the FIFTH attempt.
+        //
+        // The ledger: the three vetoed ticks each run one undo (attempts 1-3);
+        // the tick that exhausts the budget runs the pre-release undo (4,
+        // still refused) and then `attemptSleep`'s undo (5, which takes). So
+        // the pid only ever appears in the SECOND pass of the releasing tick —
+        // exactly the case `if lidCloseUndo == nil` used to drop.
+        let processes = FlakyResumeProcesses(pid: 4711, succeedsOn: 5)
+        let journal = LidCloseActionJournal(url: dir.appendingPathComponent("j.json"))
+        journal.save(.init(stopped: [.init(
+            pid: 4711, startSeconds: 1_700_000_000, startMicroseconds: 0,
+            bootID: "A", path: "/Applications/Slack.app/Contents/MacOS/Slack",
+            appName: "Slack")]))
+
+        var actions = LidCloseActionService(
+            journal: journal,
+            auditLog: LidCloseActionAuditLog(url: dir.appendingPathComponent("a.jsonl")),
+            audio: NoDeviceAudio(), processes: processes, bootID: "A")
+        actions.stopConfirmDelay = {}
+        rig.service.lidCloseActions = actions
+
+        // Enough refusals to exhaust the veto budget, then the release proceeds.
+        for _ in 0..<ThermalGuardService.maximumLidCloseVetoes {
+            _ = rig.service.step()
+        }
+        let out = rig.service.step()
+
+        XCTAssertEqual(out.mutation, .released)
+        XCTAssertEqual(out.lidCloseUndo?.resumedPids, [4711],
+                       "the process the SECOND undo resumed is missing from the report")
+        XCTAssertEqual(out.lidCloseUndo?.changed, true,
+                       "the report claims nothing changed while an app was resumed")
+    }
+
+    /// A process that refuses the first `SIGCONT` and accepts the second.
+    private final class FlakyResumeProcesses: ProcessPauseBackend, @unchecked Sendable {
+        let pid: Int32
+        let succeedsOn: Int
+        private var resumed = false
+        private var resumeAttempts = 0
+
+        init(pid: Int32, succeedsOn: Int) {
+            self.pid = pid
+            self.succeedsOn = succeedsOn
+        }
+
+        func runningProcesses(matching appNames: [String]) -> ProcessScan? {
+            ProcessScan(targets: [])
+        }
+        func identity(ofPid pid: Int32) -> LidCloseActionJournal.ProcessIdentity? {
+            guard pid == self.pid else { return nil }
+            return .init(pid: pid, startSeconds: 1_700_000_000,
+                         startMicroseconds: 0, bootID: "A")
+        }
+        func stop(pid: Int32) -> Bool { false }
+        func resume(pid: Int32) -> Bool {
+            guard pid == self.pid else { return false }
+            resumeAttempts += 1
+            // Delivered but ineffective until the chosen attempt.
+            if resumeAttempts >= succeedsOn { resumed = true }
+            return true
+        }
+        func isStopped(pid: Int32) -> Bool? {
+            guard pid == self.pid else { return nil }
+            return !resumed
+        }
+    }
+
     /// A PERSISTENTLY incomplete lid-close undo must not keep an overheating Mac
     /// awake forever: the veto is bounded so heat — the safety case — wins
     /// (gate finding, `Failed lid-close recovery indefinitely vetoes thermal

@@ -37,8 +37,21 @@ final class LidCloseActionServiceTests: XCTestCase {
         /// Number of upcoming `readOutput` calls that return nil without the
         /// device being gone — a transient failure, not a removal.
         var failNextReads = 0
+        /// Scripted answers for `readDefaultOutput`, consumed one per call
+        /// before falling back to `device`.
+        ///
+        /// It exists to model the TOCTOU the service has to survive: the
+        /// "is the current output recorded?" probe and the confirmation read
+        /// are TWO reads, and the operator can switch device between them. With
+        /// only `device` the two reads always agree and the race is untestable.
+        var defaultOutputScript: [AudioOutputSnapshot?] = []
 
-        func readDefaultOutput() -> AudioOutputSnapshot? { device }
+        func readDefaultOutput() -> AudioOutputSnapshot? {
+            if !defaultOutputScript.isEmpty {
+                return defaultOutputScript.removeFirst()
+            }
+            return device
+        }
         func readOutput(uid: String) -> AudioOutputSnapshot? {
             if failNextReads > 0 {
                 failNextReads -= 1
@@ -1201,6 +1214,47 @@ final class LidCloseActionServiceTests: XCTestCase {
         XCTAssertEqual(out.apply, .applied)
     }
 
+
+    /// The current default output can change BETWEEN the "is it recorded?"
+    /// check and the confirmation read. Falling back to `audio.first` then read
+    /// device A as muted and reported the sound step applied while the output
+    /// actually playing (B) was audible — and on an unreadable read it reported
+    /// success over an output it could not even name.
+    ///
+    /// Counter-proof: with the old `?? record.audio.first` fallback this reads
+    /// `.applied` and the assertion below fails.
+    func testADefaultSwitchBetweenCheckAndConfirmIsNotReportedAsMuted() {
+        var rig = makeRig(muted: false)
+        let cfg = settings()
+        _ = stepEnclosed(&rig, cfg)                       // A muted and recorded
+        XCTAssertEqual(rig.journal.load().audio.count, 1)
+
+        // The operator switches to B, which we never touched. A stays REACHABLE
+        // and MUTED — that is what makes the old fallback a false success
+        // rather than an honest failure: it read A, found it silent, and
+        // reported the sound step applied over an audible B. (Leaving A
+        // unreachable instead would make both the old and the new code report a
+        // failure, and the test would pass without proving anything.)
+        rig.audio.others["BuiltInSpeakerDevice"] = AudioOutputSnapshot(
+            uid: "BuiltInSpeakerDevice", isMuted: true, volume: 0.5, canMute: true)
+        rig.audio.device = AudioOutputSnapshot(uid: "Headphones", isMuted: false,
+                                               volume: 0.7, canMute: true)
+        // The probe reads the default BEFORE `readOutput` is consulted: make
+        // the first `readDefaultOutput` answer A (recorded) and every later one
+        // answer B (unrecorded), reproducing the race deterministically.
+        rig.audio.defaultOutputScript = [
+            AudioOutputSnapshot(uid: "BuiltInSpeakerDevice", isMuted: true,
+                                volume: 0.5, canMute: true)
+        ]
+
+        let out = stepEnclosed(&rig, cfg)
+
+        XCTAssertNotEqual(out.apply, .applied,
+                          "reported the sound step applied while the active output "
+                          + "was never muted (the race fell back to a recorded device)")
+        XCTAssertEqual(rig.audio.device?.isMuted, false,
+                       "the fake must still show B audible: the point is the report")
+    }
 
     // MARK: — Lord review round 4, second follow-up
 

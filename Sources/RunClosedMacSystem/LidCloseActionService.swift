@@ -126,6 +126,52 @@ public struct LidCloseActionService {
         /// retry). Distinguished from "nothing to do", so the caller never
         /// reports a clean outcome over a Mac that is still silent.
         public var audioRestoreFailed = false
+
+        /// The union of two passes over the same recovery obligation.
+        ///
+        /// A second undo is NOT authoritative over the first: by the time it
+        /// runs the journal is often already cleared, so it reports
+        /// `nothingToDo` over work the first pass really did. Assigning it
+        /// erased resumed pids and the `changed` signal; keeping only the first
+        /// lost a process the SECOND pass resumed. Neither "keep the first" nor
+        /// "keep the last" is right, so this merges — and every field is
+        /// carried, because dropping one is how a persistence failure or an
+        /// operator notice disappeared from a report that still looked clean.
+        ///
+        /// Lives here, once, because the same merge was written three times by
+        /// hand (battery sleep, thermal sleep, backstop) and the thermal copy
+        /// was still wrong two rounds after the battery one was fixed.
+        public func merging(_ later: TickOutcome) -> TickOutcome {
+            var merged = self
+            for pid in later.resumedPids where !merged.resumedPids.contains(pid) {
+                merged.resumedPids.append(pid)
+            }
+            for pid in later.stoppedPids where !merged.stoppedPids.contains(pid) {
+                merged.stoppedPids.append(pid)
+            }
+            for pid in later.unverifiedPids where !merged.unverifiedPids.contains(pid) {
+                merged.unverifiedPids.append(pid)
+            }
+            if later.changed { merged.changed = true }
+            if later.shouldNotify { merged.shouldNotify = true }
+            // The NOTICE is what gives `shouldNotify` a meaning: merging the
+            // flag without its payload produces a notification request with a
+            // nil notice, so the operator is never told WHICH thing needs
+            // attention.
+            if let notice = later.notice { merged.notice = notice }
+            if later.audioRestoreFailed { merged.audioRestoreFailed = true }
+            if later.audioDeviceGone { merged.audioDeviceGone = true }
+            // A persistence failure in EITHER pass must survive: dropping it
+            // told the caller the journal was fine while stale ownership
+            // remained on disk, so a later undo could resume a process the
+            // operator had paused themselves.
+            if later.journalSaveFailed { merged.journalSaveFailed = true }
+            // The LATER pass is the later truth about what the undo itself
+            // concluded — it saw the journal the earlier pass left behind.
+            merged.undo = later.undo ?? merged.undo
+            merged.apply = merged.apply ?? later.apply
+            return merged
+        }
     }
 
     public enum Notice: String, Sendable, Equatable {
@@ -552,13 +598,10 @@ public struct LidCloseActionService {
                 stillUnverified.append(entry)
                 droppedUnproved = true
             }
+            // The `switch` above IS the classification; the `if/else` that used
+            // to follow it was unreachable and duplicated it (it survived a
+            // `continue`), which is why the compiler flagged it as dead code.
             continue
-            if processes.isStopped(pid: entry.pid) == false {
-                resumedDropped.append(entry.pid)
-            } else {
-                stillUnverified.append(entry)
-                droppedUnproved = true
-            }
         }
         record.unverified = stillUnverified
 
@@ -1046,13 +1089,25 @@ public struct LidCloseActionService {
         // recorded device, checking the first one let the service report the
         // mute applied while the device actually in use stayed audible (Lord
         // review round 4, follow-up).
-        // The CURRENT default output, not `audio.first`: with more than one
-        // recorded device, checking the first one let the service report the
-        // mute applied while the device actually in use stayed audible (Lord
-        // review round 4, follow-up).
-        let currentUID = audio.readDefaultOutput()?.uid
-        guard let entry = record.audio.first(where: { $0.deviceUID == currentUID })
-                ?? record.audio.first else { return .alreadyMuted }
+        //
+        // And when the current output is unknown or unrecorded, there is NO
+        // fallback to `record.audio.first`. The caller checked that the default
+        // was recorded, but that check is a SEPARATE read: between the two, the
+        // operator can switch to a device we never muted (or the read can
+        // simply fail). Falling back to the first recorded device then read A
+        // as muted and reported the sound step applied while the active output
+        // B was audible — and, on an unreadable read, reported success over an
+        // output it could not even name (gate finding, `Default-output changes
+        // can confirm the wrong device`).
+        //
+        // `.unconfirmed` is the honest answer: the write we made earlier may
+        // well have landed (so this is NOT `.failed`, which promises an
+        // untouched machine), but the device actually playing right now is not
+        // proven silent. The next tick sees B unrecorded and mutes it through
+        // `muteDefaultOutput`, which is the path built for exactly that.
+        guard let snapshot = audio.readDefaultOutput(),
+              let entry = record.audio.first(where: { $0.deviceUID == snapshot.uid })
+        else { return .unconfirmed }
         guard let snapshot = audio.readOutput(uid: entry.deviceUID),
               let muted = snapshot.isMuted else {
             return .failed

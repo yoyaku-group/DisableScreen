@@ -817,15 +817,13 @@ public struct LowBatteryGuardService {
         // one moment the operator could have been told (gate finding, `Sleep
         // path discards the undo's attention report`).
         if let undo = undoLidCloseBeforeSleep(&outcome) {
-            // MERGE, never discard: the pre-release undo may have left an
-            // incomplete result while THIS one resumed a process, and keeping
-            // only the first lost the newly resumed pid and the `changed`
-            // signal (gate finding, `Second protective undo loses newly resumed
-            // processes`).
+            // The merge itself (pids, `changed`, notice, persistence failure)
+            // already happened inside the helper via `TickOutcome.merging`.
+            // What is left for the CALLER is promoting the inner attention
+            // request to the outer outcome: the Mac may sleep before another
+            // tick can raise it, so dropping it loses the one moment the
+            // operator could have been told.
             if undo.shouldNotify { outcome.shouldNotify = true }
-            // Keep the SECOND result when the first is nil, so a pid resumed
-            // only by this pass is not lost.
-            if outcome.lidClose == nil { outcome.lidClose = undo }
         }
         let r = sleeper.sleepNow()
         outcome.sleepAttempted = true
@@ -857,36 +855,10 @@ public struct LowBatteryGuardService {
         // first left unconfirmed, so assigning only when nil lost the newly
         // resumed pid and the `changed` signal (gate finding, `Second protective
         // undo is not merged into the reported outcome`).
-        if let first = outcome.lidClose {
-            var merged = first
-            for pid in undo.resumedPids where !merged.resumedPids.contains(pid) {
-                merged.resumedPids.append(pid)
-            }
-            for pid in undo.unverifiedPids where !merged.unverifiedPids.contains(pid) {
-                merged.unverifiedPids.append(pid)
-            }
-            if undo.changed { merged.changed = true }
-            if undo.shouldNotify { merged.shouldNotify = true }
-            // The NOTICE is what gives `shouldNotify` a meaning: merging the
-            // flag without its payload produced a notification request with a
-            // nil notice, so the operator was never told WHICH thing needed
-            // attention (gate finding, `Second undo's notice is omitted from the
-            // merged outcome`).
-            if let notice = undo.notice { merged.notice = notice }
-            if undo.audioRestoreFailed { merged.audioRestoreFailed = true }
-            // A persistence failure in EITHER pass must survive the merge:
-            // dropping it told the caller the journal was fine while stale
-            // process ownership remained on disk, so a later undo could resume
-            // a process the operator had paused (gate finding, `Second
-            // protective undo loses persistence failure`).
-            if undo.journalSaveFailed { merged.journalSaveFailed = true }
-            if undo.audioDeviceGone { merged.audioDeviceGone = true }
-            // The SECOND result is the later truth about `undo`.
-            merged.undo = undo.undo ?? merged.undo
-            outcome.lidClose = merged
-        } else {
-            outcome.lidClose = undo
-        }
+        // The rule and every field it must carry live on `TickOutcome.merging`:
+        // this was written by hand here, then copied into the thermal path,
+        // and the copy was still losing fields two rounds later.
+        outcome.lidClose = outcome.lidClose.map { $0.merging(undo) } ?? undo
         return undo
     }
 

@@ -1250,19 +1250,26 @@ exécutées.
 ```
 $ arch -arm64 swift build && arch -arm64 swift test
 RunClosedCoreTests           194 passed
-RunClosedPersistenceTests     84 passed
-RunClosedMacSystemTests      328 passed
+RunClosedPersistenceTests     86 passed
+RunClosedMacSystemTests      380 passed
 RunClosedHelperSupportTests   40 passed
 RunClosedAppTests             11 passed
                              ---
-                             657 passed at the time of that run; 663 after the eight gate fixes — see below
+                             711 passed, 0 failures, 0 warnings, rc=0
 ```
 
-80 tests nouveaux pour ce lot : 19 de politique pure
-(`LidCloseActionPolicyTests`), 34 de service sur fakes
-(`LidCloseActionServiceTests`), 16 de persistance (11 `LidCloseActionJournalTests`
-+ 5 `LidCloseActionSettingsKillSwitchTests`), 11 de backstop
-(`BackstopLidCloseTests`). Le total de la suite passe donc de 577 (L3) à 657.
+The earlier runs in this section reported 657, then 663, then 671 — each one
+true of the commit it ran on. The final figure is **711**, measured on the head
+that closes the lot (`cfdbb35` plus the two round-7 fixes), and it is the only
+number that describes the code being merged.
+
+134 tests nouveaux pour ce lot, mesurés de 577 (L3) à 711 : politique pure
+(`LidCloseActionPolicyTests`), service sur fakes (`LidCloseActionServiceTests`,
+dont les deux contre-épreuves de la ronde 7), persistance
+(`LidCloseActionJournalTests` + `LidCloseActionSettingsKillSwitchTests`),
+backstop (`BackstopLidCloseTests`) et le script de mesure. Le détail par tour de
+relecture est dans les sections ci-dessous ; le chiffre qui compte est celui de
+la suite au head fusionné.
 Aucun test ne touche la sortie audio réelle ni ne signale un vrai processus :
 les fakes sont la seule voie, et le brief l'exige.
 
@@ -1460,6 +1467,25 @@ côté sûr, déjà testé.
 
 Suite après ce tour : **675/675**, 0 warning, rc=0. Bundle assemblé, plists
 lints, `codesign --verify --strict` OK.
+
+### Tour 7 — deux WARN, deux vrais défauts, et un « 0 warning » qui était faux
+
+Le tour 7 a couvert les 17 commits que les six tours précédents n'avaient pas
+vus. **0 CRITICAL, 2 WARN** — les deux réels.
+
+| Défaut | Correction | Contre-épreuve |
+|---|---|---|
+| **La sortie audio par défaut peut changer ENTRE les deux lectures.** `isCurrentDefaultOutputRecorded` lit une fois, `confirmExistingMute` une seconde, et la seconde retombait sur `record.audio.first` quand la sortie courante était inconnue ou non enregistrée. Elle lisait alors l'appareil A comme muet pendant que B, celui qui joue vraiment, restait audible — et sur une lecture en échec, elle annonçait un succès sur une sortie qu'elle ne savait même pas nommer. | Plus aucun repli. Sortie courante inconnue ou non enregistrée ⇒ `.unconfirmed` : l'écriture a peut-être abouti (donc pas `.failed`, qui promet une machine intacte), mais l'appareil qui joue n'est pas prouvé muet. Le tick suivant voit B non enregistré et le coupe par `muteDefaultOutput`, le chemin prévu pour ça. | `testADefaultSwitchBetweenCheckAndConfirmIsNotReportedAsMuted` — la lecture est scriptée pour que la sonde voie A et la confirmation voie B. Sans le correctif : `.applied` sur une machine audible. Avec : ni l'un ni l'autre. |
+| **La seconde annulation thermique était jetée.** Le chemin de veille thermique gardait le premier résultat (`if lidCloseUndo == nil`) alors que `cfdbb35` venait de corriger exactement ce motif sur le chemin batterie. Une seconde passe qui reprend un processus laissé « à vérifier » disparaissait du rapport : pid, signal `changed` et avis perdus, pour un rapport qui se lit comme une récupération propre. | La règle et TOUS ses champs vivent désormais une seule fois, dans `TickOutcome.merging`. Les trois copies manuelles (batterie, thermique, backstop) l'appellent. C'est la duplication qui avait laissé la copie thermique fausse deux tours après le correctif de la copie batterie. | `testTheSecondThermalUndoIsMergedNotDiscarded` — le processus reprend à la 5ᵉ tentative, donc uniquement dans la seconde passe du tick qui épuise le veto. Sans le correctif : `resumedPids` vide et `changed` faux. |
+
+**Et le « 0 warning » de `cfdbb35` était faux.** Le message de commit annonçait
+« 0 failures, 0 warnings » ; une compilation complète en signale deux, tous
+deux présents dans ce commit : un `if/else` inatteignable après un `continue`
+(dans le bloc des `unverified`), et un `var guardService` jamais muté. Les deux
+sont corrigés ici. Leçon : un compte de warnings doit être lu dans la sortie du
+compilateur, pas recopié depuis un message de commit.
+
+Suite au head fusionné : **711/711**, 0 échec, 0 warning, rc=0.
 
 ### Le coupe-circuit, éprouvé et non affirmé
 
