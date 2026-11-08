@@ -484,11 +484,23 @@ public struct LidCloseActionService {
             case .some(true):
                 stopped.append(entry)
             case .some(false):
-                // Proved still running after the retries: the signal did not
-                // take, so the journal must not claim it (an entry would let
-                // the undo `SIGCONT` a process we never paused).
+                // Still running after the bounded retries. That is NOT proof
+                // the signal will never take: `SIGSTOP` is asynchronous and a
+                // delivered one can land later, which would leave the app
+                // suspended with no entry to recover it (gate finding, `A stop
+                // confirmation timeout discards a pending signal's recovery
+                // entry`).
+                //
+                // So the entry moves to `unverified` rather than disappearing:
+                // the undo still refuses to `SIGCONT` a process it cannot prove
+                // is stopped-or-pending (`SIGCONT` on a running process is a
+                // harmless no-op, but the identity rule is what protects us),
+                // and the operator is told something needs checking.
                 failed.append(entry.pid)
                 record.stopped.removeAll { $0.pid == entry.pid }
+                if !record.unverified.contains(where: { $0.pid == entry.pid }) {
+                    record.unverified.append(entry)
+                }
             case .none:
                 // UNREADABLE is not proof of absence: keep the entry so the
                 // undo can re-prove and reverse it.
@@ -567,7 +579,7 @@ public struct LidCloseActionService {
             if scratch.changed { outcome.changed = true }
             outcome.evaluation.journalBefore = record
         }
-        if !decision.pauseApps, !record.stopped.isEmpty {
+        if !decision.pauseApps, !record.stopped.isEmpty || !record.unverified.isEmpty {
             var scratch = TickOutcome(evaluation: evaluation)
             resumeStoppedProcesses(journal: &record, into: &scratch)
             if scratch.changed { outcome.changed = true }
@@ -737,6 +749,17 @@ public struct LidCloseActionService {
         journal record: inout LidCloseActionJournal.Record,
         into outcome: inout TickOutcome
     ) {
+        // A device concluded gone that has COME BACK still muted: re-adopt it
+        // here, not only in `apply`. A session can end (or the master switch be
+        // turned off) while the device is unplugged, and its return must still
+        // be restorable — otherwise it stays muted indefinitely (gate finding,
+        // `Returning audio devices are never restored during undo`).
+        if record.audio == nil, let stranded = record.unverifiedAudio,
+           let back = readOutputTwice(uid: stranded.deviceUID), back.isMuted != false {
+            record.audio = stranded
+            record.unverifiedAudio = nil
+            journal.save(record)
+        }
         guard let prior = record.audio else { return }
         // An unreadable device is NOT a removed device. The apply path already
         // makes that distinction; the undo path used to collapse both into

@@ -968,6 +968,67 @@ final class LidCloseActionServiceTests: XCTestCase {
         XCTAssertEqual(rig.audio.writes.count, 1)
     }
 
+
+    /// A `SIGSTOP` whose effect lands AFTER the bounded observation window must
+    /// not lose its recovery entry: a wait that expires is not proof the signal
+    /// will never take (gate finding, `A stop confirmation timeout discards a
+    /// pending signal's recovery entry`). The entry moves to "to verify".
+    func testStopThatTimesOutIsKeptAsToVerify() {
+        var rig = makeRig(apps: [(4711, "Slack", 1_700_000_000)])
+        // Never reads as stopped, but the signal WAS delivered.
+        rig.processes.stopVisibleAfterReads = 9_999
+
+        _ = stepEnclosed(&rig, settings(mute: false, pause: true))
+
+        let rec = rig.journal.load()
+        XCTAssertTrue(rec.stopped.isEmpty, "a timeout must not stay a resume candidate")
+        XCTAssertEqual(rec.unverified.map { $0.pid }, [4711],
+                       "the entry for a pending signal was destroyed")
+    }
+
+    /// An outstanding process notice survives the operator turning the pause
+    /// switch off: the first pass moves it to "to verify", and later passes
+    /// must keep saying so instead of going quiet (gate finding, `Individual
+    /// pause-switch disable silences outstanding process notices`).
+    func testDisablingThePauseSwitchKeepsReportingToVerify() {
+        var rig = makeRig()
+        rig.journal.save(.init(unverified: [
+            .init(pid: 4711, startSeconds: 1, startMicroseconds: 0,
+                  bootID: "A", path: "/x", appName: "Slack")]))
+
+        let out = stepEnclosed(&rig, settings(mute: true, pause: false))
+
+        XCTAssertTrue(out.shouldNotify, "the outstanding notice went silent")
+        XCTAssertEqual(out.unverifiedPids, [4711])
+    }
+
+    /// A device that comes back after being concluded gone is restored by the
+    /// UNDO too, not only by an apply: a session can end while it is unplugged
+    /// (gate finding, `Returning audio devices are never restored during undo`).
+    func testReturningDeviceIsRestoredDuringUndo() {
+        let rig0 = makeRig(muted: false)
+        var rig = rig0
+        rig.journal.save(.init(unverifiedAudio: .init(
+            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5)))
+        rig.audio.device?.isMuted = true
+
+        let undo = rig.service.undoAll()
+
+        XCTAssertEqual(rig.audio.device?.isMuted, false, "the returned device stayed muted")
+        XCTAssertEqual(undo.undo, .restored)
+        XCTAssertTrue(rig.journal.load().isEmpty)
+    }
+
+    /// Reopening a journal must carry the audio obligation forward, or a new
+    /// session silently forgets a device that has not come back yet.
+    func testReopeningCarriesUnverifiedAudioForward() {
+        let prior = LidCloseActionJournal.Record(unverifiedAudio: .init(
+            deviceUID: "BuiltInSpeakerDevice", wasMuted: false, volume: 0.5))
+        let next = prior.reopened(sessionID: UUID(), at: "2026-11-08T10:00:00Z")
+        XCTAssertEqual(next.unverifiedAudio?.deviceUID, "BuiltInSpeakerDevice",
+                       "reopening dropped the audio obligation")
+    }
+
     // MARK: — Journal durability
 
     /// The journal is written BEFORE the effect: the file on disk carries the

@@ -186,7 +186,13 @@ public struct LidCloseActionJournal: Sendable {
         /// before it was reported.
         public func reopened(sessionID: UUID?, at instant: String) -> Record {
             Record(sessionID: sessionID, startedAt: instant,
-                   audio: audio, stopped: stopped, unverified: unverified)
+                   audio: audio, stopped: stopped, unverified: unverified,
+                   // `unverifiedAudio` is an OBLIGATION, and reopening must not
+                   // drop it: a device concluded gone whose return has not been
+                   // dealt with yet would otherwise be forgotten the moment a
+                   // new session starts (gate finding, `reopened efface
+                   // unverifiedAudio`).
+                   unverifiedAudio: unverifiedAudio)
         }
 
         /// Tolerant decoding: a key added by a later version must not make an
