@@ -537,7 +537,15 @@ public struct SessionService {
         // lid closed it can go down on the next instruction. Anything ordered
         // after it is best-effort — the restoration ADR 026 promises would
         // race the suspend it exists to precede. So it runs here, once, for
-        // every end of session (expiry, End, quit, backstop minute).
+        // every end of session that goes through this method: expiry, the End
+        // button, the CLI's `session end`, and the backstop minute.
+        //
+        // Quit is the FOURTH end-of-session path and does NOT come through
+        // here: it tears the session down in `AppMain` and runs its own
+        // `undoAll()` before `restoreIfOwned` (with a corrupt-journal guard
+        // this seam does not need, since it never releases the flag). Two
+        // paths, each already correct; this one exists because expiry had no
+        // way to see the release it was racing.
         //
         // Unconditional, deliberately: `restoreLidCloseEffects` is the same
         // readings-free `undoAll()` the battery and thermal sleep paths use.
@@ -545,6 +553,13 @@ public struct SessionService {
         // anything, so "no effects applied" costs a file read and nothing
         // else. Making it conditional would mean re-deriving here a question
         // the journal already answers.
+        //
+        // Synchronous, inside the caller's `LidWriteLock`: a hung CoreAudio
+        // read would hold the lock for its duration. That is not new — the
+        // battery and thermal sleep paths already run the same `undoAll()`
+        // inside `lockedTick`, under the same lock — and the alternative (a
+        // restoration that is not finished when the flag falls) is exactly the
+        // defect this method exists to close.
         pendingRestoration = restoreLidCloseEffects?()
         let result = applyLid(false, initiator)
         switch result {
