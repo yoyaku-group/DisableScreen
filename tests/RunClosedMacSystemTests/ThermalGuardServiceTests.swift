@@ -788,7 +788,7 @@ final class ThermalGuardServiceTests: XCTestCase {
     /// the two writes. This fake makes the latch file unwritable exactly when
     /// the sleep is attempted, which is after the first write landed and before
     /// the second one starts.
-    func testTheSecondWriteOfAReleaseStillReportsFailureSilently() {
+    func testASecondWriteThatFailsFirstStillAnnouncesOnce() {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("runclosed-thermal-silent-\(UUID().uuidString)",
                                     isDirectory: true)
