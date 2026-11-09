@@ -33,6 +33,13 @@ final class ThermalGuardServiceTests: XCTestCase {
         init(_ v: Bool?) { value = v }
     }
 
+    /// Captures what the guard told the operator, so a test can assert on the
+    /// announcement itself instead of inferring it from a boolean.
+    private final class LineBox: @unchecked Sendable {
+        private(set) var all: [String] = []
+        func append(_ line: String) { all.append(line) }
+    }
+
     private final class FakeSleeper: SystemSleeper, @unchecked Sendable {
         var count = 0
         var rc: Int32 = 0
@@ -709,45 +716,61 @@ final class ThermalGuardServiceTests: XCTestCase {
 
     /// A release persists the latch twice in one tick: once before
     /// `pmset sleepnow` for durability, then again at the end of `step()`. Only
-    /// the first may write to stderr, otherwise an operator reading the one
-    /// line that matters sees it duplicated by the retry.
+    /// the first may warn, otherwise the one line an operator actually needs
+    /// appears twice for a single condition.
     ///
-    /// Asserted on the contract rather than on captured output: the second
-    /// write must still record the failure in the outcome (so callers keep the
-    /// signal) while suppressing the announcement. If someone later drops
-    /// `announce: false` from the `step()` call, the outcome assertions below
-    /// still pass but the duplication returns — this test pins the flag
-    /// assignment, and the release-path test above pins that the first write
-    /// speaks.
+    /// Captured through the injected `warn` sink, so this fails if someone
+    /// drops `announce: false` from the `step()` call — the regression it
+    /// exists to catch is the duplicate line, not the outcome flag.
     func testAReleasePersistsTwiceAndOnlyTheFirstAnnounces() {
-        var rig = makeRig(state: .serious, flag: true, ownedBoot: "A")
-        rig.world.lidClosed = true
-        rig.world.externalDisplay = false
-
-        // Walk to the release so both writes of the tick happen.
-        var released = false
-        for minute in stride(from: 0, through: 30, by: 5) {
-            rig.world.now = 1_000 + Double(minute) * 60
-            let out = rig.service.step()
-            if out.mutation != nil { released = true }
-        }
-        XCTAssertTrue(released, "the sustained-heat release must fire in this rig")
-
-        // The flag describes the LAST write: an unwritable latch is still
-        // reported as failed at the end of the tick, never silently cleared by
-        // the second write succeeding out of order.
-        let after = rig.service.step()
-        XCTAssertFalse(after.latchSaveFailed,
-                       "the latch is writable here, so the last write of the tick succeeded")
-    }
-
-    /// `announce: false` must suppress the stderr line without losing the
-    /// failure signal. Exercised through the public surface: a release against
-    /// an unwritable latch still reports `latchSaveFailed` even though only the
-    /// first of its two writes is allowed to speak.
-    func testTheSecondWriteOfAReleaseStillReportsFailureSilently() {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("runclosed-thermal-announce-\(UUID().uuidString)",
+                                    isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+
+        // A latch path that cannot be written, so BOTH writes of the release
+        // tick fail and each one would speak if the throttle were missing.
+        let blocker = dir.appendingPathComponent("blocker")
+        try? Data("not a directory".utf8).write(to: blocker)
+        let unwritable = blocker.appendingPathComponent("nested/thermal_guard.json")
+
+        let lidStore = OwnedLidAssertion(currentBootID: "A",
+                                         url: dir.appendingPathComponent("owned_lid.json"))
+        lidStore.save(.init(bootID: "A", ownedEnabled: true, referenceState: "on"))
+        let flagBox = FlagBox(true)
+        let sleeper = FakeSleeper()
+        let world = World(state: .critical, lidClosed: true, externalDisplay: false)
+        let lines = LineBox()
+        var service = ThermalGuardService(
+            lidService: LidMutationService(bootID: "A", mutator: FakeLid(flag: flagBox),
+                                           store: lidStore,
+                                           priorProvider: { flagBox.value }),
+            latchStore: ThermalLatchStore(url: unwritable),
+            thermalProvider: { world.state },
+            lidClosedProvider: { world.lidClosed },
+            externalDisplayProvider: { world.externalDisplay },
+            monotonic: { world.now },
+            sleeper: sleeper,
+            auditLog: ThermalAuditLog(url: dir.appendingPathComponent("thermal_audit.jsonl")),
+            warn: { lines.append($0) })
+
+        let out = service.step()
+        XCTAssertTrue(out.latchSaveFailed, "the latch cannot be written in this rig")
+
+        let latchLines = lines.all.filter { $0.contains("latch could NOT be written") }
+        XCTAssertEqual(latchLines.count, 1,
+                       "a release writes the latch twice; the warning must appear once. "
+                       + "Got \(latchLines.count): \(latchLines)")
+    }
+
+    /// `announce: false` must never turn a NEW failure into silence. It only
+    /// suppresses a repeat: the first write of the tick spoke, so the second
+    /// has nothing to add. If the first write SUCCEEDED and the second fails,
+    /// the operator has been told nothing yet and must still get the line.
+    func testTheSecondWriteOfAReleaseStillReportsFailureSilently() {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("runclosed-thermal-silent-\(UUID().uuidString)",
                                     isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
@@ -762,6 +785,7 @@ final class ThermalGuardServiceTests: XCTestCase {
         let flagBox = FlagBox(true)
         let sleeper = FakeSleeper()
         let world = World(state: .serious, lidClosed: true, externalDisplay: false)
+        let lines = LineBox()
         var service = ThermalGuardService(
             lidService: LidMutationService(bootID: "A", mutator: FakeLid(flag: flagBox),
                                            store: lidStore,
@@ -772,11 +796,14 @@ final class ThermalGuardServiceTests: XCTestCase {
             externalDisplayProvider: { world.externalDisplay },
             monotonic: { world.now },
             sleeper: sleeper,
-            auditLog: ThermalAuditLog(url: dir.appendingPathComponent("thermal_audit.jsonl")))
+            auditLog: ThermalAuditLog(url: dir.appendingPathComponent("thermal_audit.jsonl")),
+            warn: { lines.append($0) })
 
         let out = service.step()
         XCTAssertTrue(out.latchSaveFailed,
                       "the last write of the tick failed, so the flag must still be set")
+        XCTAssertFalse(lines.all.filter { $0.contains("latch could NOT be written") }.isEmpty,
+                       "and the operator must still be told, because nothing spoke before")
     }
 
     /// The consequence, stated as a test: with the latch unwritable the
