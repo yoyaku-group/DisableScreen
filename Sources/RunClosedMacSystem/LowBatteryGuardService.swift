@@ -744,6 +744,14 @@ public struct LowBatteryGuardService {
             // overwrites the protective undo's result`). Keep what happened.
             // `nil` means no lid-close layer was wired, which needs no marker;
             // otherwise the protective undo's own result stays as the outcome.
+            //
+            // Still fold the SESSION step's restoration first: it runs before
+            // the battery step in this same section, so a session that expired
+            // in this tick already restored (and may have failed to). Dropping
+            // it reported a cleaner tick than what happened — the same loss
+            // this branch was written to avoid, one step earlier (review round
+            // 4, `Protective-undo branch drops the session step's restoration`).
+            outcome.lidClose = Self.folding(sessionStep, into: outcome.lidClose)
         } else {
             // The session step may have ended a session in this same tick, and
             // it restored the lid-close effects before letting the flag fall:
