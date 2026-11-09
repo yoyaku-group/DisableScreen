@@ -41,47 +41,57 @@ jobs:
         run: swift build --build-tests
 
       - name: Test
-        # `swift test` discovers ZERO of this repository's tests on the
-        # Swift 6.4.2 / Xcode 27 toolchain: it reports
-        # "Test run with 0 tests in 0 suites passed" while 329 XCTest methods
-        # exist across five bundles. That is a green check proving nothing —
-        # the migration to a self-hosted Mac must not inherit it.
+        # `swift test` DOES run this repository's XCTest suites on Swift 6.4.2 /
+        # Xcode 27 — verified 2026-11-09 on the real toolchain: 89 + 388 + 40 +
+        # 194 + 11 = 722 cases, and a deliberately failing test case makes the
+        # command exit 1. The per-bundle `xcrun xctest` loop this replaced was
+        # built on a misreading: the toolchain also prints
         #
-        # Each bundle is therefore executed explicitly through `xcrun xctest`,
-        # which discovers and runs them correctly (verified locally: 106 + 153 +
-        # 46 + 13 + 11 = 329 tests, 0 failures). The per-bundle count is asserted
-        # so a future toolchain that silently stops discovering tests fails the
-        # job instead of passing it quietly.
+        #     ✔ Test run with 0 tests in 0 suites passed
+        #
+        # once per target, because it runs the swift-testing harness as well and
+        # this package declares no swift-testing suites. Those lines say nothing
+        # about XCTest, which runs fully beside them.
+        #
+        # The floor stays: it is what catches a future toolchain that silently
+        # stops discovering, which is the failure the old loop was really
+        # guarding against. A floor below the observed 722 rather than an exact
+        # contract, so adding or removing a test does not break CI.
         run: |
           set -euo pipefail
-          total=0
-          for bundle in .build/debug/*Tests.xctest; do
-            # Write the transcript to a file first. Piping it into `grep -q`
-            # makes grep exit on first match and close the pipe, so the writing
-            # `printf` dies with EPIPE — and under `pipefail` that aborts the
-            # step even though the assertion itself passed. (Live failure,
-            # 2026-11-08: "printf: Broken pipe" failed a bundle that reported
-            # 283 tests with 0 failures.)
-            out="$RUNNER_TEMP/$(basename "$bundle").log"
-            xcrun xctest "$bundle" >"$out" 2>&1
-            tail -3 "$out"
-            n="$(grep -oE 'Executed [0-9]+ tests, with [0-9]+ failures' "$out" \
-                 | tail -1 | grep -oE '[0-9]+' | head -1)"
-            # A bundle that ran nothing is a failure, not a pass.
-            test -n "${n:-}" && test "$n" -gt 0 \
-              || { echo "::error::$bundle executed no tests"; exit 1; }
-            grep -qE 'with 0 failures' "$out" \
-              || { echo "::error::$bundle reported failures"; exit 1; }
-            total=$((total + n))
-          done
-          echo "total tests executed: $total"
-          # Belt-and-braces floor. The per-bundle `n -gt 0` assertion above is
-          # the real guard (it is what catches the "swift test discovers 0"
-          # regression); this only catches a partial discovery. Deliberately a
-          # floor below the observed 329 rather than an exact contract, so adding
-          # or removing a test does not break CI.
-          test "$total" -ge 300 \
-            || { echo "::error::only $total tests ran, expected at least 300"; exit 1; }
+          out="$RUNNER_TEMP/swift-test.log"
+          # `swift test` already exits non-zero on a failing case; the floor
+          # below is the discovery guard. Capture the status separately so the
+          # count is always analysed before the step's outcome is decided.
+          set +e
+          swift test 2>&1 | tee "$out"
+          rc=${PIPESTATUS[0]}
+          set -e
+          # One "Executed N tests" line matters per bundle: the one that follows
+          # `Test Suite '<X>Tests.xctest' passed|failed`. Every other such line
+          # belongs to an individual suite inside that bundle and must not be
+          # summed. Verified against the real toolchain (2026-11-09): 89 + 388 +
+          # 40 + 194 + 11 = 722.
+          total="$(awk '
+            /^Test Suite .*Tests\.xctest. (passed|failed) at/ { want = 1; next }
+            want && /Executed [0-9]+ tests/ {
+              line = $0
+              sub(/.*Executed /, "", line)
+              sub(/ tests.*/, "", line)
+              sum += line; n++; want = 0
+            }
+            END { print sum + 0 }
+          ' "$out")"
+          bundles="$(grep -cE '^Test Suite .*Tests\.xctest. (passed|failed) at' "$out" || true)"
+          echo "bundles=$bundles total_tests=$total"
+          test "$rc" -eq 0 \
+            || { echo "::error::swift test failed (rc=$rc)"; exit "$rc"; }
+          test "${total:-0}" -gt 0 \
+            || { echo "::error::swift test executed no tests"; exit 1; }
+          test "$bundles" -ge 5 \
+            || { echo "::error::only $bundles test bundles ran, expected 5"; exit 1; }
+          test "$total" -ge 700 \
+            || { echo "::error::only $total tests ran, expected at least 700"; exit 1; }
 
       - name: Assemble app bundle (ad-hoc signed)
         run: bash scripts/build-runclosed-app.sh
