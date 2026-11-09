@@ -263,7 +263,10 @@ public struct ThermalGuardService {
         }
 
         if record != before {
-            persistLatch(record, into: &outcome)
+            // The second write of a release tick. `performRelease` already
+            // announced a failed write above, and both writes target the same
+            // record, so speaking twice would only duplicate the warning.
+            persistLatch(record, into: &outcome, announce: false)
         }
         return outcome
     }
@@ -275,11 +278,21 @@ public struct ThermalGuardService {
     /// broken — the one failure mode that makes an untouched machine look
     /// protected while it is not. `TickOutcome.latchSaveFailed` carries the same
     /// fact to the callers that can do something with it.
+    ///
+    /// `announce` throttles the stderr line to at most one per tick. A release
+    /// writes the latch twice — once before `pmset sleepnow` for durability, and
+    /// again at the end of `performRelease` — so without this the retry repeats
+    /// a warning the first write already made, and the one line an operator
+    /// actually needs gets buried. The flag itself is ASSIGNED, never OR-ed: it
+    /// must describe the LAST write of the tick, so a transient failure whose
+    /// retry succeeded does not keep reporting the guard as broken.
     @discardableResult
     private func persistLatch(_ record: ThermalLatchStore.Record,
-                              into outcome: inout TickOutcome) -> Bool {
-        guard !latchStore.save(record) else { return true }
-        outcome.latchSaveFailed = true
+                              into outcome: inout TickOutcome,
+                              announce: Bool = true) -> Bool {
+        let ok = latchStore.save(record)
+        outcome.latchSaveFailed = !ok
+        guard !ok, announce else { return ok }
         FileHandle.standardError.write(Data(
             ("[RunClosed] thermal: latch could NOT be written to \(latchStore.url.path) "
              + "— the sustained-heat clock will restart every tick, so the "
@@ -407,7 +420,9 @@ public struct ThermalGuardService {
             }
             // Persist the latch BEFORE asking for sleep: the Mac may go down
             // right after `sleepnow`, and a latch written afterwards would be
-            // lost with it (journal before change, ADR 009/022).
+            // lost with it (journal before change, ADR 009/022). This is the
+            // FIRST of this tick's two writes, so it is the one allowed to
+            // speak; `step()` re-persists afterwards with `announce: false`.
             persistLatch(record, into: &outcome)
             // Best effort, and NOT retried: the protective action already
             // happened, so the Mac follows its normal power management and

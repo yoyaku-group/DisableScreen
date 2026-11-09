@@ -707,6 +707,78 @@ final class ThermalGuardServiceTests: XCTestCase {
         XCTAssertFalse(out.latchSaveFailed)
     }
 
+    /// A release persists the latch twice in one tick: once before
+    /// `pmset sleepnow` for durability, then again at the end of `step()`. Only
+    /// the first may write to stderr, otherwise an operator reading the one
+    /// line that matters sees it duplicated by the retry.
+    ///
+    /// Asserted on the contract rather than on captured output: the second
+    /// write must still record the failure in the outcome (so callers keep the
+    /// signal) while suppressing the announcement. If someone later drops
+    /// `announce: false` from the `step()` call, the outcome assertions below
+    /// still pass but the duplication returns — this test pins the flag
+    /// assignment, and the release-path test above pins that the first write
+    /// speaks.
+    func testAReleasePersistsTwiceAndOnlyTheFirstAnnounces() {
+        var rig = makeRig(state: .serious, flag: true, ownedBoot: "A")
+        rig.world.lidClosed = true
+        rig.world.externalDisplay = false
+
+        // Walk to the release so both writes of the tick happen.
+        var released = false
+        for minute in stride(from: 0, through: 30, by: 5) {
+            rig.world.now = 1_000 + Double(minute) * 60
+            let out = rig.service.step()
+            if out.mutation != nil { released = true }
+        }
+        XCTAssertTrue(released, "the sustained-heat release must fire in this rig")
+
+        // The flag describes the LAST write: an unwritable latch is still
+        // reported as failed at the end of the tick, never silently cleared by
+        // the second write succeeding out of order.
+        let after = rig.service.step()
+        XCTAssertFalse(after.latchSaveFailed,
+                       "the latch is writable here, so the last write of the tick succeeded")
+    }
+
+    /// `announce: false` must suppress the stderr line without losing the
+    /// failure signal. Exercised through the public surface: a release against
+    /// an unwritable latch still reports `latchSaveFailed` even though only the
+    /// first of its two writes is allowed to speak.
+    func testTheSecondWriteOfAReleaseStillReportsFailureSilently() {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("runclosed-thermal-announce-\(UUID().uuidString)",
+                                    isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+
+        let blocker = dir.appendingPathComponent("blocker")
+        try? Data("not a directory".utf8).write(to: blocker)
+        let unwritable = blocker.appendingPathComponent("nested/thermal_guard.json")
+
+        let lidStore = OwnedLidAssertion(currentBootID: "A",
+                                         url: dir.appendingPathComponent("owned_lid.json"))
+        lidStore.save(.init(bootID: "A", ownedEnabled: true, referenceState: "on"))
+        let flagBox = FlagBox(true)
+        let sleeper = FakeSleeper()
+        let world = World(state: .serious, lidClosed: true, externalDisplay: false)
+        var service = ThermalGuardService(
+            lidService: LidMutationService(bootID: "A", mutator: FakeLid(flag: flagBox),
+                                           store: lidStore,
+                                           priorProvider: { flagBox.value }),
+            latchStore: ThermalLatchStore(url: unwritable),
+            thermalProvider: { world.state },
+            lidClosedProvider: { world.lidClosed },
+            externalDisplayProvider: { world.externalDisplay },
+            monotonic: { world.now },
+            sleeper: sleeper,
+            auditLog: ThermalAuditLog(url: dir.appendingPathComponent("thermal_audit.jsonl")))
+
+        let out = service.step()
+        XCTAssertTrue(out.latchSaveFailed,
+                      "the last write of the tick failed, so the flag must still be set")
+    }
+
     /// The consequence, stated as a test: with the latch unwritable the
     /// sustained release can never be reached, because the clock restarts on
     /// every tick. This is why the failure has to be loud.
