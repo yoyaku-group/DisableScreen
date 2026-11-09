@@ -800,8 +800,19 @@ public struct RecoveryBackstopService {
             ?? LidCloseActionService.Readings.lidEnvironment()
         readings.session = sessionService.load()
         guard var service = guardService.lidCloseActions else { return }
-        let outcome = service.step(readings: readings)
+        var outcome = service.step(readings: readings)
         guardService.lidCloseActions = service
+        // The session step in this minute may have ended a session, and
+        // `SessionService.release()` restored the lid-close effects BEFORE
+        // letting the flag fall. Merge that recovery in: dropping it would
+        // report a cleaner minute than what happened, losing the resumed pids
+        // and the `changed` signal that decide whether this minute is audited.
+        //
+        // MERGE through `TickOutcome.merging`, never field by field: the one
+        // place that knows the full field list.
+        if let restored = sessionService.lastRestoration {
+            outcome = restored.merging(outcome)
+        }
         report.lidClose = outcome
         report.lidCloseStepRan = true
         // A no-op minute writes nothing: the audit is once per ACTION, not once

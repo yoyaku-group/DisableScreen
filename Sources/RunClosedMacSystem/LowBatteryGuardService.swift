@@ -358,6 +358,18 @@ public struct LowBatteryGuardService {
         }
         let outcome = service.step(readings: r)
         lidCloseActions = service
+        // The session step above may have ENDED a session, and
+        // `SessionService.release()` restored the lid-close effects before it
+        // let the flag fall. That restoration is a real recovery this tick
+        // performed, and dropping it here would report a cleaner tick than
+        // what happened — losing a resumed pid and its `changed` signal.
+        //
+        // MERGE, never replace, and through `TickOutcome.merging` so the field
+        // list lives in exactly one place: this was hand-written at four sites
+        // once and lost a field at two of them.
+        if let restored = sessionService?.lastRestoration {
+            return restored.merging(outcome)
+        }
         return outcome
     }
 

@@ -1231,60 +1231,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let lock = LidWriteLock()
             let (step, lidClose) = lock.withLock {
                 () -> (SessionService.StepOutcome, LidCloseActionService.TickOutcome) in
-                // ORDER: restore BEFORE expiring the session.
+                // The ADR 026 restoration is NOT sequenced here any more: it
+                // lives inside `SessionService.release()`, the one path every
+                // end of session runs through.
                 //
-                // `service.step()` expires a due session and releases the flag,
-                // and with the lid closed macOS can suspend immediately after
-                // that release — before the lid-close step ever runs, leaving
-                // the sound muted and the apps frozen across the sleep. This is
-                // the plan's own rule ("at the end of a session: undo the
-                // effects, then release"), and the battery, thermal and quit
-                // paths already apply it; this new path was the one that did
-                // not (gate finding, `Session expiry can sleep before restoring
-                // paused apps`).
+                // It used to be guessed at from this side, and the guess could
+                // not be made safe. This tick re-derived "is the flag about to
+                // fall?" from the deadline and needed a one-second margin to
+                // narrow the race; a deadline crossing between that read and
+                // the step still released the flag with the effects applied,
+                // and with the lid closed macOS can suspend right there. The
+                // service has no such window — it restores at the top of the
+                // release it is performing.
                 //
-                // So: undo-only pass FIRST (with the session still alive, which
-                // is what makes it an `undo` rather than a fresh `apply`), then
-                // the session step, then the ordinary pass on the post-step
-                // session so a still-valid session keeps its actions.
+                // What stays here is the ordinary pass, on the session as the
+                // step left it: a still-valid session keeps its actions, and a
+                // finished one has already been restored by the seam.
                 var lidCloseService = LidCloseActionService.live(bootID: bootID)
-                // Only a step that WILL release the flag needs the pre-emptive
-                // undo. Doing it on EVERY tick resumed the paused apps and
-                // restored the audio, then the ordinary pass paused and muted
-                // them again one line later — an audible, visible flicker every
-                // few seconds for the whole extra time the session lasted (gate
-                // finding, `Session-only ticks resume paused apps before pausing
-                // them again`).
-                //
-                // `expireIfDue()` is a pure READ here (it computes whether the
-                // deadline passed and mutates nothing), so asking it first costs
-                // one clock read and lets the undo happen exactly when the
-                // session is about to be released.
-                // A deadline that passes BETWEEN this check and the step would
-                // let `step()` release the flag with the effects still applied:
-                // with the lid closed macOS can sleep right there, leaving the
-                // Mac muted with apps frozen (gate finding, `Deadline crossing
-                // bypasses restoration before session expiry`). The window
-                // cannot be closed from here, so it is narrowed: a session due
-                // within the next second counts as due now.
-                let now = service.currentNow()
-                let live = service.load()
-                let dueNow: Bool
-                if let live {
-                    let dueByPolicy = SessionPolicy.dueReason(live, now: now) != nil
-                    let dueByMargin = live.endsAtWall.map {
-                        $0.timeIntervalSince(now.wall) <= 1
-                    } ?? false
-                    dueNow = dueByPolicy || dueByMargin
-                } else {
-                    dueNow = false
-                }
-                let pre = dueNow ? lidCloseService.undoAll() : nil
                 let s = service.step()
                 var readings = LidCloseActionService.Readings.lidEnvironment()
                 readings.session = service.load()
                 let post = lidCloseService.step(readings: readings)
-                let merged = pre.map { $0.merging(post) } ?? post
+                // MERGE, never replace: the seam's restoration and this pass
+                // can each resume a different process, and keeping only one
+                // loses the other's `changed` signal and any notice.
+                let merged = s.lidClose.map { $0.merging(post) } ?? post
                 return (s, merged)
             }
             DispatchQueue.main.async {
