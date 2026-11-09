@@ -66,6 +66,75 @@ final class SessionServiceTests: XCTestCase {
         func sleep(for seconds: TimeInterval) { advance(seconds) }
     }
 
+    /// A fake output device, just enough for the undo to have something real
+    /// to restore. Deliberately NOT the full `FakeAudio` from
+    /// `LidCloseActionServiceTests`: this suite is about ONE ordering
+    /// question, and a richer double would hide which line does the work.
+    private final class FakeAudio: AudioOutputBackend, @unchecked Sendable {
+        var device: AudioOutputSnapshot?
+        var writes: [Bool] = []
+        init(muted: Bool = false) {
+            device = AudioOutputSnapshot(uid: "dev-1", isMuted: muted,
+                                         volume: 0.5, canMute: true)
+        }
+        func readDefaultOutput() -> AudioOutputSnapshot? { device }
+        func readOutput(uid: String) -> AudioOutputSnapshot? {
+            guard var d = device, d.uid == uid else { return nil }
+            d.isMuted = device?.isMuted
+            return d
+        }
+        @discardableResult
+        func setMuted(_ muted: Bool, uid: String) -> Bool {
+            writes.append(muted)
+            device?.isMuted = muted
+            return true
+        }
+    }
+
+    /// No process is ever touched. These tests are about audio restoration
+    /// ordering; a process table would add a second obligation whose outcome
+    /// could mask the one under test.
+    private struct NoProcesses: ProcessPauseBackend {
+        func runningProcesses(matching appNames: [String]) -> ProcessScan? {
+            ProcessScan(targets: [])
+        }
+        func identity(ofPid pid: Int32) -> LidCloseActionJournal.ProcessIdentity? { nil }
+        @discardableResult func stop(pid: Int32) -> Bool { false }
+        @discardableResult func resume(pid: Int32) -> Bool { false }
+        func isStopped(pid: Int32) -> Bool? { false }
+    }
+
+    /// The restoration seam, wired to the probe.
+    ///
+    /// A CLASS, not captured `var`s: `restoreLidCloseEffects` is `@Sendable`
+    /// (the service may be touched from the guard queue), so a closure over
+    /// the test's own mutable locals is a data race the compiler correctly
+    /// refuses. The probe is the test's own record of WHEN the seam ran and
+    /// what the flag read at that instant.
+    private final class RestoreProbe: @unchecked Sendable {
+        let journal: LidCloseActionJournal
+        let audio: FakeAudio
+        let flag: FlagBox
+        /// The flag as it read INSIDE the seam. `nil` = the seam never ran.
+        var flagAtRestore: Bool?
+        var calls = 0
+
+        init(journal: LidCloseActionJournal, audio: FakeAudio, flag: FlagBox) {
+            self.journal = journal
+            self.audio = audio
+            self.flag = flag
+        }
+
+        /// The closure handed to `SessionService`.
+        func seam() -> @Sendable () -> LidCloseActionService.TickOutcome? {
+            { [self] in
+                calls += 1
+                flagAtRestore = flag.value
+                return SessionServiceTests.undo(journal: journal, audio: audio)
+            }
+        }
+    }
+
     private struct Rig {
         var service: SessionService
         let lid: FakeLid
@@ -74,6 +143,7 @@ final class SessionServiceTests: XCTestCase {
         let sessionStore: SessionStore
         let latchStore: LowBatteryLatchStore
         let lidStore: OwnedLidAssertion
+        let journal: LidCloseActionJournal
     }
 
     private let epoch = Date(timeIntervalSince1970: 1_800_000_000)
@@ -121,8 +191,28 @@ final class SessionServiceTests: XCTestCase {
                 makeMutator: { lid },
                 store: lidStore,
                 priorProvider: { flagBox.value }))
+        let journal = LidCloseActionJournal(url: dir.appendingPathComponent("lid_close.json"))
         return Rig(service: service, lid: lid, flag: flagBox, clock: clock,
-                   sessionStore: sessionStore, latchStore: latchStore, lidStore: lidStore)
+                   sessionStore: sessionStore, latchStore: latchStore, lidStore: lidStore,
+                   journal: journal)
+    }
+
+    /// Drive the REAL lid-close undo over the rig's journal and a fake device.
+    ///
+    /// The production `undoAll()` path, not a stand-in: the assertion that the
+    /// device comes back audible is then a statement about the code that runs
+    /// on the operator's Mac, not about a mock agreeing with itself.
+    private static func undo(journal: LidCloseActionJournal,
+                             audio: FakeAudio) -> LidCloseActionService.TickOutcome {
+        var service = LidCloseActionService(
+            journal: journal,
+            auditLog: LidCloseActionAuditLog(url: journal.url
+                .deletingLastPathComponent().appendingPathComponent("audit.jsonl")),
+            audio: audio,
+            processes: NoProcesses(),
+            bootID: "A",
+            wallClock: { Date(timeIntervalSince1970: 1_800_000_000) })
+        return service.undoAll()
     }
 
     // MARK: — Start
@@ -698,6 +788,156 @@ final class SessionServiceTests: XCTestCase {
         rig.flag.value = false
         XCTAssertEqual(rig.service.reconcileOrphan(), .cleared)
         XCTAssertNil(rig.sessionStore.load())
+    }
+
+    // MARK: — ADR 026 restoration before the release
+
+    /// The heart of the lot: the lid-close effects are given back BEFORE the
+    /// flag falls.
+    ///
+    /// `applyLid(false)` is the write that lets the Mac sleep. With the lid
+    /// closed macOS can suspend on the very next instruction, so restoration
+    /// ordered after it is restoration that may never run — the Mac goes down
+    /// muted with Slack frozen and comes back in that state.
+    ///
+    /// The proof is temporal, not structural: the seam records the flag as it
+    /// reads at that instant. If the order were reversed, it would read
+    /// `false` there.
+    func testExpiryRestoresLidCloseEffectsBeforeReleasingTheFlag() {
+        var rig = makeRig(flag: false, ownedBoot: "A")
+        guard case .success(.started) = rig.service.start(for: 3600) else {
+            return XCTFail("expected a started session")
+        }
+        let audio = FakeAudio(muted: true)
+        rig.journal.save(.init(audio: [.init(deviceUID: "dev-1",
+                                             wasMuted: false, volume: 0.5)]))
+        let probe = RestoreProbe(journal: rig.journal, audio: audio, flag: rig.flag)
+        rig.service.restoreLidCloseEffects = probe.seam()
+
+        rig.clock.advance(3601)
+        let step = rig.service.step()
+
+        XCTAssertEqual(step.expiry, .ended(.released))
+        XCTAssertEqual(probe.calls, 1, "the seam ran exactly once")
+        XCTAssertEqual(probe.flagAtRestore, true,
+                       "the effects must be restored while the Mac is still kept awake")
+        XCTAssertEqual(rig.lid.calls.last, false, "the release is the LAST write")
+        XCTAssertEqual(audio.device?.isMuted, false, "the device is audible again")
+        XCTAssertEqual(step.lidClose?.undo, .restored, "the restoration reaches the outcome")
+    }
+
+    /// The same order on the End button. It shares `release()` with expiry, and
+    /// the point of testing it separately is that a future caller cannot get
+    /// one path right and the other wrong.
+    func testEndByOperatorAlsoRestoresBeforeReleasing() {
+        var rig = makeRig(flag: false, ownedBoot: "A")
+        guard case .success(.started) = rig.service.start(for: 3600) else {
+            return XCTFail("expected a started session")
+        }
+        let audio = FakeAudio(muted: true)
+        rig.journal.save(.init(audio: [.init(deviceUID: "dev-1",
+                                             wasMuted: false, volume: 0.5)]))
+        let probe = RestoreProbe(journal: rig.journal, audio: audio, flag: rig.flag)
+        rig.service.restoreLidCloseEffects = probe.seam()
+        guard case .success(.released) = rig.service.end() else {
+            return XCTFail("expected a release")
+        }
+        XCTAssertEqual(probe.flagAtRestore, true)
+        XCTAssertEqual(rig.lid.calls.last, false)
+        XCTAssertEqual(audio.device?.isMuted, false)
+    }
+
+    /// A release that is REFUSED before writing still restores. The boundary
+    /// case that makes "restore only when we win" wrong: `flagLeftOn` still
+    /// ends the session, so the effects must go even though no write happened.
+    func testAReleaseRefusedNotOwnedStillRestores() {
+        var rig = makeRig(flag: true, ownedBoot: "OLD")
+        rig.sessionStore.save(KeepAwakeSession(
+            startedAt: epoch, endsAtWall: epoch.addingTimeInterval(60),
+            endsAtContinuous: ContinuousClockTimebase.nanoseconds(fromSeconds: 1_060), bootID: "A"))
+        let audio = FakeAudio(muted: true)
+        rig.journal.save(.init(audio: [.init(deviceUID: "dev-1",
+                                             wasMuted: false, volume: 0.5)]))
+        let probe = RestoreProbe(journal: rig.journal, audio: audio, flag: rig.flag)
+        rig.service.restoreLidCloseEffects = probe.seam()
+
+        rig.clock.advance(61)
+        let step = rig.service.step()
+
+        XCTAssertEqual(step.expiry, .ended(.flagLeftOn))
+        XCTAssertEqual(rig.lid.calls, [], "the gate refused: no write")
+        XCTAssertEqual(probe.calls, 1)
+        XCTAssertEqual(audio.device?.isMuted, false,
+                       "the session ended, so its effects end with it")
+    }
+
+    /// A tick that ends nothing restores nothing.
+    ///
+    /// The seam is unconditional inside `release()`, which is correct — but
+    /// `lastRestoration` is an instance property, and without clearing it a
+    /// later non-due step would report the PREVIOUS release's restoration as
+    /// if it had just happened. That would raise an operator notice every
+    /// minute for an event that already ended.
+    func testAStepThatEndsNothingReportsNoRestoration() {
+        var rig = makeRig(flag: false, ownedBoot: "A")
+        guard case .success(.started) = rig.service.start(for: 3600) else {
+            return XCTFail("expected a started session")
+        }
+        let audio = FakeAudio(muted: true)
+        rig.journal.save(.init(audio: [.init(deviceUID: "dev-1",
+                                             wasMuted: false, volume: 0.5)]))
+        let probe = RestoreProbe(journal: rig.journal, audio: audio, flag: rig.flag)
+        rig.service.restoreLidCloseEffects = probe.seam()
+
+        rig.clock.advance(3601)
+        XCTAssertNotNil(rig.service.step().lidClose, "the due step restores")
+        rig.clock.advance(1)
+        let idle = rig.service.step()
+        XCTAssertEqual(idle.expiry, .noSession)
+        XCTAssertNil(idle.lidClose,
+                     "a step that ends nothing must not replay the last restoration")
+    }
+
+    /// A CORRUPT journal must never hold the flag up.
+    ///
+    /// The restoration now runs before `applyLid(false)` inside `release()`, so
+    /// anything that could throw or block in `undoAll()` would delay — or
+    /// prevent — the one write that lets the Mac sleep. The quit path carries
+    /// an explicit corrupt-journal guard for that reason; this seam does not,
+    /// so it must be proved that none is needed: `undoAll()` on an unreadable
+    /// file returns a no-op and the release proceeds.
+    ///
+    /// The GARBAGE file is what makes this a real test: an empty journal is the
+    /// easy case (`.nothingToDo` without reading anything), while a damaged one
+    /// is what the guard exists for.
+    ///
+    /// This is a REGRESSION GUARD, not an ordering proof — it passes with the
+    /// restoration on either side of the write, because it asks whether a
+    /// damaged journal blocks the release, not where the undo sits. Its job is
+    /// to fail the day someone adds "if the journal is corrupt, do not
+    /// release", which is exactly the guard the quit path needs and this seam
+    /// must never grow.
+    func testACorruptJournalDoesNotStopTheRelease() {
+        var rig = makeRig(flag: false, ownedBoot: "A")
+        guard case .success(.started) = rig.service.start(for: 3600) else {
+            return XCTFail("expected a started session")
+        }
+        // Not JSON, not an empty file: the decoder must fail.
+        try? Data("{ this is not a journal".utf8).write(to: rig.journal.url)
+        let audio = FakeAudio(muted: false)
+        let probe = RestoreProbe(journal: rig.journal, audio: audio, flag: rig.flag)
+        rig.service.restoreLidCloseEffects = probe.seam()
+
+        rig.clock.advance(3601)
+        let step = rig.service.step()
+
+        XCTAssertEqual(probe.calls, 1, "the restoration was attempted")
+        XCTAssertTrue(rig.journal.isCorrupt,
+                      "the file really is unreadable — otherwise this proves nothing")
+        XCTAssertEqual(step.expiry, .ended(.released),
+                       "a damaged journal must not block the release")
+        XCTAssertEqual(rig.flag.value, false, "the flag came off")
+        XCTAssertNil(rig.sessionStore.load(), "the session is over")
     }
 
     /// A due session is expiry's, not reconciliation's: `step()` ends it and

@@ -30,6 +30,35 @@ public struct SessionService {
     public var ownershipRecord: @Sendable () -> (bootID: String, ownedEnabled: Bool)
     /// Apply the lid flag through the gated `LidMutationService`.
     public var applyLid: (Bool, LidMutationService.Initiator) -> Result<OperationResult, LidMutationError>
+    /// Reverse the ADR 026 lid-close effects. Runs at the TOP of `release()`,
+    /// before the flag falls.
+    ///
+    /// This belongs HERE and not in each caller. Every way a session can end
+    /// — expiry, the End button, quit, the ADR 024 backstop minute — funnels
+    /// through `release()`, and with the lid closed macOS can suspend the
+    /// instant that write lands. Restoration ordered after the release is
+    /// therefore restoration that may never run: the Mac goes down muted with
+    /// Slack frozen and comes back in exactly that state.
+    ///
+    /// Three callers used to re-derive the order by hand. The session-only
+    /// tick could only GUESS (a one-second margin around the deadline,
+    /// because it cannot see the release it is racing); the other two did not
+    /// try. One seam, one order, no guessing.
+    ///
+    /// `nil` means the caller has no lid-close feature wired (the CLI paths
+    /// that never apply these effects), not "skip the restoration".
+    public var restoreLidCloseEffects: (@Sendable () -> LidCloseActionService.TickOutcome?)?
+    /// What the `release()` in progress just reported.
+    ///
+    /// PRIVATE, and cleared at the TOP of `step()`: the restoration travels to
+    /// the caller inside the `StepOutcome` that call RETURNS, never as
+    /// instance state someone else can read out of context. An earlier
+    /// version exposed a public property for this and the gate was right to
+    /// flag it — a plain field stays set until the next `step()`, so a reader
+    /// arriving after a tick that ended nothing would replay the previous
+    /// release's recovery: a repeated notice, a spurious `changed` signal, and
+    /// a backstop auditing a minute that ended nothing.
+    private var pendingRestoration: LidCloseActionService.TickOutcome?
 
     public init(
         store: SessionStore,
@@ -38,7 +67,8 @@ public struct SessionService {
         wallClock: @escaping @Sendable () -> Date = { Date() },
         observedFlag: @escaping @Sendable () -> Bool?,
         ownershipRecord: @escaping @Sendable () -> (bootID: String, ownedEnabled: Bool),
-        applyLid: @escaping (Bool, LidMutationService.Initiator) -> Result<OperationResult, LidMutationError>
+        applyLid: @escaping (Bool, LidMutationService.Initiator) -> Result<OperationResult, LidMutationError>,
+        restoreLidCloseEffects: (@Sendable () -> LidCloseActionService.TickOutcome?)? = nil
     ) {
         self.store = store
         self.latchStore = latchStore
@@ -47,6 +77,7 @@ public struct SessionService {
         self.observedFlag = observedFlag
         self.ownershipRecord = ownershipRecord
         self.applyLid = applyLid
+        self.restoreLidCloseEffects = restoreLidCloseEffects
     }
 
     /// Live wiring against the production pmset backend.
@@ -64,7 +95,16 @@ public struct SessionService {
                 bootID: bootID,
                 makeMutator: { LidAssertions.live() },
                 store: OwnedLidAssertion(currentBootID: bootID),
-                priorProvider: { PowerReadback.lidStayAwake() }))
+                priorProvider: { PowerReadback.lidStayAwake() }),
+            // A FRESH service per call, exactly like `applyLid`: the journal
+            // is the authority and it lives on disk, so two RESTORATIONS in
+            // one tick see each other's work and neither caches a stale
+            // record. `live()` is I/O free (CoreAudio and libproc are touched
+            // only by the calls, not the init).
+            restoreLidCloseEffects: {
+                var service = LidCloseActionService.live(bootID: bootID)
+                return service.undoAll()
+            })
     }
 
     /// The ONE wiring from a session's lid request to the gated
@@ -247,11 +287,28 @@ public struct SessionService {
     /// turn it off with `end`. An AUTOMATIC End (`byOperator: false`) is not a
     /// human and still releases only a flag RunClosed owns.
     public mutating func end(byOperator: Bool = false) -> Result<SessionEndOutcome, SessionError> {
+        endReturningRestoration(byOperator: byOperator).map(\.outcome)
+    }
+
+    /// `end()`, plus the ADR 026 restoration it performed.
+    ///
+    /// The popup and the CLI need the second value: ending a session restores
+    /// the sound and resumes the apps BEFORE the flag falls, and an operator
+    /// who ended a session manually is exactly the person who wants to know
+    /// that a device could not be un-muted. Returning it with the result keeps
+    /// it out of instance state, which is where it went wrong once.
+    public mutating func endReturningRestoration(byOperator: Bool = false)
+        -> Result<(outcome: SessionEndOutcome,
+                   lidClose: LidCloseActionService.TickOutcome?), SessionError> {
         guard let session = store.load() else { return .failure(.noSession) }
+        // Cleared first, for the same reason `step()` does it: what the
+        // outcome carries must belong to THIS call.
+        pendingRestoration = nil
         let initiator: LidMutationService.Initiator = session.isIndefinite && byOperator
             ? .operatorCommand
             : Self.releaseInitiator(for: session, currentBootID: continuous.bootID)
-        return .success(release(session, initiator: initiator, clearingRecord: true))
+        let outcome = release(session, initiator: initiator, clearingRecord: true)
+        return .success((outcome, pendingRestoration))
     }
 
     // MARK: — Expiry (caller holds LidWriteLock — called from the guard tick)
@@ -365,11 +422,22 @@ public struct SessionService {
         /// The boot the step ran on, so a caller that only has the outcome
         /// (the ADR 024 backstop writes an audit line) does not have to guess.
         public var bootID: String = ""
+        /// What the ADR 026 restoration reported when this step ended a
+        /// session, `nil` when no release ran.
+        ///
+        /// Carried, never merged by hand: a caller that ALSO ran an undo (the
+        /// battery and thermal sleep paths) must merge through
+        /// `TickOutcome.merging` so no resumed pid or notice is lost — the
+        /// rule that used to be re-implemented at four call sites and lost a
+        /// field at two of them.
+        public var lidClose: LidCloseActionService.TickOutcome?
 
-        public init(expiry: ExpiryOutcome, reconciled: ReconcileOutcome? = nil, bootID: String = "") {
+        public init(expiry: ExpiryOutcome, reconciled: ReconcileOutcome? = nil,
+                    bootID: String = "", lidClose: LidCloseActionService.TickOutcome? = nil) {
             self.expiry = expiry
             self.reconciled = reconciled
             self.bootID = bootID
+            self.lidClose = lidClose
         }
     }
 
@@ -378,10 +446,20 @@ public struct SessionService {
     /// with the low-battery guard switched off, the app runs it alone, so a
     /// deadline never depends on the battery guard being enabled.
     public mutating func step() -> StepOutcome {
+        // Cleared first: a restoration reported by an EARLIER release must not
+        // be carried into a step that ended nothing, or the operator gets a
+        // notice about events this tick never touched.
+        pendingRestoration = nil
         let expiry = expireIfDue()
         let reconciled = expiry == .notDue ? reconcileOrphan() : nil
         return StepOutcome(expiry: expiry, reconciled: reconciled,
-                           bootID: continuous.bootID)
+                           bootID: continuous.bootID,
+                           // `expireIfDue()` only reaches `release()` when the
+                           // deadline is actually due, so a non-due step
+                           // reports `nil` — which is the truth: nothing was
+                           // restored because nothing was ended.
+                           //
+                           lidClose: pendingRestoration)
     }
 
     // MARK: — Low-battery interplay (ADR 023 §4)
@@ -453,6 +531,36 @@ public struct SessionService {
     private mutating func release(_ session: KeepAwakeSession,
                                   initiator: LidMutationService.Initiator,
                                   clearingRecord: Bool) -> SessionEndOutcome {
+        // FIRST: give the machine back its sound and its apps.
+        //
+        // `applyLid(false)` is the write that lets the Mac sleep, and with the
+        // lid closed it can go down on the next instruction. Anything ordered
+        // after it is best-effort — the restoration ADR 026 promises would
+        // race the suspend it exists to precede. So it runs here, once, for
+        // every end of session that goes through this method: expiry, the End
+        // button, the CLI's `session end`, and the backstop minute.
+        //
+        // Quit is the FOURTH end-of-session path and does NOT come through
+        // here: it tears the session down in `AppMain` and runs its own
+        // `undoAll()` before `restoreIfOwned` (with a corrupt-journal guard
+        // this seam does not need, since it never releases the flag). Two
+        // paths, each already correct; this one exists because expiry had no
+        // way to see the release it was racing.
+        //
+        // Unconditional, deliberately: `restoreLidCloseEffects` is the same
+        // readings-free `undoAll()` the battery and thermal sleep paths use.
+        // On an empty journal it returns `.nothingToDo` without touching
+        // anything, so "no effects applied" costs a file read and nothing
+        // else. Making it conditional would mean re-deriving here a question
+        // the journal already answers.
+        //
+        // Synchronous, inside the caller's `LidWriteLock`: a hung CoreAudio
+        // read would hold the lock for its duration. That is not new — the
+        // battery and thermal sleep paths already run the same `undoAll()`
+        // inside `lockedTick`, under the same lock — and the alternative (a
+        // restoration that is not finished when the flag falls) is exactly the
+        // defect this method exists to close.
+        pendingRestoration = restoreLidCloseEffects?()
         let result = applyLid(false, initiator)
         switch result {
         case .success(let op) where op.state == .verified:

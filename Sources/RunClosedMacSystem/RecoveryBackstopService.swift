@@ -800,8 +800,18 @@ public struct RecoveryBackstopService {
             ?? LidCloseActionService.Readings.lidEnvironment()
         readings.session = sessionService.load()
         guard var service = guardService.lidCloseActions else { return }
-        let outcome = service.step(readings: readings)
+        var outcome = service.step(readings: readings)
         guardService.lidCloseActions = service
+        // The session step in this minute may have ended a session, and
+        // `SessionService.release()` restored the lid-close effects BEFORE
+        // letting the flag fall. Fold that recovery in: dropping it would
+        // report a cleaner minute than what happened, losing the resumed pids
+        // and the `changed` signal that decide whether this minute is audited.
+        //
+        // The restoration travels on the `StepOutcome` that call RETURNED —
+        // never from instance state, which is where a stale value once
+        // produced a notice every 60 s for an event already over.
+        outcome = LowBatteryGuardService.folding(report.session, into: outcome) ?? outcome
         report.lidClose = outcome
         report.lidCloseStepRan = true
         // A no-op minute writes nothing: the audit is once per ACTION, not once

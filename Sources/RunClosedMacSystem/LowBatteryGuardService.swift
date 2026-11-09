@@ -259,7 +259,7 @@ public struct LowBatteryGuardService {
         if case .ended(let end)? = sessionStep?.expiry {
             outcome.sessionEndedNaturally = end.stopsKeepingAwake
         }
-        outcome.lidClose = runLidCloseStep()
+        outcome.lidClose = Self.folding(sessionStep, into: runLidCloseStep())
         return outcome
     }
 
@@ -359,6 +359,28 @@ public struct LowBatteryGuardService {
         let outcome = service.step(readings: r)
         lidCloseActions = service
         return outcome
+    }
+
+    /// Fold the session step's ADR 026 restoration into this tick's lid-close
+    /// result.
+    ///
+    /// The session step may have ENDED a session, and `SessionService.release()`
+    /// restores the sound and resumes the apps BEFORE it lets the flag fall.
+    /// That restoration is a real recovery this tick performed: dropping it
+    /// reports a cleaner tick than what happened and loses a resumed pid and
+    /// its `changed` signal.
+    ///
+    /// MERGE, never replace, and through `TickOutcome.merging` so the field
+    /// list lives in exactly one place — this was hand-written at four sites
+    /// once and lost a field at two of them.
+    ///
+    /// ONE helper for the three ticks that can end a session, so no caller
+    /// gets the merge right and its twin wrong.
+    static func folding(_ sessionStep: SessionService.StepOutcome?,
+                        into outcome: LidCloseActionService.TickOutcome?)
+        -> LidCloseActionService.TickOutcome? {
+        guard let restored = sessionStep?.lidClose else { return outcome }
+        return outcome.map { restored.merging($0) } ?? restored
     }
 
     /// The unconditional undo (ADR 026), for a caller about to make the Mac
@@ -722,8 +744,20 @@ public struct LowBatteryGuardService {
             // overwrites the protective undo's result`). Keep what happened.
             // `nil` means no lid-close layer was wired, which needs no marker;
             // otherwise the protective undo's own result stays as the outcome.
+            //
+            // Still fold the SESSION step's restoration first: it runs before
+            // the battery step in this same section, so a session that expired
+            // in this tick already restored (and may have failed to). Dropping
+            // it reported a cleaner tick than what happened — the same loss
+            // this branch was written to avoid, one step earlier (review round
+            // 4, `Protective-undo branch drops the session step's restoration`).
+            outcome.lidClose = Self.folding(sessionStep, into: outcome.lidClose)
         } else {
-            outcome.lidClose = runLidCloseStep()
+            // The session step may have ended a session in this same tick, and
+            // it restored the lid-close effects before letting the flag fall:
+            // fold that recovery in rather than report a cleaner tick than
+            // what happened.
+            outcome.lidClose = Self.folding(sessionStep, into: runLidCloseStep())
         }
         return outcome
     }

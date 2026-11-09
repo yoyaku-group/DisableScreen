@@ -1942,3 +1942,51 @@ un appareil muet** — est maintenant appliquée aussi là. C'est le septième s
 Après ce correctif, je clos le lot. Les WARN restants sont l'ordre
 expiration/restauration, consigné comme résidu avec sa cause racine et le lot
 qu'il demande.
+
+## L5 — Restauration capot avant le relâchement (ADR 026, résidu 1)
+
+Suite complète, `arch -arm64`, dans le worktree de la mission :
+
+```
+$ arch -arm64 swift test
+...
+Suite : **727/727**, 0 échec, 0 warning, rc=0.
+```
+
+Sept tests de plus que les 720 de RC4 : quatre pour l'ordre et le rapport, un pour le journal corrompu, deux ailleurs.
+
+### Tests ajoutés
+
+| Test | Ce qu'il prouve |
+|---|---|
+| `testExpiryRestoresLidCloseEffectsBeforeReleasingTheFlag` | Le seam tourne quand le drapeau lit encore ON ; la sortie audio redevient audible ; la restauration atteint l'outcome |
+| `testEndByOperatorAlsoRestoresBeforeReleasing` | Même ordre au bouton Fin — un appelant ne peut pas en avoir un bon et l'autre faux |
+| `testAReleaseRefusedNotOwnedStillRestores` | Un refus `notOwned` termine la session, donc ses effets doivent partir même sans écriture |
+| `testAStepThatEndsNothingReportsNoRestoration` | Un pas qui ne termine rien ne rejoue pas la restauration précédente |
+| `testACorruptJournalDoesNotStopTheRelease` | Un journal illisible ne bloque pas le relâchement (il vérifie `isCorrupt` d'abord) |
+
+### Contre-épreuve
+
+Inverser l'ordre (`applyLid(false)` avant la restauration) fait échouer les deux tests d'ordre :
+
+```
+error: testExpiryRestoresLidCloseEffectsBeforeReleasingTheFlag :
+  XCTAssertEqual failed: ("Optional(false)") is not equal to ("Optional(true)")
+  - the effects must be restored while the Mac is still kept awake
+error: testEndByOperatorAlsoRestoresBeforeReleasing :
+  XCTAssertEqual failed: ("Optional(false)") is not equal to ("Optional(true)")
+Executed 54 tests, with 2 failures
+```
+
+Rejouée après le refactor de la ronde 1, avec le même résultat — la contre-épreuve n'a pas été invalidée par la restructuration.
+
+`testACorruptJournalDoesNotStopTheRelease` est un garde de RÉGRESSION, pas une preuve d'ordre : il passe avec la restauration des deux côtés de l'écriture. Son rôle est d'échouer le jour où quelqu'un ajoute « si le journal est corrompu, ne relâche pas » — garde dont le quit a besoin et que ce seam ne doit jamais avoir.
+
+### NOT_TESTED (matériel)
+
+- Le suspend que ce correctif devance : une fermeture réelle du capot à l'instant de l'expiration. Non mesurable sans PR5.
+- Un CoreAudio qui pendrait sous `LidWriteLock` : résidu consigné, mérite son propre lot (watchdog).
+
+### Relecture `ai-review-gate`
+
+Six rondes, **PASS** au head final `d30e4ca`, 0 CRITICAL, 0 WARN. Le détail des corrections et des réfutations est dans `PROGRESS.md`, section L5.
