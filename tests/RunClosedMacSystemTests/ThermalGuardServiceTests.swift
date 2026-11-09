@@ -788,7 +788,14 @@ final class ThermalGuardServiceTests: XCTestCase {
     /// the two writes. This fake makes the latch file unwritable exactly when
     /// the sleep is attempted, which is after the first write landed and before
     /// the second one starts.
-    func testASecondWriteThatFailsFirstStillAnnouncesOnce() {
+    func testASecondWriteThatFailsFirstStillAnnouncesOnce() throws {
+        // This failure is injected with a POSIX permission bit. root ignores
+        // those bits, so the second write would succeed and the test would fail
+        // for a reason unrelated to the code under test. The suite runs as a
+        // normal user in CI; skip rather than assert something false if it ever
+        // does not.
+        try XCTSkipIf(geteuid() == 0, "POSIX permissions do not bind root")
+
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("runclosed-thermal-silent-\(UUID().uuidString)",
                                     isDirectory: true)
