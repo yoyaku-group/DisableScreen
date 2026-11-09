@@ -33,12 +33,33 @@ final class ThermalGuardServiceTests: XCTestCase {
         init(_ v: Bool?) { value = v }
     }
 
+    /// Captures what the guard told the operator, so a test can assert on the
+    /// announcement itself instead of inferring it from a boolean.
+    private final class LineBox: @unchecked Sendable {
+        private(set) var all: [String] = []
+        func append(_ line: String) { all.append(line) }
+    }
+
     private final class FakeSleeper: SystemSleeper, @unchecked Sendable {
         var count = 0
         var rc: Int32 = 0
         func sleepNow() -> (rc: Int32, output: String?) {
             count += 1
             return (rc, nil)
+        }
+    }
+
+    /// Runs a side effect at the exact moment the release asks the Mac to
+    /// sleep — i.e. between the pre-sleep latch write and the trailing one in
+    /// `step()`.
+    private final class BreakingSleeper: SystemSleeper, @unchecked Sendable {
+        private(set) var count = 0
+        private let onSleep: () -> Void
+        init(_ onSleep: @escaping () -> Void) { self.onSleep = onSleep }
+        func sleepNow() -> (rc: Int32, output: String?) {
+            count += 1
+            onSleep()
+            return (0, nil)
         }
     }
 
@@ -705,6 +726,118 @@ final class ThermalGuardServiceTests: XCTestCase {
         var rig = makeRig(state: .serious, flag: true, ownedBoot: "A")
         let out = rig.service.step()
         XCTAssertFalse(out.latchSaveFailed)
+    }
+
+    /// A release persists the latch twice in one tick: once before
+    /// `pmset sleepnow` for durability, then again at the end of `step()`. Only
+    /// the first may warn, otherwise the one line an operator actually needs
+    /// appears twice for a single condition.
+    ///
+    /// Captured through the injected `warn` sink, so this fails if someone
+    /// drops `announce: false` from the `step()` call — the regression it
+    /// exists to catch is the duplicate line, not the outcome flag.
+    func testAReleasePersistsTwiceAndOnlyTheFirstAnnounces() {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("runclosed-thermal-announce-\(UUID().uuidString)",
+                                    isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+
+        // A latch path that cannot be written, so BOTH writes of the release
+        // tick fail and each one would speak if the throttle were missing.
+        let blocker = dir.appendingPathComponent("blocker")
+        try? Data("not a directory".utf8).write(to: blocker)
+        let unwritable = blocker.appendingPathComponent("nested/thermal_guard.json")
+
+        let lidStore = OwnedLidAssertion(currentBootID: "A",
+                                         url: dir.appendingPathComponent("owned_lid.json"))
+        lidStore.save(.init(bootID: "A", ownedEnabled: true, referenceState: "on"))
+        let flagBox = FlagBox(true)
+        let sleeper = FakeSleeper()
+        let world = World(state: .critical, lidClosed: true, externalDisplay: false)
+        let lines = LineBox()
+        var service = ThermalGuardService(
+            lidService: LidMutationService(bootID: "A", mutator: FakeLid(flag: flagBox),
+                                           store: lidStore,
+                                           priorProvider: { flagBox.value }),
+            latchStore: ThermalLatchStore(url: unwritable),
+            thermalProvider: { world.state },
+            lidClosedProvider: { world.lidClosed },
+            externalDisplayProvider: { world.externalDisplay },
+            monotonic: { world.now },
+            sleeper: sleeper,
+            auditLog: ThermalAuditLog(url: dir.appendingPathComponent("thermal_audit.jsonl")),
+            warn: { lines.append($0) })
+
+        let out = service.step()
+        XCTAssertTrue(out.latchSaveFailed, "the latch cannot be written in this rig")
+
+        let latchLines = lines.all.filter { $0.contains("latch could NOT be written") }
+        XCTAssertEqual(latchLines.count, 1,
+                       "a release writes the latch twice; the warning must appear once. "
+                       + "Got \(latchLines.count): \(latchLines)")
+    }
+
+    /// `announce: false` must never turn a NEW failure into silence. It only
+    /// suppresses a repeat: the first write of the tick spoke, so the second
+    /// has nothing to add.
+    ///
+    /// The scenario under test is precisely "first write succeeds, second
+    /// fails". `performRelease` writes the latch, calls `attemptSleep`, and
+    /// `step()` writes it again afterwards — so the sleeper is the seam between
+    /// the two writes. This fake makes the latch file unwritable exactly when
+    /// the sleep is attempted, which is after the first write landed and before
+    /// the second one starts.
+    func testASecondWriteThatFailsFirstStillAnnouncesOnce() throws {
+        // This failure is injected with a POSIX permission bit. root ignores
+        // those bits, so the second write would succeed and the test would fail
+        // for a reason unrelated to the code under test. The suite runs as a
+        // normal user in CI; skip rather than assert something false if it ever
+        // does not.
+        try XCTSkipIf(geteuid() == 0, "POSIX permissions do not bind root")
+
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("runclosed-thermal-silent-\(UUID().uuidString)",
+                                    isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        addTeardownBlock { try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: dir.path) }
+
+        let latchURL = dir.appendingPathComponent("thermal_guard.json")
+        let lidStore = OwnedLidAssertion(currentBootID: "A",
+                                         url: dir.appendingPathComponent("owned_lid.json"))
+        lidStore.save(.init(bootID: "A", ownedEnabled: true, referenceState: "on"))
+        let flagBox = FlagBox(true)
+        let world = World(state: .critical, lidClosed: true, externalDisplay: false)
+        let lines = LineBox()
+        // Withdraw write permission on the directory the moment the release
+        // asks for sleep: the pre-sleep write has already landed, the trailing
+        // write in `step()` has not started.
+        let releaser = BreakingSleeper { [dir] in
+            try? FileManager.default.setAttributes([.posixPermissions: 0o555],
+                                                   ofItemAtPath: dir.path)
+        }
+        var service = ThermalGuardService(
+            lidService: LidMutationService(bootID: "A", mutator: FakeLid(flag: flagBox),
+                                           store: lidStore,
+                                           priorProvider: { flagBox.value }),
+            latchStore: ThermalLatchStore(url: latchURL),
+            thermalProvider: { world.state },
+            lidClosedProvider: { world.lidClosed },
+            externalDisplayProvider: { world.externalDisplay },
+            monotonic: { world.now },
+            sleeper: releaser,
+            auditLog: ThermalAuditLog(url: dir.appendingPathComponent("thermal_audit.jsonl")),
+            warn: { lines.append($0) })
+
+        let out = service.step()
+
+        XCTAssertEqual(releaser.count, 1, "the release must have attempted the sleep")
+        XCTAssertTrue(out.latchSaveFailed,
+                      "the trailing write failed, so the flag must describe it")
+        XCTAssertEqual(lines.all.filter { $0.contains("latch could NOT be written") }.count, 1,
+                       "nothing spoke before this failure, so the operator must be told once")
     }
 
     /// The consequence, stated as a test: with the latch unwritable the

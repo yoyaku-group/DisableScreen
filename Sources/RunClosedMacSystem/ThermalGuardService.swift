@@ -71,6 +71,10 @@ public struct ThermalGuardService {
     /// Vetoes counted in THIS process, so an unwritable latch cannot reset the
     /// budget every tick and refuse the release forever.
     private var vetoesThisProcess = 0
+    /// Where the operator-facing warning goes. Injected so a test can assert
+    /// that a duplicated warning is actually suppressed, instead of asserting
+    /// on the flag and hoping. Production writes to stderr.
+    public var warn: @Sendable (String) -> Void
 
     public init(
         lidService: LidMutationService,
@@ -82,7 +86,8 @@ public struct ThermalGuardService {
         sleeper: any SystemSleeper,
         auditLog: ThermalAuditLog = ThermalAuditLog(),
         sessionService: SessionService? = nil,
-        lidCloseActions: LidCloseActionService? = nil
+        lidCloseActions: LidCloseActionService? = nil,
+        warn: @escaping @Sendable (String) -> Void = ThermalGuardService.writeToStandardError
     ) {
         self.lidService = lidService
         self.latchStore = latchStore
@@ -94,6 +99,13 @@ public struct ThermalGuardService {
         self.auditLog = auditLog
         self.sessionService = sessionService
         self.lidCloseActions = lidCloseActions
+        self.warn = warn
+    }
+
+    /// The production sink: one line on stderr, which is where the ADR 024
+    /// backstop and the rest of the guard already report to.
+    public static let writeToStandardError: @Sendable (String) -> Void = { line in
+        FileHandle.standardError.write(Data(line.utf8))
     }
 
     /// Live wiring: real thermal state, real clamshell bit, real display
@@ -263,7 +275,10 @@ public struct ThermalGuardService {
         }
 
         if record != before {
-            persistLatch(record, into: &outcome)
+            // The second write of a release tick. `performRelease` already
+            // announced a failed write above, and both writes target the same
+            // record, so speaking twice would only duplicate the warning.
+            persistLatch(record, into: &outcome, announce: false)
         }
         return outcome
     }
@@ -275,15 +290,32 @@ public struct ThermalGuardService {
     /// broken — the one failure mode that makes an untouched machine look
     /// protected while it is not. `TickOutcome.latchSaveFailed` carries the same
     /// fact to the callers that can do something with it.
+    ///
+    /// `announce` throttles the stderr line to at most one per tick. A release
+    /// writes the latch twice — once before `pmset sleepnow` for durability, and
+    /// again at the end of `performRelease` — so without this the retry repeats
+    /// a warning the first write already made, and the one line an operator
+    /// actually needs gets buried. The flag itself is ASSIGNED, never OR-ed: it
+    /// must describe the LAST write of the tick, so a transient failure whose
+    /// retry succeeded does not keep reporting the guard as broken.
     @discardableResult
     private func persistLatch(_ record: ThermalLatchStore.Record,
-                              into outcome: inout TickOutcome) -> Bool {
-        guard !latchStore.save(record) else { return true }
-        outcome.latchSaveFailed = true
-        FileHandle.standardError.write(Data(
-            ("[RunClosed] thermal: latch could NOT be written to \(latchStore.url.path) "
+                              into outcome: inout TickOutcome,
+                              announce: Bool = true) -> Bool {
+        let ok = latchStore.save(record)
+        // `announce: false` must never turn a failure into silence. It is the
+        // SECOND write of a release tick, and the first one already spoke — but
+        // only if the first one actually failed. When the first succeeded and
+        // this one fails (disk filling between the two writes, permissions
+        // changing, a non-release tick that mutates the record), nothing has
+        // been said yet and the operator would otherwise get a flag with no
+        // line. Announce whenever the suppression would hide a NEW failure.
+        let alreadyAnnounced = outcome.latchSaveFailed
+        outcome.latchSaveFailed = !ok
+        guard !ok, announce || !alreadyAnnounced else { return ok }
+        warn("[RunClosed] thermal: latch could NOT be written to \(latchStore.url.path) "
              + "— the sustained-heat clock will restart every tick, so the "
-             + "ten-minute release cannot fire until this is fixed\n").utf8))
+             + "ten-minute release cannot fire until this is fixed\n")
         return false
     }
 
@@ -381,10 +413,9 @@ public struct ThermalGuardService {
             }
             // Budget exhausted: PROTECTION WINS. Say so loudly.
             outcome.lidCloseVetoExhausted = true
-            FileHandle.standardError.write(Data(
-                ("[RunClosed] thermal: lid-close undo still incomplete after "
+            warn("[RunClosed] thermal: lid-close undo still incomplete after "
                  + "\(Self.maximumLidCloseVetoes) attempts; releasing anyway because heat "
-                 + "is the safety case — effects may remain applied across the sleep\n").utf8))
+                 + "is the safety case — effects may remain applied across the sleep\n")
         }
         // `.automatic` only: heat has no cross-boot widening. A stale record is
         // NOT active ownership, and the policy already refused that case — if
@@ -407,7 +438,9 @@ public struct ThermalGuardService {
             }
             // Persist the latch BEFORE asking for sleep: the Mac may go down
             // right after `sleepnow`, and a latch written afterwards would be
-            // lost with it (journal before change, ADR 009/022).
+            // lost with it (journal before change, ADR 009/022). This is the
+            // FIRST of this tick's two writes, so it is the one allowed to
+            // speak; `step()` re-persists afterwards with `announce: false`.
             persistLatch(record, into: &outcome)
             // Best effort, and NOT retried: the protective action already
             // happened, so the Mac follows its normal power management and
