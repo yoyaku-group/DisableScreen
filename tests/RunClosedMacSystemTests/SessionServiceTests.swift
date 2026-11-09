@@ -898,6 +898,48 @@ final class SessionServiceTests: XCTestCase {
                      "a step that ends nothing must not replay the last restoration")
     }
 
+    /// A CORRUPT journal must never hold the flag up.
+    ///
+    /// The restoration now runs before `applyLid(false)` inside `release()`, so
+    /// anything that could throw or block in `undoAll()` would delay — or
+    /// prevent — the one write that lets the Mac sleep. The quit path carries
+    /// an explicit corrupt-journal guard for that reason; this seam does not,
+    /// so it must be proved that none is needed: `undoAll()` on an unreadable
+    /// file returns a no-op and the release proceeds.
+    ///
+    /// The GARBAGE file is what makes this a real test: an empty journal is the
+    /// easy case (`.nothingToDo` without reading anything), while a damaged one
+    /// is what the guard exists for.
+    ///
+    /// This is a REGRESSION GUARD, not an ordering proof — it passes with the
+    /// restoration on either side of the write, because it asks whether a
+    /// damaged journal blocks the release, not where the undo sits. Its job is
+    /// to fail the day someone adds "if the journal is corrupt, do not
+    /// release", which is exactly the guard the quit path needs and this seam
+    /// must never grow.
+    func testACorruptJournalDoesNotStopTheRelease() {
+        var rig = makeRig(flag: false, ownedBoot: "A")
+        guard case .success(.started) = rig.service.start(for: 3600) else {
+            return XCTFail("expected a started session")
+        }
+        // Not JSON, not an empty file: the decoder must fail.
+        try? Data("{ this is not a journal".utf8).write(to: rig.journal.url)
+        let audio = FakeAudio(muted: false)
+        let probe = RestoreProbe(journal: rig.journal, audio: audio, flag: rig.flag)
+        rig.service.restoreLidCloseEffects = probe.seam()
+
+        rig.clock.advance(3601)
+        let step = rig.service.step()
+
+        XCTAssertEqual(probe.calls, 1, "the restoration was attempted")
+        XCTAssertTrue(rig.journal.isCorrupt,
+                      "the file really is unreadable — otherwise this proves nothing")
+        XCTAssertEqual(step.expiry, .ended(.released),
+                       "a damaged journal must not block the release")
+        XCTAssertEqual(rig.flag.value, false, "the flag came off")
+        XCTAssertNil(rig.sessionStore.load(), "the session is over")
+    }
+
     /// A due session is expiry's, not reconciliation's: `step()` ends it and
     /// does not report a reconciliation on top.
     func testStepExpiresBeforeItReconciles() {
