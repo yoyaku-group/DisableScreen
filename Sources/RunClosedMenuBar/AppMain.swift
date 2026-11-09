@@ -412,6 +412,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Report what an ADR 026 restoration did, on the paths an operator drives
+    /// directly.
+    ///
+    /// A restoration that PARTIALLY failed — a device that would not un-mute, a
+    /// process left stopped because its identity could not be re-proved — is
+    /// the one outcome a human needs to know about, because nothing else will
+    /// tell them: the tick that would have noticed has already reported
+    /// success. Same line shape as the tick's own, so one log reader sees one
+    /// format.
+    private func reportRestoration(_ outcome: LidCloseActionService.TickOutcome,
+                                   context: String) {
+        guard outcome.changed || outcome.shouldNotify || outcome.undo != nil else { return }
+        // Built in steps: the one-expression version exceeded what the type
+        // checker will do in reasonable time.
+        let undoText: String = outcome.undo?.rawValue ?? "none"
+        let resumed: String = String(describing: outcome.resumedPids)
+        let unverified: String = String(describing: outcome.unverifiedPids)
+        var notice = ""
+        if let n = outcome.notice { notice = ", notice=\(n.rawValue)" }
+        let line = "[RunClosed] lid-close (\(context)): \(undoText), "
+            + "resumed=\(resumed), unverified=\(unverified), "
+            + "audioRestoreFailed=\(outcome.audioRestoreFailed)\(notice)\n"
+        FileHandle.standardError.write(Data(line.utf8))
+    }
+
     /// Every action that may change the flag or the session calls this, so a
     /// Start, +30 min or End (or a CLI change) redraws as soon as the
     /// background read lands.
@@ -1025,11 +1050,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         withBusy {
             var service = self.makeSessionService()
             // The click IS the operator (ADR 021).
-            guard let result = LidWriteLock().tryWithLock({ service.end(byOperator: true) }) else {
+            // `endReturningRestoration`, not `end()`: ending a session restores
+            // the sound and resumes the apps BEFORE the flag falls (ADR 026),
+            // and an operator who ended a session by hand is exactly the person
+            // who must hear about a device that could not be un-muted. `end()`
+            // discards that and the failure goes silent (gate finding,
+            // `pendingRestoration lost for callers using end()`).
+            guard let result = LidWriteLock().tryWithLock({
+                service.endReturningRestoration(byOperator: true)
+            }) else {
                 self.lidError = L10n.t("Busy, try again")
                 return
             }
-            switch result {
+            let outcome = result.map(\.outcome)
+            if case .success(let pair) = result, let restored = pair.lidClose {
+                self.reportRestoration(restored, context: "session end")
+            }
+            switch outcome {
             case .success(.flagLeftOn):
                 // The session is gone, but the flag it ran on is not
                 // provably ours, so End did not turn it off (B2).

@@ -1177,15 +1177,33 @@ func cmdSession(_ rest: [String]) -> Int32 {
         }
         let byOperator = args == ["--operator"]
         var svc = makeSessionService()
-        let result = LidWriteLock().withLock { svc.end(byOperator: byOperator) }
+        // `endReturningRestoration`: the ADR 026 restoration runs before the
+        // flag falls, and a script that ends a session must be able to see
+        // that a device could not be un-muted rather than read a bare "ok".
+        let result = LidWriteLock().withLock {
+            svc.endReturningRestoration(byOperator: byOperator)
+        }
         switch result {
-        case .success(let outcome):
+        case .success(let pair):
+            let outcome = pair.outcome
             emitJSON([
                 "schemaVersion": kSchemaVersion,
                 "bootID": clock.bootID,
                 "action": "end",
                 "outcome": outcome.rawValue,
                 "error": outcome.failureMessage as Any? ?? NSNull(),
+                // `null` when no lid-close layer had anything to undo, so the
+                // key's presence never implies a recovery ran.
+                "lidClose": pair.lidClose.map { restored in
+                    [
+                        "undo": restored.undo?.rawValue as Any? ?? NSNull(),
+                        "changed": restored.changed,
+                        "resumedPids": restored.resumedPids.map(Int.init),
+                        "unverifiedPids": restored.unverifiedPids.map(Int.init),
+                        "audioRestoreFailed": restored.audioRestoreFailed,
+                        "audioDeviceGone": restored.audioDeviceGone,
+                    ] as [String: Any]
+                } as Any? ?? NSNull(),
             ])
             if outcome == .flagLeftOn {
                 // The record is gone, but B2 kept the flag ON: not ours.
