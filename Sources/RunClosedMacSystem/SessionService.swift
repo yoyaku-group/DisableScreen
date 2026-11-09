@@ -48,9 +48,17 @@ public struct SessionService {
     /// `nil` means the caller has no lid-close feature wired (the CLI paths
     /// that never apply these effects), not "skip the restoration".
     public var restoreLidCloseEffects: (@Sendable () -> LidCloseActionService.TickOutcome?)?
-    /// What the last `release()` restoration reported, so an outcome can carry
-    /// it to the operator. Set on every release, `nil` when nothing ran.
-    public private(set) var lastRestoration: LidCloseActionService.TickOutcome?
+    /// What the `release()` in progress just reported.
+    ///
+    /// PRIVATE, and cleared at the TOP of `step()`: the restoration travels to
+    /// the caller inside the `StepOutcome` that call RETURNS, never as
+    /// instance state someone else can read out of context. An earlier
+    /// version exposed a public property for this and the gate was right to
+    /// flag it — a plain field stays set until the next `step()`, so a reader
+    /// arriving after a tick that ended nothing would replay the previous
+    /// release's recovery: a repeated notice, a spurious `changed` signal, and
+    /// a backstop auditing a minute that ended nothing.
+    private var pendingRestoration: LidCloseActionService.TickOutcome?
 
     public init(
         store: SessionStore,
@@ -279,11 +287,28 @@ public struct SessionService {
     /// turn it off with `end`. An AUTOMATIC End (`byOperator: false`) is not a
     /// human and still releases only a flag RunClosed owns.
     public mutating func end(byOperator: Bool = false) -> Result<SessionEndOutcome, SessionError> {
+        endReturningRestoration(byOperator: byOperator).map(\.outcome)
+    }
+
+    /// `end()`, plus the ADR 026 restoration it performed.
+    ///
+    /// The popup and the CLI need the second value: ending a session restores
+    /// the sound and resumes the apps BEFORE the flag falls, and an operator
+    /// who ended a session manually is exactly the person who wants to know
+    /// that a device could not be un-muted. Returning it with the result keeps
+    /// it out of instance state, which is where it went wrong once.
+    public mutating func endReturningRestoration(byOperator: Bool = false)
+        -> Result<(outcome: SessionEndOutcome,
+                   lidClose: LidCloseActionService.TickOutcome?), SessionError> {
         guard let session = store.load() else { return .failure(.noSession) }
+        // Cleared first, for the same reason `step()` does it: what the
+        // outcome carries must belong to THIS call.
+        pendingRestoration = nil
         let initiator: LidMutationService.Initiator = session.isIndefinite && byOperator
             ? .operatorCommand
             : Self.releaseInitiator(for: session, currentBootID: continuous.bootID)
-        return .success(release(session, initiator: initiator, clearingRecord: true))
+        let outcome = release(session, initiator: initiator, clearingRecord: true)
+        return .success((outcome, pendingRestoration))
     }
 
     // MARK: — Expiry (caller holds LidWriteLock — called from the guard tick)
@@ -424,7 +449,7 @@ public struct SessionService {
         // Cleared first: a restoration reported by an EARLIER release must not
         // be carried into a step that ended nothing, or the operator gets a
         // notice about events this tick never touched.
-        lastRestoration = nil
+        pendingRestoration = nil
         let expiry = expireIfDue()
         let reconciled = expiry == .notDue ? reconcileOrphan() : nil
         return StepOutcome(expiry: expiry, reconciled: reconciled,
@@ -433,7 +458,8 @@ public struct SessionService {
                            // deadline is actually due, so a non-due step
                            // reports `nil` — which is the truth: nothing was
                            // restored because nothing was ended.
-                           lidClose: lastRestoration)
+                           //
+                           lidClose: pendingRestoration)
     }
 
     // MARK: — Low-battery interplay (ADR 023 §4)
@@ -519,7 +545,7 @@ public struct SessionService {
         // anything, so "no effects applied" costs a file read and nothing
         // else. Making it conditional would mean re-deriving here a question
         // the journal already answers.
-        lastRestoration = restoreLidCloseEffects?()
+        pendingRestoration = restoreLidCloseEffects?()
         let result = applyLid(false, initiator)
         switch result {
         case .success(let op) where op.state == .verified:

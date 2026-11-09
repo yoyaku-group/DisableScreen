@@ -804,15 +804,14 @@ public struct RecoveryBackstopService {
         guardService.lidCloseActions = service
         // The session step in this minute may have ended a session, and
         // `SessionService.release()` restored the lid-close effects BEFORE
-        // letting the flag fall. Merge that recovery in: dropping it would
+        // letting the flag fall. Fold that recovery in: dropping it would
         // report a cleaner minute than what happened, losing the resumed pids
         // and the `changed` signal that decide whether this minute is audited.
         //
-        // MERGE through `TickOutcome.merging`, never field by field: the one
-        // place that knows the full field list.
-        if let restored = sessionService.lastRestoration {
-            outcome = restored.merging(outcome)
-        }
+        // The restoration travels on the `StepOutcome` that call RETURNED —
+        // never from instance state, which is where a stale value once
+        // produced a notice every 60 s for an event already over.
+        outcome = LowBatteryGuardService.folding(report.session, into: outcome) ?? outcome
         report.lidClose = outcome
         report.lidCloseStepRan = true
         // A no-op minute writes nothing: the audit is once per ACTION, not once
